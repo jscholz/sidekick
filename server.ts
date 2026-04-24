@@ -969,6 +969,14 @@ async function handleHermesSessionsList(req, res) {
           (SELECT c.name FROM store.responses r
              JOIN store.conversations c ON c.response_id = r.response_id
              WHERE json_extract(r.data, '$.session_id') = s.id
+               -- Only accept sidekick/sideclaw conversation names. Hermes
+               -- sometimes writes conversation rows keyed by an UPSTREAM
+               -- session id (e.g. a whatsapp session's YYYYMMDD_... id)
+               -- when the api_server replies on behalf of another source;
+               -- using those as the drawer row id causes a collision with
+               -- the source session that owns the same id string, and
+               -- both rows end up painted .active on match.
+               AND (c.name LIKE 'sidekick-%' OR c.name LIKE 'sideclaw-%')
              ORDER BY r.accessed_at DESC LIMIT 1),
           s.id)
         ELSE s.id END AS id,
