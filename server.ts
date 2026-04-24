@@ -396,7 +396,7 @@ async function handleSpotifyCheck(req, res) {
 // targets that can't afford a Chromium process).
 import { chromium } from 'playwright-core';
 
-const SCREENSHOT_DISABLED = process.env.SIDEKICK_DISABLE_SCREENSHOT === '1';
+const SCREENSHOT_DISABLED = !!cfgVal('SIDEKICK_DISABLE_SCREENSHOT', 'server.disable_screenshot', false);
 
 let browser = null;
 const screenshotCache = new Map(); // url → { at, buffer }
@@ -757,9 +757,9 @@ function handleConfig(_req, res) {
 // Keeps the upstream URL + API key server-side (off the browser) and streams
 // the SSE response through unchanged. Works with OpenAI, Ollama, LMStudio,
 // Groq, vLLM, Together — anything that speaks POST /v1/chat/completions.
-const OPENAI_COMPAT_URL = process.env.SIDEKICK_OPENAI_COMPAT_URL
-  || 'http://localhost:11434/v1/chat/completions';  // Ollama default
-const OPENAI_COMPAT_KEY = process.env.SIDEKICK_OPENAI_COMPAT_KEY || '';
+const OPENAI_COMPAT_URL = cfgVal('SIDEKICK_OPENAI_COMPAT_URL', 'backend.openai_compat.url',
+  'http://localhost:11434/v1/chat/completions') as string;  // Ollama default
+const OPENAI_COMPAT_KEY = process.env.SIDEKICK_OPENAI_COMPAT_KEY || '';  // secret — env only
 
 async function handleOpenAICompatChat(req, res) {
   const chunks = [];
@@ -793,8 +793,8 @@ async function handleOpenAICompatChat(req, res) {
 // upstream loopback-bound and injects the bearer token server-side so the
 // browser never handles it. Pipes responses (including SSE for
 // /responses) straight through without buffering — SSE breaks if buffered.
-const HERMES_UPSTREAM = process.env.SIDEKICK_HERMES_URL || 'http://127.0.0.1:8642';
-const HERMES_TOKEN = process.env.SIDEKICK_HERMES_TOKEN || '';
+const HERMES_UPSTREAM = cfgVal('SIDEKICK_HERMES_URL', 'backend.hermes.url', 'http://127.0.0.1:8642') as string;
+const HERMES_TOKEN = process.env.SIDEKICK_HERMES_TOKEN || '';  // secret — env only
 
 // ─── Hermes session browser (direct sqlite read of response_store.db) ────────
 // Hermes chains conversation turns server-side via previous_response_id,
@@ -806,22 +806,35 @@ const HERMES_TOKEN = process.env.SIDEKICK_HERMES_TOKEN || '';
 
 const execFileP = promisify(execFile);
 const HOME = os.homedir();
-const HERMES_STORE_DB = process.env.SIDEKICK_HERMES_STORE_DB
-  || path.join(HOME, '.hermes/response_store.db');
-const HERMES_STATE_DB = process.env.SIDEKICK_HERMES_STATE_DB
-  || path.join(HOME, '.hermes/state.db');
-const HERMES_CLI = process.env.SIDEKICK_HERMES_CLI
-  || path.join(HOME, '.local/bin/hermes');
+/** Expand ~ / $HOME prefixes in config-supplied paths. */
+function expandHome(p: string): string {
+  if (!p) return p;
+  if (p.startsWith('~/')) return path.join(HOME, p.slice(2));
+  if (p.startsWith('$HOME/')) return path.join(HOME, p.slice(6));
+  return p;
+}
+const HERMES_STORE_DB = expandHome(cfgVal('SIDEKICK_HERMES_STORE_DB', 'backend.hermes.store_db',
+  path.join(HOME, '.hermes/response_store.db')) as string);
+const HERMES_STATE_DB = expandHome(cfgVal('SIDEKICK_HERMES_STATE_DB', 'backend.hermes.state_db',
+  path.join(HOME, '.hermes/state.db')) as string);
+const HERMES_CLI = expandHome(cfgVal('SIDEKICK_HERMES_CLI', 'backend.hermes.cli_path',
+  path.join(HOME, '.local/bin/hermes')) as string);
 // Filter so random test names / non-sidekick conversations don't clutter the UI.
 // hermes adapter generates names as 'sidekick-main' or 'sidekick-<timestamp>'.
-const HERMES_SESSION_PREFIX = process.env.SIDEKICK_HERMES_SESSION_PREFIX || 'sidekick-';
+const HERMES_SESSION_PREFIX = cfgVal('SIDEKICK_HERMES_SESSION_PREFIX',
+  'backend.hermes.session_prefix', 'sidekick-') as string;
 // Source filter for state.db/sessions — hermes tags each session with where
 // it came from ('api_server' = sidekick webchat; 'telegram' = telegram bot;
 // 'cli' = terminal sessions). Sidekick drawer shows the channels the user
 // actually talks through; 'cli' is excluded by default since those are
-// ad-hoc debug sessions. Override via SIDEKICK_HERMES_SESSION_SOURCES.
-const HERMES_SESSION_SOURCES = (process.env.SIDEKICK_HERMES_SESSION_SOURCES
-  || 'api_server,telegram').split(',').map(s => s.trim()).filter(Boolean);
+// ad-hoc debug sessions.
+const HERMES_SESSION_SOURCES: string[] = (() => {
+  const env = process.env.SIDEKICK_HERMES_SESSION_SOURCES;
+  if (env) return env.split(',').map(s => s.trim()).filter(Boolean);
+  const cfg = DEPLOY_CFG?.backend?.hermes?.session_sources;
+  if (Array.isArray(cfg)) return cfg.map((s: any) => String(s).trim()).filter(Boolean);
+  return ['api_server', 'telegram'];
+})();
 
 async function sqlQuery(db: string, sql: string): Promise<any[]> {
   const { stdout } = await execFileP('sqlite3', ['-json', db, sql], {
@@ -1299,8 +1312,9 @@ const zcWss = new WebSocketServer({ noServer: true });
 // The zeroclaw gateway is bound to loopback on the Pi. This server proxies
 // browser WS connections on /ws/zeroclaw to the upstream gateway, so the
 // gateway stays unexposed and the browser only speaks to the same origin.
-const ZC_UPSTREAM = process.env.SIDEKICK_ZEROCLAW_WS || 'ws://127.0.0.1:42617/ws/chat';
-const ZC_TOKEN = process.env.SIDEKICK_ZEROCLAW_TOKEN || '';
+const ZC_UPSTREAM = cfgVal('SIDEKICK_ZEROCLAW_WS', 'backend.zeroclaw.ws_url',
+  'ws://127.0.0.1:42617/ws/chat') as string;
+const ZC_TOKEN = process.env.SIDEKICK_ZEROCLAW_TOKEN || '';  // secret — env only
 
 // ── Canvas broadcast: POST /canvas/show → all connected /ws/canvas clients ──
 // The canvas CLI tool POSTs a CanvasCard JSON here. We validate the envelope
