@@ -109,6 +109,28 @@ function dispatchSSEEvent(raw: string): void {
   handleEvent(type, payload);
 }
 
+/** Strip Gemma-4-style reasoning tag leftovers. Hermes's stream processing
+ *  removes the `<thought>...</thought>` XML wrappers but sometimes leaves
+ *  the tag-NAME as standalone content ("thought" as the entire message).
+ *  Same for `thinking`, `reasoning`, `analysis`, `commentary`.
+ *
+ *  Applied to both live delta text and restored-history text so the user
+ *  never sees these single-word placeholder bubbles. Upstream fix is
+ *  tracked in project_harmony_leak_findings.md; this sidekick-scoped
+ *  stripper is the pragmatic path until hermes's /v1/responses SSE
+ *  output runs through the same tag-strip the CLI path already does. */
+const REASONING_TAG_RE = /^(?:thought|thinking|reasoning|analysis|commentary)(?:\s|$)/i;
+export function stripReasoningLeak(text: string): string {
+  if (!text) return text;
+  // Drop entire message if it's JUST a reasoning-tag name
+  if (/^(?:thought|thinking|reasoning|analysis|commentary)\s*$/i.test(text.trim())) {
+    return '';
+  }
+  // Strip a leading "thought\n..." preamble that's a tag-name remnant
+  const trimmed = text.replace(/^\s*(?:thought|thinking|reasoning|analysis|commentary)\s*\n+/i, '');
+  return trimmed;
+}
+
 function handleEvent(type: string, d: any): void {
   switch (type) {
     case 'response.created':
@@ -127,8 +149,10 @@ function handleEvent(type: string, d: any): void {
         cumulativeText = '';
       }
       cumulativeText += delta;
+      const cleaned = stripReasoningLeak(cumulativeText);
+      if (!cleaned) return;   // all-reasoning so far; wait for real text
       subs?.onActivity?.({ working: true, detail: 'streaming' });
-      subs?.onDelta?.({ replyId: currentReplyId, cumulativeText });
+      subs?.onDelta?.({ replyId: currentReplyId, cumulativeText: cleaned });
       return;
     }
 
@@ -163,7 +187,7 @@ function handleEvent(type: string, d: any): void {
       currentReplyId = null;
       cumulativeText = '';
       subs?.onActivity?.({ working: false });
-      subs?.onFinal?.({ replyId, text: finalText });
+      subs?.onFinal?.({ replyId, text: stripReasoningLeak(finalText) });
       return;
     }
 

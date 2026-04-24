@@ -39,6 +39,7 @@ import * as voice from './pipelines/classic/voice.ts';
 import * as replyPlayer from './pipelines/classic/replyPlayer.ts';
 import * as replyCache from './pipelines/classic/replyCache.ts';
 import * as bgTrace from './bgTrace.ts';
+import { stripReasoningLeak } from './backends/hermes.ts';
 
 // Card kind modules
 import imageCard from './canvas/cards/image.ts';
@@ -1414,7 +1415,11 @@ function replaySessionMessages(id: string, messages: any[]) {
   chat.trackViewedSession(id);
   const label = getAgentLabel();
   for (const m of messages) {
-    const text = (m.content || '').trim();
+    const raw = (m.content || '').trim();
+    // Same stripper as the live delta path — hides Gemma reasoning-tag
+    // leftovers ("thought" / "thinking" / "reasoning" bare words) from
+    // historical replay.
+    const text = stripReasoningLeak(raw);
     if (!text) continue;
     // Hermes state.db stores timestamp as float UNIX seconds. chat.addLine's
     // formatTime passes through new Date(ts) which expects milliseconds, so

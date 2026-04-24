@@ -69,6 +69,37 @@ function cfgAsJS(): any {
   return deployDoc ? deployDoc.toJS() : {};
 }
 let DEPLOY_CFG = cfgAsJS();
+/** Last-loaded mtime so reloadConfigIfChanged can skip unchanged files. */
+let lastConfigMtime = CONFIG_PATH && fsSync.existsSync(CONFIG_PATH)
+  ? fsSync.statSync(CONFIG_PATH).mtimeMs : 0;
+
+/** Cheap hook — stat the config file; if newer than last load, re-parse
+ *  + rebuild any derived state (preferred-model globs). Called from
+ *  endpoints that get polled by the settings UI (models-catalog on a
+ *  30s interval, /config on settings-panel open) so VSCode edits to
+ *  sidekick.config.yaml get picked up without a service restart. */
+function reloadConfigIfChanged(): boolean {
+  if (!CONFIG_PATH || !fsSync.existsSync(CONFIG_PATH)) return false;
+  try {
+    const m = fsSync.statSync(CONFIG_PATH).mtimeMs;
+    if (m <= lastConfigMtime) return false;
+    lastConfigMtime = m;
+    deployDoc = loadDeployConfigDoc();
+    DEPLOY_CFG = cfgAsJS();
+    // Re-derive any runtime state that captured config values at startup.
+    const cfg = DEPLOY_CFG?.models?.preferred;
+    if (Array.isArray(cfg)) {
+      rebuildPreferredModels(cfg.map((s: any) => String(s).trim()).filter(Boolean));
+    } else {
+      rebuildPreferredModels([]);
+    }
+    console.log('[config] reloaded — preferred globs:', PREFERRED_MODELS_RAW);
+    return true;
+  } catch (e: any) {
+    console.warn('[config] reload failed:', e.message);
+    return false;
+  }
+}
 /** Resolve a value by precedence: env var → config file → fallback. */
 function cfgVal<T>(envName: string, cfgPath: string, fallback: T): T {
   const env = process.env[envName];
@@ -952,6 +983,13 @@ async function handleHermesSessionsList(req, res) {
          ORDER BY id DESC LIMIT 1) AS snippet
     FROM sessions s
     WHERE s.source IN (${sourceList})
+      -- Hide subagent/delegate spawns. Hermes's delegate tool creates
+      -- new api_server sessions as children of the main session (tracked
+      -- via parent_session_id). They're agent-internal, not user-facing
+      -- conversations — showing them in the drawer confused the user
+      -- into thinking their message went "to a new session" when really
+      -- it stayed in the parent and just spawned delegate work.
+      AND s.parent_session_id IS NULL
     ORDER BY lastMessageAt DESC NULLS LAST
     LIMIT ${limit}
   `;
@@ -1120,6 +1158,13 @@ async function handleHermesModelsCatalog(req, res) {
   // its catalog directly and return it in the ModelEntry shape the
   // settings picker expects. OPENROUTER_API_KEY is read server-side so
   // the client never sees it; catalog listing doesn't strictly require
+  // Pick up any edits to models.preferred in sidekick.config.yaml since
+  // last load (VSCode save, manual edit, etc.). mtime-gated so cost is a
+  // stat syscall when nothing changed. The settings UI polls this
+  // endpoint every 30s, so yaml edits land in the picker within one
+  // poll tick without a service restart.
+  reloadConfigIfChanged();
+
   // an API key but providing one gets better availability.
   const now = Date.now();
   const havePrefs = PREFERRED_MODELS_GLOBS.length > 0;

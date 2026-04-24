@@ -223,7 +223,10 @@ function openMenu(li: HTMLLIElement, s: any) {
 }
 
 async function promptRename(s: any) {
-  const current = s.title || '';
+  // Prefill with what the user SEES in the drawer: title (if set)
+  // falling back to the snippet pseudo-title, so they're editing the
+  // label they know rather than an empty box.
+  const current = s.title || s.snippet?.slice(0, 80) || '';
   const title = prompt('New title for this session:', current);
   if (!title || title === current) return;
   try {
