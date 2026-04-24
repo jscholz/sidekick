@@ -233,7 +233,11 @@ export const hermesAdapter = {
     const body = {
       // Omit model so server falls back to config.yaml's default.
       conversation: conversationName,
-      input: opts?.voice ? `[voice] ${text}` : text,
+      // Hermes doesn't use the "[voice]" in-band hint (that was an openclaw
+      // convention — its agent was trained to be lenient with transcription
+      // errors when it saw the prefix). Hermes models aren't, so the prefix
+      // just leaks into the transcript without helping interpretation.
+      input: text,
       stream: true,
     };
 
