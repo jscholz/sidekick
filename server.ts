@@ -711,6 +711,13 @@ const HERMES_CLI = process.env.SIDEKICK_HERMES_CLI
 // Filter so random test names / non-sidekick conversations don't clutter the UI.
 // hermes adapter generates names as 'sidekick-main' or 'sidekick-<timestamp>'.
 const HERMES_SESSION_PREFIX = process.env.SIDEKICK_HERMES_SESSION_PREFIX || 'sidekick-';
+// Source filter for state.db/sessions — hermes tags each session with where
+// it came from ('api_server' = sidekick webchat; 'telegram' = telegram bot;
+// 'cli' = terminal sessions). Sidekick drawer shows the channels the user
+// actually talks through; 'cli' is excluded by default since those are
+// ad-hoc debug sessions. Override via SIDEKICK_HERMES_SESSION_SOURCES.
+const HERMES_SESSION_SOURCES = (process.env.SIDEKICK_HERMES_SESSION_SOURCES
+  || 'api_server,telegram').split(',').map(s => s.trim()).filter(Boolean);
 
 async function sqlQuery(db: string, sql: string): Promise<any[]> {
   const { stdout } = await execFileP('sqlite3', ['-json', db, sql], {
@@ -725,25 +732,56 @@ async function handleHermesSessionsList(req, res) {
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
   // Strict prefix sanitization — value is used in string-concatenated SQL.
   const prefix = HERMES_SESSION_PREFIX.replace(/[^a-zA-Z0-9_\-]/g, '');
-  // ATTACH state.db so we can pull title from its sessions table alongside
-  // the conversation + response data in response_store.db. Titles get set
-  // via `hermes sessions rename` (see rename route below) and stored on
-  // state.db/sessions.title keyed by derived session UUID.
+  // Authoritative source is state.db/sessions — every channel (api_server /
+  // telegram / cli) writes here. Previously we queried response_store.db/
+  // conversations by 'sidekick-' name prefix, which hid telegram sessions
+  // entirely (telegram goes straight to state.db without a response_store
+  // conversations row). New approach:
+  //   - For api_server (sidekick webchat), join to conversations to get the
+  //     stable `sidekick-*` id the hermes adapter uses for resume.
+  //   - For telegram (and any other non-webchat source), use the session
+  //     UUID directly as the id — drawer renders these as read-only
+  //     transcripts (send path still routes through the active sidekick
+  //     conversation).
+  const sources = HERMES_SESSION_SOURCES
+    .map(s => s.replace(/[^a-zA-Z0-9_]/g, ''))
+    .filter(Boolean);
+  if (!sources.length) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ sessions: [] }));
+    return;
+  }
+  const sourceList = sources.map(s => `'${s}'`).join(',');
+  // Resolve the conversation name lazily via scalar subquery so we don't
+  // fan out into N rows when a session has N turns (each turn is a
+  // response row in response_store.db). Returns exactly one row per
+  // state.db session.
   const sql = `
-    ATTACH '${HERMES_STATE_DB.replace(/'/g, "''")}' AS s;
-    SELECT c.name AS id, r.accessed_at AS lastMessageAt,
-      json_array_length(json_extract(r.data, '$.conversation_history')) AS messageCount,
-      substr(json_extract(r.data, '$.conversation_history[#-1].content'), 1, 120) AS snippet,
-      s.sessions.title AS title
-    FROM conversations c
-    LEFT JOIN responses r ON r.response_id = c.response_id
-    LEFT JOIN s.sessions ON s.sessions.id = json_extract(r.data, '$.session_id')
-    WHERE c.name LIKE '${prefix}%'
-    ORDER BY r.accessed_at DESC
+    ATTACH '${HERMES_STORE_DB.replace(/'/g, "''")}' AS store;
+    SELECT
+      CASE WHEN s.source = 'api_server'
+        THEN COALESCE(
+          (SELECT c.name FROM store.responses r
+             JOIN store.conversations c ON c.response_id = r.response_id
+             WHERE json_extract(r.data, '$.session_id') = s.id
+               AND c.name LIKE '${prefix}%'
+             ORDER BY r.accessed_at DESC LIMIT 1),
+          s.id)
+        ELSE s.id END AS id,
+      s.source,
+      s.title,
+      s.message_count AS messageCount,
+      (SELECT MAX(timestamp) FROM messages m WHERE m.session_id = s.id) AS lastMessageAt,
+      (SELECT substr(content, 1, 120) FROM messages m
+         WHERE m.session_id = s.id AND m.role IN ('user','assistant') AND m.content IS NOT NULL
+         ORDER BY id DESC LIMIT 1) AS snippet
+    FROM sessions s
+    WHERE s.source IN (${sourceList})
+    ORDER BY lastMessageAt DESC NULLS LAST
     LIMIT ${limit}
   `;
   try {
-    const rows = await sqlQuery(HERMES_STORE_DB, sql);
+    const rows = await sqlQuery(HERMES_STATE_DB, sql);
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ sessions: rows }));
   } catch (e: any) {
@@ -753,17 +791,25 @@ async function handleHermesSessionsList(req, res) {
   }
 }
 
-/** Map a conversation name to the derived session UUID (stored inside
- *  responses.data.session_id). Needed because `hermes sessions rename /
- *  delete` take the UUID, not the conversation name. Returns null if the
- *  conversation or its response row can't be found. */
+/** Map an id used by the drawer to the canonical state.db session UUID.
+ *  Sidekick webchat rows come in as conversation names ('sidekick-*') —
+ *  we look those up via response_store.db → responses.data.session_id.
+ *  Telegram / cli rows come in as the UUID already (they have no
+ *  response_store conversations row), so we pass them through after a
+ *  sanity check that state.db/sessions has that row. Returns null if
+ *  the id doesn't resolve to a known session. */
 async function lookupSessionUuid(name: string): Promise<string | null> {
-  const sql = `SELECT json_extract(r.data, '$.session_id') AS uuid
-    FROM conversations c
-    LEFT JOIN responses r ON r.response_id = c.response_id
-    WHERE c.name='${name}'`;
-  const rows = await sqlQuery(HERMES_STORE_DB, sql);
-  return rows[0]?.uuid || null;
+  if (name.startsWith('sidekick-') || name.startsWith('sideclaw-')) {
+    const sql = `SELECT json_extract(r.data, '$.session_id') AS uuid
+      FROM conversations c
+      LEFT JOIN responses r ON r.response_id = c.response_id
+      WHERE c.name='${name}'`;
+    const rows = await sqlQuery(HERMES_STORE_DB, sql);
+    return rows[0]?.uuid || null;
+  }
+  const rows = await sqlQuery(HERMES_STATE_DB,
+    `SELECT id FROM sessions WHERE id='${name}' LIMIT 1`);
+  return rows[0]?.id || null;
 }
 
 async function handleHermesSessionRename(req, res, name: string) {
@@ -977,34 +1023,40 @@ async function handleHermesModelSet(req, res) {
 }
 
 async function handleHermesSessionMessages(req, res, name: string) {
-  // Session names are user-chosen strings; we only accept the chars the
-  // adapter actually produces ('sidekick-main', 'sidekick-<base36>').
+  // id is either a sidekick conversation name ('sidekick-*') we need to
+  // resolve to a session UUID, or a state.db session UUID we can query
+  // directly (telegram / cli / any other channel where hermes creates
+  // sessions without a response_store.db conversations row).
   if (!/^[a-zA-Z0-9_-]+$/.test(name) || name.length > 128) {
     res.writeHead(400, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'invalid session id' }));
     return;
   }
-  // AUTHORITATIVE read path: state.db/messages keyed by the session UUID
-  // derived from responses.data.session_id. Earlier implementation read from
-  // responses.data.conversation_history but that payload compounds across
-  // turns (each response embeds its full input-context, which includes
-  // prior turns' contexts, growing recursively) — rendering it produced
-  // wildly duplicated bubbles in the chat. state.db/messages is the
-  // per-turn log hermes updates exactly once per user/assistant entry.
-  const uuidSql = `SELECT json_extract(r.data, '$.session_id') AS uuid
-    FROM conversations c LEFT JOIN responses r ON r.response_id = c.response_id
-    WHERE c.name='${name}'`;
+  // AUTHORITATIVE read path: state.db/messages keyed by the session UUID.
+  // Earlier implementation read from responses.data.conversation_history
+  // but that payload compounds across turns (each response embeds its
+  // full input-context, which includes prior turns' contexts, growing
+  // recursively) — rendering it produced wildly duplicated bubbles in
+  // the chat. state.db/messages is the per-turn log hermes updates
+  // exactly once per user/assistant entry.
   try {
-    const uuidRows = await sqlQuery(HERMES_STORE_DB, uuidSql);
-    const uuid = uuidRows[0]?.uuid;
+    // Resolve the UUID: sidekick names go through conversations lookup;
+    // anything else is assumed to already be a state.db session id.
+    let uuid: string | null = null;
+    if (name.startsWith('sidekick-') || name.startsWith('sideclaw-')) {
+      const uuidSql = `SELECT json_extract(r.data, '$.session_id') AS uuid
+        FROM conversations c LEFT JOIN responses r ON r.response_id = c.response_id
+        WHERE c.name='${name}'`;
+      const uuidRows = await sqlQuery(HERMES_STORE_DB, uuidSql);
+      uuid = uuidRows[0]?.uuid || null;
+    } else {
+      uuid = name;
+    }
     if (!uuid) {
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'session not found' }));
       return;
     }
-    // session_id values are either UUIDs or hermes-generated timestamp_hash
-    // strings. Sanity check so the value going into the next SQL query can't
-    // break things.
     if (!/^[a-zA-Z0-9_-]+$/.test(uuid) || uuid.length > 128) {
       res.writeHead(500, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'derived session_id failed validation' }));
