@@ -153,28 +153,67 @@
     background: linear-gradient(180deg, var(--header-grad-top) 0%, var(--header-grad-bot) 100%);
     border-bottom: 1px solid var(--border);
   }
-  .header .logo {
-    width: 36px; height: 36px;
-    display: inline-block;
-    /* SVG-as-<img> ignores CSS color — the SVG document is isolated and
-     * its fill="currentColor" resolves against its own root, not this
-     * element's computed color. Using mask-image instead flips the
-     * paradigm: the element's background-color IS the rendered color,
-     * and the SVG just carves the shape out of it. That makes
-     * var(--primary) responsive to theme (sage light vs sage dark). */
+  /* Brand layout: [S]  [subtitle top-right / idekick bottom-right] [version]
+   * The S-mark spans both rows vertically so its bottom visually aligns
+   * with idekick's baseline; subtitle sits top-right of the S, shifted
+   * right to clear the mark. Grid makes the spanning + alignment
+   * trivially expressible.
+   *
+   * Wordmark: logo-as-S bars sage via --primary; chevron + text share
+   * --fg so the chevron reads as part of the letterform.
+   */
+  .header .brand {
+    display: grid;
+    grid-template-columns: auto auto auto;
+    grid-template-rows: auto auto;
+    column-gap: 4px;
+    align-items: end;
+    margin: 0; line-height: 1;
+    font-weight: 700; font-size: 22px; letter-spacing: -0.02em;
+    color: var(--fg);
+  }
+  .header .wm-s {
+    position: relative; display: inline-block;
+    /* Span both rows vertically; logo's square viewBox has built-in
+     * padding (~15% per side) so we oversize to ~2em to make the S
+     * glyph match cap-height of the adjacent text, then pull "idekick"
+     * back in via negative margin-left to close the visible gap. */
+    grid-column: 1; grid-row: 1 / span 2;
+    width: 2em; height: 2em;
+    align-self: end;        /* bottom-justify */
+    margin-bottom: -0.25em;  /* visual bottom of S sits at idekick baseline */
+  }
+  .header .wm-bars,
+  .header .wm-chevron {
+    position: absolute; inset: 0; display: block;
+  }
+  .header .wm-bars {
     background-color: var(--primary);
     mask: url(/assets/icon.svg) center/contain no-repeat;
     -webkit-mask: url(/assets/icon.svg) center/contain no-repeat;
   }
-  .header .brand { display: flex; flex-direction: column; line-height: 1.1; }
-  .header .title { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
-  .header .title .version {
-    font-family: var(--font-mono); font-size: 10.5px; font-weight: 400;
-    color: var(--muted); opacity: 0.6; letter-spacing: 0.03em; margin-left: 4px;
+  .header .wm-chevron {
+    background-color: var(--fg);
+    mask: url(/assets/icon-chevron.svg) center/contain no-repeat;
+    -webkit-mask: url(/assets/icon-chevron.svg) center/contain no-repeat;
   }
   .header .subtitle {
-    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.18em;
-    text-transform: uppercase; color: var(--primary); margin-top: 3px;
+    grid-column: 2 / span 2; grid-row: 1;
+    align-self: start;
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 400;
+    letter-spacing: 0.18em; text-transform: uppercase; color: var(--primary);
+  }
+  .header .wm-rest {
+    grid-column: 2; grid-row: 2;
+    /* Pull left to close the visible gap — the S's bounding box has
+     * padding beyond the rightmost bars. Tune if it kisses the bars. */
+    margin-left: -0.35em;
+  }
+  .header .version {
+    grid-column: 3; grid-row: 2;
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 400;
+    color: var(--muted); opacity: 0.6; letter-spacing: 0.03em;
+    padding-left: 6px; padding-bottom: 2px;
   }
   .header .status {
     margin-left: auto; font-family: var(--font-mono); font-size: calc(var(--content-size) - 3px);
@@ -550,6 +589,28 @@
     outline-offset: 2px;
   }
   #settings .hint { color: var(--muted); font-size: calc(var(--content-size) - 2px); }
+
+  /* Keyterms chip input — single-line entry + flex-wrap chip list. One
+   * chip per term; Enter/comma commits the input; × removes. Persists
+   * through /api/keyterms as newline-separated text (same on-disk format
+   * as before, just a different UI over it). */
+  .keyterms-chips {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    width: 100%; margin-bottom: 6px;
+  }
+  .kt-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 4px 3px 8px; border-radius: 12px;
+    background: var(--primary-soft); color: var(--fg);
+    font-size: calc(var(--content-size) - 2px); line-height: 1;
+  }
+  .kt-chip-x {
+    border: none; background: transparent; color: var(--muted);
+    font-size: 16px; line-height: 1; cursor: pointer;
+    padding: 0 4px; border-radius: 50%;
+  }
+  .kt-chip-x:hover { background: var(--surface-2); color: var(--fg); }
+  #set-stt-keyterms { flex: 1; min-width: 160px; }
 
   /* ── Transcript ── */
   .transcript {

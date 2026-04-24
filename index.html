@@ -53,11 +53,15 @@
 </aside>
 
 <div class="header">
-  <span class="logo" role="img" aria-label="SideKick"></span>
-  <div class="brand">
-    <span class="title">SideKick <span class="version" id="app-version">—</span></span>
+  <h1 class="brand" aria-label="SideKick Agent Portal">
+    <span class="wm-s" aria-hidden="true">
+      <span class="wm-bars"></span>
+      <span class="wm-chevron"></span>
+    </span>
     <span class="subtitle">Agent Portal</span>
-  </div>
+    <span class="wm-rest">idekick</span>
+    <span class="version" id="app-version">—</span>
+  </h1>
   <span class="status" id="status"><span class="dot"></span><span id="status-text">Not connected</span></span>
 </div>
 
@@ -231,9 +235,10 @@
       <span class="hint">switch to browser STT on Deepgram stall — off keeps Deepgram reconnecting</span>
     </div>
     <div class="row row-wide">
-      <label for="set-stt-keyterms">STT keyterms</label>
-      <textarea id="set-stt-keyterms" rows="6" placeholder="# one term per line, # for comments"></textarea>
-      <span class="hint">edits save to apps/sidekick/keyterms.txt on the server — takes effect on next mic-stream start</span>
+      <label>STT keyterms</label>
+      <div class="keyterms-chips" id="keyterms-chips" aria-label="current keyterms"></div>
+      <input type="text" id="set-stt-keyterms" placeholder="add a term + Enter" autocomplete="off" spellcheck="false">
+      <span class="hint">type a term and press Enter (or comma) to add it; × on a chip to remove. Saves to apps/sidekick/keyterms.txt — takes effect on next mic-stream start.</span>
     </div>
     <div class="row">
       <label for="set-sessions-filter">Sessions filter</label>

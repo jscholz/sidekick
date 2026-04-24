@@ -1025,6 +1025,10 @@ async function boot() {
       historyLoaded = false;
       backend.newSession?.();
       chat.addSystemLine('New chat started');
+      // Drop the viewed-session pin — chat no longer shows any persisted
+      // session, so the drawer should fall back to the adapter's fresh
+      // conversationName (not yet in response_store.db → placeholder row).
+      sessionDrawer.setViewed(null);
       // Re-render the session list so the old session row loses its
       // active highlight (new one isn't in response_store.db yet).
       sessionDrawer.refresh();
@@ -1369,15 +1373,26 @@ function replaySessionMessages(id: string, messages: any[]) {
   voice.cancelPendingFlush();
   pendingReply = null;
   historyLoaded = true;  // we just populated history ourselves; skip backfill
+  // Tell the drawer which session is ACTUALLY on screen — covers edge
+  // cases where the adapter's conversationName diverges from what the
+  // user is reading (superseded tokens, failed resumes, boot paths).
+  sessionDrawer.setViewed(id);
   const label = getAgentLabel();
   for (const m of messages) {
     const text = (m.content || '').trim();
     if (!text) continue;
+    // Hermes state.db stores timestamp as float UNIX seconds. chat.addLine's
+    // formatTime passes through new Date(ts) which expects milliseconds, so
+    // without the *1000 it'd render 1970. If ts is already >= 1e12 it's
+    // probably ms already (openclaw / openai-compat backends), so pass
+    // through unchanged.
+    const rawTs = m.timestamp || m.created_at || m.at;
+    const ts = typeof rawTs === 'number' && rawTs < 1e12 ? rawTs * 1000 : rawTs;
     if (m.role === 'assistant') {
       if (NO_REPLY_RE.test(text)) continue;
-      chat.addLine(label, text, 'agent history', { markdown: true });
+      chat.addLine(label, text, 'agent history', { markdown: true, timestamp: ts });
     } else if (m.role === 'user') {
-      chat.addLine('You', text, 's0 history');
+      chat.addLine('You', text, 's0 history', { timestamp: ts });
     }
     // Tool role / system role: skip for now; UI has no slot for them.
   }

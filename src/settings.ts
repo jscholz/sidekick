@@ -229,7 +229,8 @@ export function hydrate(handlers: {
   const setMic = $sel('set-mic');
   const setStreamEngine = $sel('set-streaming-engine');
   const setAutoFallback = $inp('set-auto-fallback');
-  const setSttKeyterms = document.getElementById('set-stt-keyterms') as HTMLTextAreaElement | null;
+  const setSttKeyterms = document.getElementById('set-stt-keyterms') as HTMLInputElement | null;
+  const keytermsChips = document.getElementById('keyterms-chips');
   const setSessionsFilter = $inp('set-sessions-filter');
   const setTtsEngine = $sel('set-tts-engine');
   const setDictAutoSend = $inp('set-dictation-autosend');
@@ -285,15 +286,49 @@ export function hydrate(handlers: {
     if (handlers.onStreamingEngineChange) handlers.onStreamingEngineChange();
   };
   if (setAutoFallback) setAutoFallback.onchange = () => { set('autoFallback', setAutoFallback.checked); };
-  // Keyterms textarea is backed by apps/sidekick/keyterms.txt on the
-  // server — edits save to disk. One source of truth, no localStorage
-  // fork. Fetch on panel open; save on blur.
-  if (setSttKeyterms) {
+  // Keyterms: chip-based input, backed by apps/sidekick/keyterms.txt on
+  // the server. Each chip is one keyterm — Enter or comma commits, × on
+  // a chip removes. File persists one term per line with '#' comments;
+  // we parse both newline and comma delimiters when loading so users
+  // editing the file directly can use either.
+  if (setSttKeyterms && keytermsChips) {
+    let terms: string[] = [];
+    const renderChips = () => {
+      keytermsChips.innerHTML = '';
+      for (const t of terms) {
+        const chip = document.createElement('span');
+        chip.className = 'kt-chip';
+        chip.textContent = t;
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'kt-chip-x';
+        x.setAttribute('aria-label', `remove ${t}`);
+        x.textContent = '×';
+        x.onclick = () => { terms = terms.filter(v => v !== t); renderChips(); saveKeyterms(); };
+        chip.appendChild(x);
+        keytermsChips.appendChild(chip);
+      }
+    };
+    const parseBody = (raw: string): string[] => {
+      // Strip comment lines (# prefix), then split on newline OR comma so
+      // users editing the file on disk can use either delimiter, and chip
+      // adds via comma on the input work through the same serializer.
+      const seen = new Set<string>();
+      const out: string[] = [];
+      for (const line of raw.split('\n')) {
+        const nocomment = line.replace(/#.*$/, '');
+        for (const part of nocomment.split(',')) {
+          const t = part.trim();
+          if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
+        }
+      }
+      return out;
+    };
     async function loadKeyterms() {
       try {
         const { fetchWithTimeout } = await import('./util/fetchWithTimeout.ts');
         const r = await fetchWithTimeout('/api/keyterms', { timeoutMs: 5_000 });
-        if (r.ok) setSttKeyterms.value = await r.text();
+        if (r.ok) { terms = parseBody(await r.text()); renderChips(); }
       } catch {}
     }
     async function saveKeyterms() {
@@ -302,15 +337,30 @@ export function hydrate(handlers: {
         await fetchWithTimeout('/api/keyterms', {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain' },
-          body: setSttKeyterms.value,
+          body: terms.join('\n') + '\n',
           timeoutMs: 5_000,
         });
       } catch {}
     }
+    const commit = () => {
+      const t = setSttKeyterms.value.trim().replace(/,$/, '').trim();
+      if (!t) { setSttKeyterms.value = ''; return; }
+      if (!terms.some(v => v.toLowerCase() === t.toLowerCase())) {
+        terms.push(t);
+        renderChips();
+        saveKeyterms();
+      }
+      setSttKeyterms.value = '';
+    };
+    setSttKeyterms.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(); }
+      else if (e.key === 'Backspace' && !setSttKeyterms.value && terms.length) {
+        // Backspace on empty input removes the last chip (standard chip UX).
+        terms.pop(); renderChips(); saveKeyterms();
+      }
+    });
+    setSttKeyterms.addEventListener('blur', () => { if (setSttKeyterms.value.trim()) commit(); });
     loadKeyterms();
-    setSttKeyterms.addEventListener('blur', saveKeyterms);
-    // Expose a re-load hook so the settings-panel-open toggle can
-    // refresh the view if someone edited the file directly on disk.
     modelHandlers.reloadKeyterms = loadKeyterms;
   }
   if (setSessionsFilter) {

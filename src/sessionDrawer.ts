@@ -31,6 +31,18 @@ let onResumeCb: ((id: string, messages: any[]) => void) | null = null;
  *  first, falls back to backend state when null. */
 let optimisticActiveId: string | null = null;
 
+/** The session id whose transcript is CURRENTLY RENDERED in the chat pane.
+ *  Set by main.ts via setViewed() when replaySessionMessages runs; cleared
+ *  when the user starts a new chat (rotation) so the drawer falls back to
+ *  the adapter's conversationName. Takes priority over optimisticActiveId
+ *  and conversationName — the drawer should always highlight the row the
+ *  user is actually reading, regardless of what the adapter thinks its
+ *  current send-target is (they can diverge e.g. after a resume where
+ *  conversationName updated but then the user tapped another session and
+ *  the adapter's token got superseded). */
+let viewedSessionId: string | null = null;
+export function setViewed(id: string | null) { viewedSessionId = id; }
+
 function fmtRelativeTime(epochSec: number): string {
   if (!epochSec) return '';
   const delta = Date.now() / 1000 - epochSec;
@@ -49,8 +61,9 @@ export async function refresh() {
   const listEl = document.getElementById('sessions-list');
   if (!listEl) return;
   if (!backend.capabilities().sessionBrowsing) { listEl.innerHTML = ''; return; }
-  // Prefer the optimistic id over backend state while a resume is mid-flight.
-  const active = optimisticActiveId || backend.getCurrentSessionId?.() || '';
+  // Priority: viewed (what's on screen) → optimistic (click in flight) →
+  // adapter's conversationName (fallback for fresh state / new chats).
+  const active = viewedSessionId || optimisticActiveId || backend.getCurrentSessionId?.() || '';
 
   // 1. Render from cache if available.
   const cached = await sessionCache.getListCache();
