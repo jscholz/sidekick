@@ -109,26 +109,39 @@ function dispatchSSEEvent(raw: string): void {
   handleEvent(type, payload);
 }
 
-/** Strip Gemma-4-style reasoning tag leftovers. Hermes's stream processing
- *  removes the `<thought>...</thought>` XML wrappers but sometimes leaves
- *  the tag-NAME as standalone content ("thought" as the entire message).
- *  Same for `thinking`, `reasoning`, `analysis`, `commentary`.
+/** Strip reasoning-format leftovers from Gemma-4 and Harmony-style models.
+ *  Hermes's stream processing strips the XML `<thought>...</thought>`
+ *  wrappers but leaves (a) the tag-NAME as standalone content
+ *  ("thought" as the whole message), (b) the channel-delimiter prefix
+ *  (`<channel|>` or `<|channel|>`) before the real reply, and
+ *  (c) leading `thought\n` preambles.
  *
- *  Applied to both live delta text and restored-history text so the user
- *  never sees these single-word placeholder bubbles. Upstream fix is
+ *  Applied to both live delta text and restored-history text so the
+ *  user never sees these reasoning-artifact bubbles. Upstream fix is
  *  tracked in project_harmony_leak_findings.md; this sidekick-scoped
  *  stripper is the pragmatic path until hermes's /v1/responses SSE
- *  output runs through the same tag-strip the CLI path already does. */
-const REASONING_TAG_RE = /^(?:thought|thinking|reasoning|analysis|commentary)(?:\s|$)/i;
+ *  output runs through a tag-aware stripper. */
+const REASONING_NAMES = '(?:thought|thinking|reasoning|analysis|commentary|final|channel|start|end|message)';
 export function stripReasoningLeak(text: string): string {
   if (!text) return text;
   // Drop entire message if it's JUST a reasoning-tag name
-  if (/^(?:thought|thinking|reasoning|analysis|commentary)\s*$/i.test(text.trim())) {
+  if (new RegExp(`^${REASONING_NAMES}\\s*$`, 'i').test(text.trim())) {
     return '';
   }
-  // Strip a leading "thought\n..." preamble that's a tag-name remnant
-  const trimmed = text.replace(/^\s*(?:thought|thinking|reasoning|analysis|commentary)\s*\n+/i, '');
-  return trimmed;
+  let out = text;
+  // Iterate: strip any combination of leading reasoning artifacts that
+  // stack up. Order:
+  //   1. bare word + newline(s)    ("thought\n")
+  //   2. channel-delimiter prefix  ("<channel|>", "<|channel|>", etc.)
+  //      — the `<|` / `|` can be missing depending on how the renderer
+  //      mangled the original Harmony marker.
+  for (let i = 0; i < 5; i++) {
+    const before = out;
+    out = out.replace(new RegExp(`^\\s*${REASONING_NAMES}\\s*\\n+`, 'i'), '');
+    out = out.replace(new RegExp(`^\\s*<\\|?${REASONING_NAMES}\\|?>\\s*`, 'i'), '');
+    if (out === before) break;
+  }
+  return out;
 }
 
 function handleEvent(type: string, d: any): void {

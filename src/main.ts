@@ -1529,7 +1529,17 @@ const STREAMING_IDLE_TIMEOUT_MS = 90_000;
 function showThinking() {
   const transcriptEl = document.getElementById('transcript');
   if (!transcriptEl) return;
+  // Defensive: if streamingEl ref got orphaned (DOM wiped by a clear()
+  // elsewhere, or we somehow held a stale reference), drop it before
+  // the guard check so the user still sees a fresh indicator on their
+  // next send.
+  if (streamingEl && !streamingEl.isConnected) streamingEl = null;
   if (streamingEl) return;  // already showing; don't stack
+  // Also sweep any orphan streaming bubbles that escaped finalization —
+  // rare but observed when an interrupt aborts a stream mid-flight,
+  // leaving the prior bubble in the DOM while streamingEl got nulled by
+  // the subsequent flow. Invariant: at most one streaming bubble visible.
+  transcriptEl.querySelectorAll('.line.streaming').forEach(el => el.remove());
   // Use a temporary replyId so the bubble has a data-reply-id from the
   // start (needed for dedup / DOM lookup); will be swapped out by the
   // adapter's real id on first delta.
@@ -1583,7 +1593,13 @@ function showStreamingIndicator(partialText, replyId) {
   const transcriptEl = document.getElementById('transcript');
   if (!transcriptEl) return;
 
+  // Drop the ref if it got orphaned from the DOM (see showThinking).
+  if (streamingEl && !streamingEl.isConnected) streamingEl = null;
+
   if (!streamingEl) {
+    // Sweep any stragglers before creating a new bubble — one streaming
+    // indicator at a time, no exceptions.
+    transcriptEl.querySelectorAll('.line.streaming').forEach(el => el.remove());
     streamingEl = chat.addLine(getAgentLabel(), partialText || '', 'agent streaming', {
       markdown: true,
       replyId,
