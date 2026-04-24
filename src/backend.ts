@@ -107,7 +107,7 @@ export async function getCurrentModel() {
   return (await loadAdapter()).getCurrentModel?.() ?? null;
 }
 
-export function setModel(ref) {
+export function setModel(ref: string) {
   return adapter?.setModel?.(ref) ?? false;
 }
 
