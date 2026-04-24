@@ -151,14 +151,16 @@ function renderRow(s: any, activeId: string): HTMLLIElement {
   // Source badge — shown only for non-webchat sessions so telegram/cli rows
   // are visually distinguished from the user's primary sidekick transcripts.
   // api_server rows are the default; we don't clutter them with a label.
+  // No "· current" text — the border highlight from li.active communicates
+  // the same thing without adding a 4th meta item that would overflow +
+  // wrap the row (changing bubble height when selected).
   const sourceBadge = s.source && s.source !== 'api_server'
     ? `<span style="text-transform:uppercase;font-size:10px;letter-spacing:0.05em;opacity:0.7">${s.source}</span>`
     : '';
   meta.innerHTML =
     `<span>${fmtRelativeTime(s.lastMessageAt)}</span>` +
     `<span>${s.messageCount || 0} msgs</span>` +
-    sourceBadge +
-    (s.id === activeId ? '<span style="color:var(--primary)">· current</span>' : '');
+    sourceBadge;
 
   body.appendChild(snippet);
   body.appendChild(meta);
