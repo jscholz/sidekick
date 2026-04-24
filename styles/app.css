@@ -373,6 +373,38 @@
   .sess-menu button.danger { color: #e66; }
   .sess-menu button.danger:hover { background: rgba(230, 102, 102, 0.12); }
 
+  /* ── Session info dialog (replaces alert() so text stays selectable) ── */
+  .session-info-dialog {
+    background: var(--surface); color: var(--fg);
+    border: 1px solid var(--border-strong); border-radius: 8px;
+    padding: 16px 18px; max-width: min(90vw, 560px);
+    font: inherit;
+  }
+  .session-info-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.55);
+  }
+  .session-info-body { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
+  .session-info-row { display: contents; }
+  .session-info-row > span {
+    color: var(--muted); font-size: 12px; padding-top: 4px;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .session-info-row > pre {
+    margin: 0; font-family: var(--font-mono); font-size: 13px;
+    white-space: pre-wrap; word-break: break-all;
+    user-select: text; -webkit-user-select: text;
+  }
+  .session-info-hint {
+    margin: 14px 0 10px; font-size: 12px; color: var(--muted);
+  }
+  .session-info-dialog form { margin: 0; text-align: right; }
+  .session-info-dialog form button {
+    background: var(--surface-2); color: var(--fg);
+    border: 1px solid var(--border-strong); border-radius: 4px;
+    padding: 6px 14px; cursor: pointer; font: inherit;
+  }
+  .session-info-dialog form button:hover { background: var(--border-strong); }
+
   /* ── Fake lock overlay ── */
   .fake-lock {
     position: fixed; inset: 0; z-index: 9999;

@@ -229,20 +229,45 @@ function openMenu(li: HTMLLIElement, s: any) {
 
 /** Surface the raw filterable fields (title / source / id) so the user
  *  can see exactly what any sessions-filter glob would match against.
- *  Intentionally plain-text + copy-friendly rather than a styled modal —
- *  the whole point is to show the raw values. */
+ *  Uses a <dialog> rather than alert() so the text is selectable
+ *  (alert text isn't on most platforms) and so the displayed label
+ *  matches what the list actually shows. */
 function showInfo(s: any) {
-  const lines = [
-    `Title:  ${s.title || '(none)'}`,
-    `Source: ${s.source || '(unknown)'}`,
-    `ID:     ${s.id}`,
-    `Msgs:   ${s.messageCount ?? 0}`,
-  ];
-  // Any of these fields are matched by the sessions-filter globs (see
-  // server.ts handleHermesSessionsList). The dialog itself is just a
-  // prompt() so the user can copy values straight out — minimal chrome,
-  // works offline, no extra z-index juggling.
-  alert(lines.join('\n') + '\n\nSessions-filter globs match any of these.');
+  // The drawer list renders `s.title || s.snippet || s.id` — show that
+  // here too, separate from the stored title, so the user can tell
+  // whether the row label is the user-set title or an auto-derived
+  // snippet. Fixes the "Title: (none)" surprise on auto-titled rows.
+  const displayed = s.title || s.snippet || s.id;
+  const storedTitle = s.title ? s.title : '(none — auto-derived from snippet)';
+  const snippet = s.snippet || '';
+
+  const dialog = document.createElement('dialog');
+  dialog.className = 'session-info-dialog';
+  dialog.innerHTML = `
+    <div class="session-info-body">
+      <div class="session-info-row"><span>Displayed:</span><pre>${escHtml(displayed)}</pre></div>
+      <div class="session-info-row"><span>Title:</span><pre>${escHtml(storedTitle)}</pre></div>
+      ${snippet && snippet !== s.title ? `<div class="session-info-row"><span>Snippet:</span><pre>${escHtml(snippet)}</pre></div>` : ''}
+      <div class="session-info-row"><span>Source:</span><pre>${escHtml(s.source || '(unknown)')}</pre></div>
+      <div class="session-info-row"><span>ID:</span><pre>${escHtml(s.id)}</pre></div>
+      <div class="session-info-row"><span>Msgs:</span><pre>${s.messageCount ?? 0}</pre></div>
+    </div>
+    <p class="session-info-hint">Sessions-filter globs match against any of these.</p>
+    <form method="dialog"><button>Close</button></form>
+  `;
+  // Tap-outside to dismiss. Esc is built-in on <dialog>.
+  dialog.addEventListener('click', (e) => {
+    if (e.target === dialog) dialog.close();
+  });
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.appendChild(dialog);
+  dialog.showModal();
+}
+
+function escHtml(s: string): string {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string
+  ));
 }
 
 async function promptRename(s: any) {
