@@ -87,15 +87,19 @@ Experimental. Set `SIDEKICK_BACKEND=zeroclaw`, `SIDEKICK_ZEROCLAW_WS`, and `SIDE
 
 ## Deepgram keyterm biasing
 
-Custom vocabulary — names, project codes, product terms — live in `keyterms.txt` (gitignored). One term per line, `#` starts a comment.
+Custom vocabulary — names, project codes, product terms — lives in `sidekick.config.yaml` under `stt.keyterms`. Manage via **Settings → STT keyterms** in the UI (type-Enter chips), or hand-edit the YAML:
 
-```bash
-cp keyterms.example.txt keyterms.txt
-$EDITOR keyterms.txt   # add your terms
-# refresh the browser — no service restart needed
+```yaml
+stt:
+  keyterms:
+    - Sidekick
+    - Deepgram
+    - <your terms>
 ```
 
-Or edit through the UI: **Settings → STT keyterms**. Terms are saved as chips backed by the same file.
+UI edits preserve comments and formatting elsewhere in the file (round-tripped through the YAML Document model, not re-serialized from JSON). Refreshes without restart.
+
+> **Legacy note:** earlier versions stored keyterms in `keyterms.txt`. On first run after upgrade, the server migrates any existing `keyterms.txt` into the config's `stt.keyterms` section — the txt file is left in place so you can verify, then delete.
 
 ## Architecture
 

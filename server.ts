@@ -24,7 +24,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
-import yaml from 'js-yaml';
+import YAML from 'yaml';
 import { validators } from './src/canvas/validators.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -34,26 +34,41 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // stay in .env. Env vars ALWAYS override the file — convenient for
 // Docker/CI where mounting a file is awkward but env injection is easy.
 // Missing file is fine; defaults + env vars cover the ground.
-function loadDeployConfig(): any {
-  const candidates = [
-    path.join(__dirname, 'sidekick.config.yaml'),
-    path.join(__dirname, 'config.yaml'),
-  ];
-  for (const p of candidates) {
-    try {
-      if (fsSync.existsSync(p)) {
-        const raw = fsSync.readFileSync(p, 'utf8');
-        const parsed = yaml.load(raw);
-        console.log(`[config] loaded ${path.basename(p)}`);
-        return parsed || {};
-      }
-    } catch (e: any) {
-      console.warn(`[config] failed to load ${p}: ${e.message}`);
-    }
+//
+// SIDEKICK_CONFIG env var can point at a config path outside the repo
+// (e.g. a private fork with keys and personal keyterms). Useful so the
+// public repo stays generic while deployment config lives privately.
+function resolveConfigPath(): string | null {
+  if (process.env.SIDEKICK_CONFIG && fsSync.existsSync(process.env.SIDEKICK_CONFIG)) {
+    return process.env.SIDEKICK_CONFIG;
   }
-  return {};
+  for (const name of ['sidekick.config.yaml', 'config.yaml']) {
+    const p = path.join(__dirname, name);
+    if (fsSync.existsSync(p)) return p;
+  }
+  return null;
 }
-const DEPLOY_CFG = loadDeployConfig();
+const CONFIG_PATH = resolveConfigPath();
+/** Parse the deployment config. Preserves comments via YAML.Document for
+ *  round-trippable edits (used by the keyterms save path). */
+function loadDeployConfigDoc(): YAML.Document.Parsed | null {
+  if (!CONFIG_PATH) return null;
+  try {
+    const raw = fsSync.readFileSync(CONFIG_PATH, 'utf8');
+    console.log(`[config] loaded ${path.basename(CONFIG_PATH)}`);
+    return YAML.parseDocument(raw);
+  } catch (e: any) {
+    console.warn(`[config] failed to load ${CONFIG_PATH}: ${e.message}`);
+    return null;
+  }
+}
+let deployDoc = loadDeployConfigDoc();
+/** Plain-JS view of the config — used for reads. Re-derived when the doc
+ *  is mutated (e.g. keyterms save). */
+function cfgAsJS(): any {
+  return deployDoc ? deployDoc.toJS() : {};
+}
+let DEPLOY_CFG = cfgAsJS();
 /** Resolve a value by precedence: env var → config file → fallback. */
 function cfgVal<T>(envName: string, cfgPath: string, fallback: T): T {
   const env = process.env[envName];
@@ -605,66 +620,105 @@ async function handleTranscribe(req, res) {
 // secrets are not hardcoded in the HTML, and so per-deployment tuning
 // (keyterms, app name, default coords) can be set without a rebuild.
 const GW_TOKEN = process.env.GW_TOKEN || '';
-// Default Deepgram key-term hints. Empty by default — per-install terms
-// live in `keyterms.txt` (gitignored) or `SIDEKICK_STT_KEYTERMS` env var.
-// Both are additive to this list; the DEFAULT is intentionally minimal so
+// Default Deepgram key-term hints. Empty-fallback when config lists none
+// AND no env override — per-install terms live in sidekick.config.yaml's
+// `stt.keyterms:` section (managed via Settings UI) or the
+// SIDEKICK_STT_KEYTERMS env var. Defaults are intentionally minimal so
 // forks don't inherit vocabulary biases from another project's agent.
 const DEFAULT_KEYTERMS: string[] = ['Sidekick', 'Deepgram'];
 
 // Optional env-var override (useful for Docker / CI where a file mount
-// is awkward). Additive to the file list below.
+// is awkward). Additive to whatever's in the config file.
 const ENV_KEYTERMS = process.env.SIDEKICK_STT_KEYTERMS
   ? process.env.SIDEKICK_STT_KEYTERMS.split(',').map(s => s.trim()).filter(Boolean)
   : [];
 
-const KEYTERMS_PATH = path.join(__dirname, 'keyterms.txt');
-
-/** Read ./keyterms.txt — one term per line, '#' starts a comment, blank
- *  lines ignored. Read synchronously on each /config request so edits
- *  take effect on the next browser refresh, no service restart. */
-function readKeytermsFile() {
+// One-time migration from the legacy keyterms.txt into sidekick.config.yaml.
+// If keyterms.txt still exists on disk and the config's stt.keyterms is
+// empty, import its contents into the yaml (comments dropped since they
+// weren't expressible in the list structure anyway). Leaves the txt file
+// in place so the user can delete it after verifying.
+const LEGACY_KEYTERMS_PATH = path.join(__dirname, 'keyterms.txt');
+function migrateLegacyKeyterms() {
+  if (!fsSync.existsSync(LEGACY_KEYTERMS_PATH)) return;
+  const current = DEPLOY_CFG?.stt?.keyterms;
+  if (Array.isArray(current) && current.length > 0) return;  // already migrated
+  let terms: string[] = [];
   try {
-    const raw = fsSync.readFileSync(KEYTERMS_PATH, 'utf8');
-    return raw.split('\n')
-      .map(l => l.replace(/#.*$/, '').trim())  // strip comments
-      .filter(Boolean);
-  } catch { return []; }
+    const raw = fsSync.readFileSync(LEGACY_KEYTERMS_PATH, 'utf8');
+    terms = raw.split('\n').map(l => l.replace(/#.*$/, '').trim()).filter(Boolean);
+  } catch { return; }
+  if (!terms.length) return;
+  // Target a writable config file — existing one, or create a new
+  // sidekick.config.yaml next to server.ts so the user's keyterms
+  // survive the txt → yaml transition.
+  const target = CONFIG_PATH || path.join(__dirname, 'sidekick.config.yaml');
+  try {
+    if (!deployDoc) {
+      deployDoc = YAML.parseDocument('# sidekick deployment config — see example.config.yaml\nstt:\n  keyterms: []\n');
+    }
+    deployDoc.setIn(['stt', 'keyterms'], terms);
+    fsSync.writeFileSync(target, deployDoc.toString(), 'utf8');
+    DEPLOY_CFG = cfgAsJS();
+    console.log(`[config] migrated ${terms.length} keyterms from keyterms.txt → ${path.basename(target)} (txt file kept; delete when verified)`);
+  } catch (e: any) {
+    console.warn(`[config] keyterms migration failed: ${e.message}`);
+  }
+}
+migrateLegacyKeyterms();
+
+/** Current keyterms list from the config file (or defaults if the section
+ *  is empty/missing). Read on each request so edits take effect without
+ *  service restart. */
+function readConfigKeyterms(): string[] {
+  const list = DEPLOY_CFG?.stt?.keyterms;
+  if (Array.isArray(list) && list.length > 0) {
+    return list.map((v: any) => String(v).trim()).filter(Boolean);
+  }
+  return [];
 }
 
-/** Serve the raw keyterms.txt file contents for browser-side editing.
- *  If the file is missing OR empty (trimmed), seed the response with
- *  DEFAULT_KEYTERMS so the textarea shows the active vocabulary rather
- *  than appearing empty. The first Save from the UI overwrites the file
- *  with whatever the user has at that point — after that the file is
- *  authoritative and defaults are no longer auto-merged in (see
- *  handleConfig below). */
+/** Serve the current keyterms as newline-separated text for the chip UI.
+ *  When the config's stt.keyterms is empty/missing, seed with
+ *  DEFAULT_KEYTERMS so the UI shows the active vocabulary rather than
+ *  appearing blank. The first Save overwrites the config file. */
 async function handleKeytermsGet(_req, res) {
-  let raw = '';
-  try {
-    raw = await fs.readFile(KEYTERMS_PATH, 'utf8');
-  } catch (e) {
-    if (e.code !== 'ENOENT') {
-      console.error('keyterms read failed:', e.message);
-      res.writeHead(500); res.end();
-      return;
-    }
-  }
-  const body = raw.trim() ? raw : DEFAULT_KEYTERMS.join('\n') + '\n';
+  const terms = readConfigKeyterms();
+  const body = (terms.length ? terms : DEFAULT_KEYTERMS).join('\n') + '\n';
   res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-cache' });
   res.end(body);
 }
 
-/** Write the request body to keyterms.txt. No validation — the file is
- *  user-editable text, we trust the poster. Local-network-only trust
- *  model (same as /config returning the gw token in clear). */
+/** Write the request body (newline-separated, comments/commas tolerated)
+ *  to the config file's stt.keyterms list. Uses the YAML Document model
+ *  so comments and formatting elsewhere in the file are preserved on
+ *  round-trip. If no config file exists, creates one at the default
+ *  location. */
 async function handleKeytermsPost(req, res) {
-  const chunks = [];
+  const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c);
   const body = Buffer.concat(chunks).toString('utf8');
+  // Parse the same way the UI does on load — newlines OR commas, comments stripped.
+  const parsed = new Set<string>();
+  const terms: string[] = [];
+  for (const line of body.split('\n')) {
+    const nocomment = line.replace(/#.*$/, '');
+    for (const part of nocomment.split(',')) {
+      const t = part.trim();
+      if (t && !parsed.has(t.toLowerCase())) { parsed.add(t.toLowerCase()); terms.push(t); }
+    }
+  }
   try {
-    await fs.writeFile(KEYTERMS_PATH, body, 'utf8');
+    // Pick a path — existing config, or create sidekick.config.yaml next to server.ts
+    const target = CONFIG_PATH || path.join(__dirname, 'sidekick.config.yaml');
+    if (!deployDoc) {
+      deployDoc = YAML.parseDocument('stt:\n  keyterms: []\n');
+    }
+    deployDoc.setIn(['stt', 'keyterms'], terms);
+    await fs.writeFile(target, deployDoc.toString(), 'utf8');
+    DEPLOY_CFG = cfgAsJS();
     res.writeHead(204); res.end();
-  } catch (e) {
+  } catch (e: any) {
     console.error('keyterms write failed:', e.message);
     res.writeHead(500, { 'Content-Type': 'text/plain' });
     res.end(`write failed: ${e.message}`);
@@ -672,12 +726,12 @@ async function handleKeytermsPost(req, res) {
 }
 
 function handleConfig(_req, res) {
-  // If keyterms.txt has content, it's authoritative — the user has edited
-  // the list and may have removed defaults on purpose. Otherwise seed with
-  // DEFAULT_KEYTERMS. ENV_KEYTERMS is always additive on top (Docker/CI
-  // override that shouldn't depend on whether a file has been saved).
-  const fileKeyterms = readKeytermsFile();
-  const base = fileKeyterms.length > 0 ? fileKeyterms : DEFAULT_KEYTERMS;
+  // If the config's stt.keyterms has content, it's authoritative — user
+  // has edited via UI (or hand-edited the yaml) and may have removed
+  // defaults on purpose. Otherwise seed with DEFAULT_KEYTERMS. ENV_KEYTERMS
+  // is always additive on top (Docker/CI override).
+  const cfgKeyterms = readConfigKeyterms();
+  const base = cfgKeyterms.length > 0 ? cfgKeyterms : DEFAULT_KEYTERMS;
   const merged = [...new Set([...base, ...ENV_KEYTERMS])];
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
   res.end(JSON.stringify({

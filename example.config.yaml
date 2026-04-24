@@ -67,6 +67,20 @@ models:
     - openai/gpt-5*
     - deepseek/*
 
+# ── STT keyterm biasing ───────────────────────────────────────────────
+# Deepgram keyterm hints — proper nouns, project codes, product names
+# the agent/you say that off-the-shelf STT would otherwise mis-transcribe.
+# Managed via Settings → STT keyterms in the UI (writes back to this
+# section; other sections' comments are preserved).
+stt:
+  keyterms: []
+  # Example:
+  # keyterms:
+  #   - Sidekick
+  #   - Deepgram
+  #   - <your-company-name>
+  #   - <your-team-members>
+
 # ── Ambient weather widget ────────────────────────────────────────────
 weather:
   # SIDEKICK_WEATHER_LAT + _LON — default coords for the corner widget.
