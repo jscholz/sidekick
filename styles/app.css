@@ -176,12 +176,11 @@
     position: relative; display: inline-block;
     /* Span both rows vertically; logo's square viewBox has built-in
      * padding (~15% per side) so we oversize to ~2em to make the S
-     * glyph match cap-height of the adjacent text, then pull "idekick"
-     * back in via negative margin-left to close the visible gap. */
+     * glyph match cap-height of the adjacent text. Center-align
+     * vertically with the full [idekick / AGENT PORTAL] stack. */
     grid-column: 1; grid-row: 1 / span 2;
     width: 2em; height: 2em;
-    align-self: end;        /* bottom-justify */
-    margin-bottom: -0.25em;  /* visual bottom of S sits at idekick baseline */
+    align-self: center;
   }
   .header .wm-bars,
   .header .wm-chevron {
@@ -197,23 +196,27 @@
     mask: url(/assets/icon-chevron.svg) center/contain no-repeat;
     -webkit-mask: url(/assets/icon-chevron.svg) center/contain no-repeat;
   }
-  .header .subtitle {
-    grid-column: 2 / span 2; grid-row: 1;
-    align-self: start;
-    font-family: var(--font-mono); font-size: 10.5px; font-weight: 400;
-    letter-spacing: 0.18em; text-transform: uppercase; color: var(--primary);
-  }
   .header .wm-rest {
-    grid-column: 2; grid-row: 2;
+    grid-column: 2; grid-row: 1;
     /* Pull left to close the visible gap — the S's bounding box has
      * padding beyond the rightmost bars. Tune if it kisses the bars. */
     margin-left: -0.35em;
   }
   .header .version {
-    grid-column: 3; grid-row: 2;
+    grid-column: 3; grid-row: 1;
     font-family: var(--font-mono); font-size: 10.5px; font-weight: 400;
     color: var(--muted); opacity: 0.6; letter-spacing: 0.03em;
     padding-left: 6px; padding-bottom: 2px;
+    align-self: end;
+  }
+  .header .subtitle {
+    grid-column: 2 / span 2; grid-row: 2;
+    /* Left-align with the "i" in idekick — same col as .wm-rest.
+     * Match the negative margin so the start of AGENT PORTAL lines up
+     * with the "i" glyph visually, not with the cell boundary. */
+    margin-left: -0.35em; margin-top: 2px;
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 400;
+    letter-spacing: 0.18em; text-transform: uppercase; color: var(--primary);
   }
   .header .status {
     margin-left: auto; font-family: var(--font-mono); font-size: calc(var(--content-size) - 3px);

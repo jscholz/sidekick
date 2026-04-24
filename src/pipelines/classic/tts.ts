@@ -214,12 +214,16 @@ function cleanForTts(text) {
 }
 
 /** Split text into sentence-aligned chunks for low first-byte latency.
- *  The first chunk is capped smaller than the rest so audio starts
+ *  The opening chunks are capped smaller than the rest so audio starts
  *  sooner on cold synth — subsequent chunks synthesize in parallel so
  *  total completion time is unchanged, only time-to-first-audio
- *  shrinks. For a typical reply with a short opening sentence this
- *  makes the first chunk ~1 sentence (~40-60 chars → ~500ms Aura synth)
- *  instead of ~3 sentences (~180 chars → ~1.5-2s). */
+ *  shrinks. Prior iteration only kept chunk 0 small (60ch). That left
+ *  chunk 1 at the full 180ch target, which synthesizes in 2-4s — long
+ *  enough that chunk 0 (a short sentence, often ~3s of speech) finishes
+ *  playing before chunk 1's buffer is ready, producing an audible
+ *  "first sentence then hang" pause. Scaling: 60ch, 120ch, then 180ch
+ *  target gives each successive chunk roughly matched synth-time ≤
+ *  playback-time of the previous one. */
 function chunkForTts(text, targetChars = 180, firstChunkChars = 60) {
   const sentences = text.match(/[^.!?\n]+[.!?]+|[^.!?\n]+$/g) || [text];
   const chunks = [];
@@ -227,9 +231,12 @@ function chunkForTts(text, targetChars = 180, firstChunkChars = 60) {
   for (const s of sentences) {
     const t = s.trim();
     if (!t) continue;
-    // Tighter cap on the very first chunk so play-click → audio-start
-    // latency is dominated by a single sentence, not a paragraph.
-    const cap = chunks.length === 0 ? firstChunkChars : targetChars;
+    // Progressive caps: chunk 0 ≤ firstChunkChars, chunk 1 ≤ 2× that,
+    // chunks 2+ ≤ targetChars. Keeps the second chunk short enough to
+    // finish synth before chunk 0 finishes playing.
+    const cap = chunks.length === 0 ? firstChunkChars
+      : chunks.length === 1 ? firstChunkChars * 2
+      : targetChars;
     if (cur && (cur.length + t.length + 1) > cap) {
       chunks.push(cur);
       cur = t;

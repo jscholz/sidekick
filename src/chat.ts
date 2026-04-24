@@ -42,26 +42,51 @@ function reqP<T = any>(r: IDBRequest<T>): Promise<T> {
   });
 }
 
-async function loadSnapshot() {
+async function loadSnapshot(): Promise<{ html: string; sessionId?: string } | null> {
   try {
     const db = await dbOpen();
     const rec = await reqP(db.transaction(STORE, 'readonly').objectStore(STORE).get(SNAPSHOT_KEY));
     db.close();
-    if (rec?.html) return rec.html;
+    if (rec?.html) return { html: rec.html, sessionId: rec.sessionId };
   } catch {}
   // One-time migration from the old sessionStorage snapshot so in-progress
   // sessions don't lose their chat when this version deploys.
   try {
     const legacy = sessionStorage.getItem(LEGACY_SS_KEY);
-    if (legacy) return legacy;
+    if (legacy) return { html: legacy };
   } catch {}
   return null;
+}
+
+/** In-memory mirror of the session id the current chat view corresponds to.
+ *  Set by replaySessionMessages → trackViewedSession(id), cleared on
+ *  chat.clear() so a New chat rotation doesn't keep a stale id in the
+ *  next persisted snapshot. Stored alongside the HTML on persist so
+ *  reload can restore the drawer highlight to the right row. */
+let viewedSessionIdRef: string | null = null;
+
+/** Let main.ts record which session the chat is currently rendering.
+ *  Drawer reads it back after boot via getViewedSessionId() — survives
+ *  page reload because we persist it in the chat snapshot. */
+export function trackViewedSession(id: string | null) {
+  viewedSessionIdRef = id;
+  persist();  // update the snapshot so reload picks it up
+}
+
+/** Return the session id the restored snapshot belongs to, if any.
+ *  Called by main.ts boot to re-seed the drawer highlight after
+ *  restoreSnapshot(). */
+let restoredViewedSessionId: string | null = null;
+export function getRestoredViewedSessionId(): string | null {
+  return restoredViewedSessionId;
 }
 
 async function saveSnapshot(html) {
   try {
     const db = await dbOpen();
-    await reqP(db.transaction(STORE, 'readwrite').objectStore(STORE).put({ key: SNAPSHOT_KEY, html, at: Date.now() }));
+    await reqP(db.transaction(STORE, 'readwrite').objectStore(STORE).put({
+      key: SNAPSHOT_KEY, html, sessionId: viewedSessionIdRef, at: Date.now(),
+    }));
     db.close();
   } catch {}
 }
@@ -151,7 +176,9 @@ export async function init(el) {
   try {
     const saved = await loadSnapshot();
     if (saved && transcriptEl) {
-      transcriptEl.innerHTML = saved;
+      transcriptEl.innerHTML = saved.html;
+      restoredViewedSessionId = saved.sessionId || null;
+      viewedSessionIdRef = restoredViewedSessionId;
       // Strip stale memo cards — their audio element + blob reference are dead
       // after serialization. Caller will re-render them fresh from IndexedDB.
       transcriptEl.querySelectorAll('.memo-card').forEach(el => el.remove());
@@ -377,5 +404,7 @@ export function addSystemLine(text) {
 /** Clear transcript and persisted state (used by refresh). */
 export function clear() {
   if (transcriptEl) transcriptEl.innerHTML = '';
+  viewedSessionIdRef = null;
+  restoredViewedSessionId = null;
   clearSnapshot().catch(() => {});
 }

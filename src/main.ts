@@ -701,8 +701,21 @@ async function boot() {
         // welcome. For backends without session browsing (openclaw),
         // fall back to the existing history backfill path.
         if (backend.capabilities().sessionBrowsing) {
-          const sid = backend.getCurrentSessionId?.();
+          // Prefer the session id persisted alongside the restored chat
+          // snapshot — that's the session whose transcript is ACTUALLY on
+          // screen after reload. Falls back to the adapter's
+          // conversationName ('sidekick-main' default) for the fresh
+          // install path where no snapshot existed.
+          const restoredSid = chat.getRestoredViewedSessionId();
+          const sid = restoredSid || backend.getCurrentSessionId?.();
           if (sid) {
+            // If we restored a session from snapshot, seed the drawer
+            // highlight immediately — before resumeSession's network
+            // fetch resolves — so it doesn't briefly flash the
+            // placeholder row. If resumeSession succeeds it replays
+            // freshly and re-sets viewed via replaySessionMessages
+            // (idempotent).
+            if (restoredSid) sessionDrawer.setViewed(restoredSid);
             try {
               const { messages } = await backend.resumeSession(sid);
               if (messages.length) replaySessionMessages(sid, messages);
@@ -1395,6 +1408,10 @@ function replaySessionMessages(id: string, messages: any[]) {
   // cases where the adapter's conversationName diverges from what the
   // user is reading (superseded tokens, failed resumes, boot paths).
   sessionDrawer.setViewed(id);
+  // Persist the session id into the chat snapshot so a page reload can
+  // re-seed the drawer highlight to this session even though adapter
+  // state (conversationName) resets to default on reload.
+  chat.trackViewedSession(id);
   const label = getAgentLabel();
   for (const m of messages) {
     const text = (m.content || '').trim();
