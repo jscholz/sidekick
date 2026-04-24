@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "server.ts", "server/**/*.ts"],
+  "exclude": ["node_modules", "build", "archive"]
+}

@@ -1,0 +1,27 @@
+# Deepgram STT keyterm biasing.
+#
+# One term per line. '#' starts a comment. Blank lines ignored. Multi-word
+# terms are fine on a single line (e.g. "Raspberry Pi"). Takes effect on
+# the next mic-stream start in the browser — no service restart needed;
+# the file is re-read on each /config request.
+#
+# Keyterms bias DG's word choice toward a specific SPELLING when the
+# acoustics are ambiguous. They do NOT teach pronunciation — if you
+# want DG to hear "GELLO" as "jell-o", adding "GELLO" here just makes
+# that spelling win when DG hears a similar phoneme.
+#
+# Copy this file to `keyterms.txt` (same directory) and edit freely —
+# that file is gitignored so your personal vocabulary stays private.
+
+# Default OpenClaw ecosystem terms — keep these unless you want to
+# replace them.
+OpenClaw
+Clawdian
+Claw
+SideKick
+Deepgram
+
+# Add your project / personal vocab below. Examples:
+# YourCompany
+# YourProjectCode
+# ColleagueFirstName

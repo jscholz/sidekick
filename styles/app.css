@@ -1,0 +1,1255 @@
+  :root {
+    /* Dark theme (default) */
+    --bg: #0a0a0a;
+    --surface: #141414;
+    --surface-2: #181818;
+    --border: #222;
+    --border-strong: #333;
+    --fg: #e8e8e8;
+    --muted: #8a8a8a;
+    --primary: hsl(108 18% 52%);          /* sage */
+    --primary-fg: #0a0a0a;
+    --primary-soft: hsl(108 18% 52% / 0.14);
+    --primary-glow: hsl(108 18% 52% / 0.25);
+    --danger: #c0504a;
+    --header-grad-top: #0f0f0f;
+    --header-grad-bot: #0a0a0a;
+    --debug-bg: rgba(0,0,0,0.93);
+    --debug-fg: var(--primary);
+    --radius: 12px;
+    --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, 'Segoe UI', sans-serif;
+    --font-mono: ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, monospace;
+    --content-size: 15px;          /* main readable text; slider-adjustable */
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f5f0;                        /* warm cream */
+    --surface: #ffffff;
+    --surface-2: #efede7;
+    --border: #e2dfd6;
+    --border-strong: #c7c3b7;
+    --fg: #1a1a1a;
+    --muted: #6a6760;
+    --primary: hsl(108 28% 34%);          /* deeper sage for contrast */
+    --primary-fg: #ffffff;
+    --primary-soft: hsl(108 28% 34% / 0.10);
+    --primary-glow: hsl(108 28% 34% / 0.20);
+    --danger: #9a3d35;
+    --header-grad-top: #fbfaf5;
+    --header-grad-bot: #f7f5f0;
+    --debug-bg: rgba(255,255,255,0.96);
+    --debug-fg: hsl(108 40% 28%);
+    color-scheme: light;
+  }
+
+  /* Scrollbars — theme-aware everywhere */
+  * { scrollbar-color: var(--border-strong) var(--bg); scrollbar-width: thin; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong); border-radius: 5px;
+    border: 2px solid var(--bg);
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  ::-webkit-scrollbar-corner { background: var(--bg); }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overscroll-behavior: none; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.55 var(--font-sans);
+    display: flex; flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+    /* Leave room for the collapsed sidebar rail on the left. */
+    padding-left: 48px;
+    /* --content-size: 15px; comes from :root, controlled by settings slider */
+  }
+
+  /* ── Sidebar (Gemini-style): persistent collapsed rail, expands on hamburger ── */
+  #sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; z-index: 50;
+    width: 48px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    transition: width 0.18s ease;
+    overflow: hidden;
+  }
+  #sidebar.expanded { width: 260px; box-shadow: 0 0 24px rgba(0,0,0,0.35); }
+  .sidebar-top { display: flex; flex-direction: column; padding: 10px 8px 6px; gap: 4px; }
+  .sidebar-content {
+    flex: 1; overflow-y: auto; padding: 8px;
+    opacity: 0; pointer-events: none; transition: opacity 0.12s ease 0.06s;
+  }
+  #sidebar.expanded .sidebar-content { opacity: 1; pointer-events: auto; }
+  .sidebar-bottom {
+    display: flex; flex-direction: column; padding: 6px 8px 12px; gap: 4px;
+    border-top: 1px solid var(--border);
+  }
+  .sb-section-title {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); padding: 6px 8px 4px;
+  }
+  .sb-icon-btn {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 8px; border: none; border-radius: 8px;
+    background: transparent; color: var(--fg); cursor: pointer;
+    font: inherit; min-height: 36px;
+    white-space: nowrap;
+    /* Center the icon horizontally in the 48px rail; when the sidebar
+     * expands, the rule below flips to flex-start so icons align left
+     * with their labels. */
+    justify-content: center;
+  }
+  #sidebar.expanded .sb-icon-btn { justify-content: flex-start; }
+  .sb-icon-btn:hover { background: var(--surface-2); }
+  .sb-icon-btn svg { flex-shrink: 0; color: var(--muted); }
+  .sb-icon-btn:hover svg { color: var(--fg); }
+  .sb-label { font-size: 14px; display: none; }
+  #sidebar.expanded .sb-label { display: inline; }
+  /* Collapsed sessions-list just hides (the rail shows no text anyway). */
+  #sidebar.collapsed .sessions-list { display: none; }
+  #sidebar.collapsed .sb-section-title { display: none; }
+
+  /* Mobile-only toolbar hamburger — hidden on desktop (sidebar rail has its
+   * own). When the sidebar opens on mobile, body.sidebar-expanded hides this
+   * button so the only way to close is tapping outside the panel (matches
+   * Gemini iOS). Desktop keeps the always-visible collapsed rail.
+   * Selector uses .toolbar .toolbar-btn.mobile-only so specificity beats
+   * the plain .toolbar .toolbar-btn { display: flex } rule. */
+  .toolbar .toolbar-btn.mobile-only { display: none; }
+  @media (max-width: 699px) {
+    body { padding-left: 0; }  /* no rail reserved */
+    #sidebar.collapsed {
+      /* Slide off-screen instead of drawing a rail. The element stays in the
+       * DOM so the global click-outside handler still works — it just isn't
+       * visible. Taps on main content register as clicks outside the sidebar. */
+      transform: translateX(-100%);
+      transition: transform 0.18s ease, width 0.18s ease;
+    }
+    #sidebar.expanded {
+      width: min(85vw, 300px);
+      transform: translateX(0);
+    }
+    .toolbar .toolbar-btn.mobile-only { display: flex; }
+    body.sidebar-expanded #sb-toggle-mobile { display: none; }
+  }
+
+  /* ── Header ── */
+  .header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px;
+    background: linear-gradient(180deg, var(--header-grad-top) 0%, var(--header-grad-bot) 100%);
+    border-bottom: 1px solid var(--border);
+  }
+  .header .logo {
+    width: 36px; height: 36px; border-radius: 8px;
+    box-shadow: 0 0 20px -4px var(--primary-glow);
+  }
+  .header .brand { display: flex; flex-direction: column; line-height: 1.1; }
+  .header .title { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+  .header .title .version {
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 400;
+    color: var(--muted); opacity: 0.6; letter-spacing: 0.03em; margin-left: 4px;
+  }
+  .header .subtitle {
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--primary); margin-top: 3px;
+  }
+  .header .status {
+    margin-left: auto; font-family: var(--font-mono); font-size: calc(var(--content-size) - 3px);
+    color: var(--muted); letter-spacing: 0.04em;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .header .status .dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong);
+    box-shadow: 0 0 0 0 transparent;
+  }
+  .header .status.ok .dot { background: var(--primary); box-shadow: 0 0 8px var(--primary-glow); }
+  .header .status.live .dot { background: var(--primary); animation: pulse 1.6s ease-in-out infinite; }
+  .header .status.live #status-text { cursor: pointer; }
+  .header .status.live #status-text:hover { color: var(--fg); }
+  .header .status.err .dot { background: var(--danger); }
+  .btn-refresh {
+    background: none; border: none; color: var(--muted); font-size: 20px;
+    cursor: pointer; padding: 4px 8px; border-radius: 6px; line-height: 1;
+    transition: color 0.15s, background 0.15s;
+  }
+  .btn-refresh:hover { color: var(--fg); background: var(--primary-soft); }
+  .btn-refresh:active { transform: rotate(180deg); transition: transform 0.3s; }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 var(--primary-glow); }
+    50%      { box-shadow: 0 0 0 6px transparent; }
+  }
+
+  /* ── Toolbar (icon buttons) ── */
+  .toolbar {
+    display: flex; gap: 4px; padding: 8px 14px;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    align-items: center;
+  }
+  .toolbar .toolbar-btn {
+    display: flex; align-items: center; justify-content: center;
+    padding: 8px; min-width: 40px; min-height: 40px;
+    background: none; border: none; cursor: pointer; color: var(--muted);
+    border-radius: 10px; transition: color .15s, background .15s;
+  }
+  .toolbar .toolbar-btn:hover { color: var(--fg); background: var(--surface); }
+  .toolbar .toolbar-btn svg { width: 24px; height: 24px; }
+  /* Stream icon — live/active state. A ring around the mic icon reacts
+     to actual mic level via the --mic-peak CSS var (0..1), set from JS
+     every worklet frame. When the var is 0 (silence) or unset, the ring
+     idles at a small baseline so the user still sees "mic is armed".
+     Compared to a fixed-period pulse, this makes it obvious when the
+     app is receiving vs. stuck on a dead stream. */
+  .toolbar #btn-mic.active { color: var(--danger); position: relative; }
+  .toolbar #btn-mic.active::before {
+    content: ''; position: absolute; inset: 2px;
+    border-radius: 50%; border: 2px solid var(--danger);
+    opacity: calc(0.25 + var(--mic-peak, 0) * 0.65);
+    transform: scale(calc(0.55 + var(--mic-peak, 0) * 0.5));
+    transition: opacity .08s linear, transform .08s linear;
+    pointer-events: none;
+  }
+  /* Speak icon — muted vs on state */
+  .toolbar #btn-speak .speaker-mute-x { display: none; }
+  .toolbar #btn-speak.muted .speaker-waves { display: none; }
+  .toolbar #btn-speak.muted .speaker-mute-x { display: inline; }
+  .toolbar #btn-speak.muted { color: var(--muted); opacity: 0.6; }
+  .toolbar #btn-speak:not(.muted) { color: var(--primary); }
+  /* Lock icon — engaged state (when fake-lock is active, though we hide
+     the toolbar so this mainly affects future UX consistency) */
+  .toolbar #btn-lock.active { color: var(--primary); }
+
+  /* ── Info panel ── */
+  .info-panel {
+    position: fixed; inset: 0; z-index: 9998;
+    background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .info-panel.hidden { display: none; }
+  .info-panel-inner {
+    background: var(--surface); color: var(--fg);
+    max-width: 480px; width: 100%; max-height: 80vh; overflow-y: auto;
+    padding: 24px 22px; border-radius: 14px;
+    border: 1px solid var(--border);
+    position: relative; line-height: 1.5;
+  }
+  .info-panel-inner h2 { margin: 0 0 6px; font-size: 20px; }
+  .info-panel-inner h3 { margin: 18px 0 6px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--primary); }
+  .info-panel-inner p { margin: 0 0 8px; font-size: 14px; color: var(--fg); }
+  .info-tagline { color: var(--muted); font-style: italic; }
+  .info-caveat { font-size: 12px; color: var(--muted); }
+  .info-close {
+    position: absolute; top: 10px; right: 12px;
+    width: 30px; height: 30px; border: none; border-radius: 50%;
+    background: transparent; color: var(--muted); font-size: 20px;
+    cursor: pointer;
+  }
+  .info-close:hover { background: var(--bg); color: var(--fg); }
+  .info-icon-list { list-style: none; padding: 0; margin: 0 0 8px; }
+  .info-icon-list li {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+  }
+  .info-icon-list li:last-child { border-bottom: none; }
+  .info-icon { width: 22px; height: 22px; flex-shrink: 0; color: var(--primary); margin-top: 1px; }
+  .info-icon-list span { font-size: 13.5px; line-height: 1.45; }
+  .info-icon-list strong { color: var(--fg); }
+  .info-caveat-list { padding-left: 18px; margin: 0; }
+  .info-caveat-list li { font-size: 12.5px; color: var(--muted); margin-bottom: 6px; line-height: 1.45; }
+  .info-caveat-list strong { color: var(--fg); }
+  .info-panel-inner ul { margin: 0 0 8px; padding-left: 18px; }
+  .info-panel-inner ul li { font-size: 13.5px; margin-bottom: 4px; line-height: 1.45; }
+
+  /* ── Sessions list ── */
+  .sessions-list { list-style: none; padding: 0; margin: 8px 0 0; }
+  .sessions-list li {
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 6px; cursor: pointer; background: var(--bg);
+    position: relative;  /* anchor for .sess-menu popover */
+  }
+  .sessions-list li:hover { background: var(--surface-hover, var(--surface)); }
+  .sessions-list li.active { border-color: var(--primary); background: var(--surface); }
+  .sessions-list .sess-snippet {
+    font-size: 13px; color: var(--fg); line-height: 1.35;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .sessions-list .sess-meta {
+    font-size: 11px; color: var(--muted); margin-top: 4px;
+    display: flex; gap: 10px;
+  }
+  .sessions-list .sess-empty {
+    font-size: 13px; color: var(--muted); font-style: italic; padding: 20px 0;
+    text-align: center;
+  }
+  .sessions-list .sess-row { display: flex; align-items: flex-start; gap: 4px; }
+  .sessions-list .sess-body { flex: 1; min-width: 0; }
+  .sess-menu-btn {
+    background: transparent; border: none; color: var(--muted); font-size: 18px;
+    cursor: pointer; padding: 2px 6px; border-radius: 4px; line-height: 1;
+    align-self: flex-start; flex-shrink: 0;
+  }
+  .sess-menu-btn:hover { background: var(--surface-2); color: var(--fg); }
+  .sess-menu {
+    position: absolute; right: 10px; margin-top: -2px; z-index: 60;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: 6px; padding: 4px; min-width: 120px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .sess-menu button {
+    background: transparent; border: none; color: var(--fg); text-align: left;
+    padding: 6px 10px; cursor: pointer; font: inherit; border-radius: 4px;
+  }
+  .sess-menu button:hover { background: var(--surface-2); }
+  .sess-menu button.danger { color: #e66; }
+  .sess-menu button.danger:hover { background: rgba(230, 102, 102, 0.12); }
+
+  /* ── Fake lock overlay ── */
+  .fake-lock {
+    position: fixed; inset: 0; z-index: 9999;
+    background: #000; color: #fff;
+    display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+    padding: 60px 20px 40px; box-sizing: border-box;
+    transition: filter 0.6s ease;
+    user-select: none; -webkit-user-select: none;
+    touch-action: none;
+  }
+  .fake-lock.hidden { display: none; }
+  .fake-lock.dim { filter: brightness(0.08); }
+  .fake-lock-status {
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    font-family: var(--font-mono);
+  }
+  .fake-lock-time {
+    font-size: 64px; font-weight: 300; letter-spacing: -0.02em;
+    color: #fff;
+  }
+  .fake-lock-state {
+    font-size: 13px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: rgba(255,255,255,0.6);
+  }
+  .fake-lock-meter {
+    flex: 1; width: 100%; display: flex; align-items: center; justify-content: center;
+    padding: 30px 0;
+  }
+  .fake-lock-meter canvas { width: 80%; max-width: 340px; height: 80px; display: block; }
+  .fake-lock-track {
+    position: relative; width: 100%; max-width: 400px;
+    height: 72px; border-radius: 36px;
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12);
+    display: flex; align-items: center; padding: 6px;
+    box-sizing: border-box; overflow: hidden;
+  }
+  .fake-lock-thumb {
+    width: 60px; height: 60px; border-radius: 30px;
+    background: var(--primary); color: var(--primary-fg);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 26px; font-weight: 700;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+    transition: transform 0.3s cubic-bezier(.4,2,.6,1);
+    touch-action: none;
+  }
+  .fake-lock-thumb.dragging { transition: none; }
+  .fake-lock-hint {
+    position: absolute; left: 60px; right: 20px;
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.15em;
+    text-transform: uppercase; color: rgba(255,255,255,0.45);
+    text-align: center; pointer-events: none;
+  }
+
+  /* Minimal playback controls on the lock screen. Hidden until TTS is
+     active, then fades in between the mic meter and the swipe track.
+     Margin sized so enlarged swipe track below has room — controls
+     shift up by ~16px compared to the pre-v1.02 layout. */
+  .fake-lock-player {
+    width: 100%; max-width: 360px;
+    margin: 0 auto 10px;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+  }
+  .fake-lock-player.active { opacity: 1; pointer-events: auto; }
+  .fake-lock-player-bar {
+    position: relative; height: 24px;
+    cursor: pointer;
+    margin: 0 6px 8px;
+    background: rgba(255,255,255,0.02);
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+  }
+  .fake-lock-player-loaded,
+  .fake-lock-player-played {
+    position: absolute; left: 0; top: 11px;
+    height: 2px; width: 0;
+    border-radius: 2px;
+    transition: width 0.12s linear;
+    pointer-events: none;
+  }
+  .fake-lock-player-loaded { background: rgba(255,255,255,0.2); }
+  .fake-lock-player-played { background: var(--primary); opacity: 0.9; }
+  .fake-lock-player-controls {
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  }
+  .fake-lock-player-center {
+    display: flex; align-items: center; justify-content: center;
+    gap: 28px;
+  }
+  .fake-lock-player-side { display: flex; align-items: center; }
+  .fake-lock-player-side-end { justify-content: flex-end; }
+  .fake-lock-player-aux { opacity: 0.7; }
+  .fake-lock-player-aux svg { width: 18px; height: 18px; }
+  .fake-lock-player-btn {
+    background: none; border: none; padding: 8px; cursor: pointer;
+    color: rgba(255,255,255,0.7);
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+  .fake-lock-player-btn:hover,
+  .fake-lock-player-btn:active { color: #fff; background: rgba(255,255,255,0.08); }
+  .fake-lock-player-btn svg { width: 24px; height: 24px; }
+  .fake-lock-player-main svg { width: 32px; height: 32px; }
+  /* Play/pause glyph swap — same pattern as .play-btn in agent bubbles. */
+  .fake-lock-player .glyph-pause { display: none; }
+  .fake-lock-player.playing .glyph-play { display: none; }
+  .fake-lock-player.playing .glyph-pause { display: block; }
+
+  /* ── Settings panel (modal overlay, same shape as .info-panel) ── */
+  #settings {
+    display: none;
+    position: fixed; inset: 0; z-index: 9998;
+    background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+    align-items: flex-start; justify-content: center;
+    padding: 40px 20px 20px;
+  }
+  #settings.on { display: flex; }
+  .settings-inner {
+    background: var(--surface); color: var(--fg);
+    /* Match the chat column's readable-line-width cap so the modal feels
+     * like the same surface as the transcript on desktop. Mobile: full
+     * width (minus panel padding) so rows fit without horizontal scroll. */
+    max-width: 900px; width: 100%; max-height: calc(100vh - 60px);
+    box-sizing: border-box;
+    overflow-y: auto; overflow-x: hidden;
+    padding: 22px 22px 20px; border-radius: 14px;
+    border: 1px solid var(--border);
+    position: relative;
+  }
+  /* Mobile: tighter min-widths on form elements so a label+input row fits
+   * in a phone viewport without sideways scroll. Also soft-cap the label
+   * so long labels wrap rather than reserve desktop-sized space. */
+  @media (max-width: 699px) {
+    #settings { padding: 20px 12px 12px; }
+    .settings-inner { padding: 18px 14px 14px; }
+    #settings label { min-width: 0; flex-shrink: 1; }
+    #settings .text-input,
+    #settings input[type=text],
+    #settings textarea,
+    #settings select { min-width: 0; max-width: 100%; }
+    #settings .row { gap: 8px; }
+    #settings .row-wide .hint { margin-left: 0; }
+  }
+  .settings-title {
+    margin: 0 0 14px; font-size: 20px; font-weight: 600;
+  }
+  #settings .settings-group {
+    padding-bottom: 10px; margin-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  #settings .settings-group:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  #settings .group-label {
+    font: 600 calc(var(--content-size) - 3px)/1 var(--font-mono);
+    letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--primary); opacity: 0.7; padding: 4px 0 8px;
+  }
+  #settings .text-input {
+    flex: 1; min-width: 200px; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 8px; font-size: var(--content-size); font-family: var(--font-sans);
+  }
+  #settings .text-input:focus { outline: none; border-color: var(--primary); }
+  #settings .row { display: flex; align-items: center; gap: 12px; padding: 7px 0; }
+  #settings .row:has(input[type=checkbox]) { cursor: pointer; }
+  #settings label { color: var(--fg); min-width: 150px; font-size: var(--content-size); font-weight: 500; }
+  #settings select, #settings input[type=range], #settings input[type=text], #settings textarea {
+    background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 5px 10px; font-size: var(--content-size); font-family: var(--font-sans);
+  }
+  #settings input[type=text], #settings textarea { flex: 1; min-width: 140px; }
+  #settings textarea { font-family: var(--font-mono); font-size: 13px; resize: vertical; }
+  #settings select:focus, #settings input[type=range]:focus, #settings input[type=text]:focus { outline: none; border-color: var(--primary); }
+  /* Wide rows — e.g. the keyterms input with a hint span underneath — stack
+     the hint below on its own row instead of trying to fit on the side. */
+  #settings .row-wide { flex-wrap: wrap; }
+  #settings .row-wide .hint {
+    flex-basis: 100%; margin-left: 162px; margin-top: 4px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  }
+  #settings input[type=range] { flex: 1; min-width: 140px; accent-color: var(--primary); }
+  #settings .val { color: var(--muted); font-family: var(--font-mono); font-size: 12px; min-width: 48px; }
+  /* iOS-style toggle pill. The native checkbox is still there (so JS +
+     keyboard + screen-reader all keep working) — we just repaint it
+     as a 44x24 pill with a sliding thumb. Off = muted track, on =
+     sage track. Click target matches the full pill size. */
+  #settings input[type=checkbox] {
+    appearance: none; -webkit-appearance: none;
+    width: 44px; height: 24px;
+    border-radius: 12px;
+    background: var(--border);
+    border: 1px solid var(--border-strong);
+    position: relative;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease;
+    flex-shrink: 0;
+    margin: 0;
+    padding: 0;
+  }
+  #settings input[type=checkbox]::before {
+    content: '';
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+    transition: transform 0.2s cubic-bezier(.4,2,.6,1);
+  }
+  #settings input[type=checkbox]:checked {
+    background: var(--primary);
+    border-color: var(--primary);
+  }
+  #settings input[type=checkbox]:checked::before {
+    transform: translateX(20px);
+  }
+  #settings input[type=checkbox]:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+  #settings .hint { color: var(--muted); font-size: calc(var(--content-size) - 2px); }
+
+  /* ── Transcript ── */
+  .transcript {
+    flex: 1; overflow-y: auto; overflow-x: hidden; padding: 18px; scroll-behavior: smooth;
+  }
+  .line { margin-bottom: 10px; max-width: 900px; }
+  /* Wrap long URLs / unspaced tokens so a single line can't overflow
+     the chat and summon a horizontal scrollbar. Wide inline content
+     (pre, tables, cards) keeps its own overflow-x: auto — that's a
+     per-element concern, not a chat-wide one. */
+  .line .text { overflow-wrap: anywhere; }
+  .line .speaker {
+    font-weight: 600; font-size: 11.5px; letter-spacing: 0.06em;
+    text-transform: uppercase; font-family: var(--font-mono);
+  }
+  .line .text { color: var(--fg); display: block; margin-top: 2px; font-size: var(--content-size); line-height: 1.5; }
+  /* Agent reply: sage speaker label + sage accents, no bubble fill,
+     no left gutter. Identity carried by the label + play-bar up top.
+     Right-padding reserves a column for the top-right icon stack
+     (play + copy + timestamp) so text doesn't wrap against them. */
+  .line.agent {
+    padding: 12px 56px 10px 14px;
+  }
+  .line.agent .speaker { color: var(--primary); }
+
+  /* Per-reply playback bar — 24px-tall hit target with a 2px visible
+     bar painted inside via the child layers. Background is a nearly-
+     transparent fill (rgba(*,0.01)) — iOS Safari won't register taps
+     on a truly transparent element; this gives it something to hit
+     while staying invisible. touch-action:manipulation kills the 300ms
+     tap-delay iOS adds when it's deciding between tap and double-tap.
+     Child layers have pointer-events:none so clicks pass through. */
+  .line.agent .play-bar {
+    position: absolute;
+    top: -10px; left: 0; right: 0;
+    height: 24px;
+    cursor: pointer;
+    background: rgba(0,0,0,0.01);
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: rgba(0,0,0,0);
+  }
+  .line.agent .play-bar-loaded,
+  .line.agent .play-bar-played {
+    position: absolute;
+    left: 0; top: 11px;
+    height: 2px;
+    width: 0;
+    transition: width 0.12s linear;
+    pointer-events: none;
+  }
+  .line.agent .play-bar-loaded { background: var(--primary-soft); }
+  .line.agent .play-bar-played { background: var(--primary); opacity: 0.9; }
+  /* Streaming: subtle animated shimmer on the loaded bar. Width still
+     reflects synthesizedChars / cumulativeChars (via load-progress),
+     so the bar grows proportionally, and the shimmer just signals
+     "still working." Removed when duration-known fires. */
+  .line.agent.tts-streaming .play-bar-loaded {
+    background: linear-gradient(90deg,
+      var(--primary-soft) 0%, var(--primary-glow) 50%, var(--primary-soft) 100%);
+    background-size: 200% 100%;
+    animation: play-bar-shimmer 1.4s ease-in-out infinite;
+  }
+  @keyframes play-bar-shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  /* Play/pause/replay button — top-right corner next to the copy icon.
+     Color encodes cache state:
+       default (no cache)    — muted grey: "click to generate audio"
+       .tts-cached           — sage: "audio ready, click to play instantly"
+       .tts-playing/.paused  — bright sage: currently active
+     Glyph: play by default; .tts-playing swaps to pause via CSS. */
+  .line.agent .play-btn {
+    position: absolute; top: 4px; right: 34px;
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; opacity: 0.4; padding: 4px;
+    transition: opacity 0.15s ease, color 0.15s ease;
+    display: flex; align-items: center; justify-content: center;
+    /* Sit above the play-bar so clicks land on the button rather than
+       being interpreted as a scrub-to-near-end. The bar is appended
+       later in DOM order but is a scrub target spanning the full width
+       of the bubble (including the button region). */
+    z-index: 2;
+  }
+  .line.agent .play-btn svg { width: 16px; height: 16px; }
+  .line.agent .play-btn:hover { opacity: 0.9; }
+  .line.agent.tts-cached .play-btn {
+    opacity: 0.75; color: var(--primary);
+  }
+  .line.agent.tts-active .play-btn,
+  .line.agent.tts-playing .play-btn,
+  .line.agent.tts-paused .play-btn { opacity: 1; color: var(--primary); }
+  /* Icon swap: hide default play SVG, show pause SVG when playing. The
+     pause glyph is emitted alongside play in chat.mjs so CSS can flip
+     visibility without touching the DOM during state transitions. */
+  .line.agent .play-btn .glyph-pause { display: none; }
+  .line.agent.tts-playing .play-btn .glyph-play { display: none; }
+  .line.agent.tts-playing .play-btn .glyph-pause { display: inline-block; }
+  /* Agent timestamp stacks below the copy icon (like user bubbles) so the
+     play button can sit to the left of copy without crowding the top row. */
+  .line.agent .copy-btn { top: 4px; right: 4px; }
+  .line.agent .line-ts { top: 28px; right: 10px; }
+
+  /* User message: right-aligned sage-tinted bubble. No speaker label —
+     position + fill are enough identity. Matches Claude / OpenClaw style.
+     Copy icon sits top-right, timestamp stacks below it, so the right
+     column is narrow and the text has room to breathe. */
+  .line.s0 {
+    max-width: 72%;
+    margin-left: auto;
+    background: var(--primary-soft);
+    padding: 10px 44px 10px 14px;
+    border-radius: var(--radius);
+  }
+  .line.s0 .speaker { display: none; }
+  .line.s0 .line-ts { top: 28px; right: 10px; }
+  .line.queued .text::after { content: ' \23F3'; opacity: 0.5; }
+  /* Markdown in agent replies */
+  .line .text h1, .line .text h2, .line .text h3 {
+    font-family: var(--font-sans); color: var(--fg); margin: 12px 0 6px; line-height: 1.3;
+  }
+  .line .text h1 { font-size: calc(var(--content-size) + 4px); }
+  .line .text h2 { font-size: calc(var(--content-size) + 2px); }
+  .line .text h3 { font-size: var(--content-size); }
+  .line .text p { margin-bottom: 8px; }
+  .line .text ul, .line .text ol { margin: 6px 0 6px 20px; }
+  .line .text li { margin-bottom: 3px; }
+  .line .text code {
+    font-family: var(--font-mono); background: var(--bg); padding: 1px 5px;
+    border-radius: 4px; font-size: 0.9em; color: var(--primary);
+  }
+  .line .text pre { margin: 8px 0; padding: 10px; background: var(--bg); border-radius: 8px; overflow-x: auto; }
+  .line .text pre code { padding: 0; background: none; }
+  .line .text a { color: var(--primary); text-decoration: underline; }
+  .line .text strong { font-weight: 600; }
+  .line .text table {
+    border-collapse: collapse; margin: 8px 0; font-size: 0.95em;
+    display: block; max-width: 100%; overflow-x: auto;
+  }
+  .line .text th, .line .text td {
+    border: 1px solid var(--border); padding: 6px 10px; text-align: left;
+  }
+  .line .text th { background: var(--surface); font-weight: 600; }
+  .line .text tr:nth-child(even) td { background: var(--surface); }
+  .line.sent {
+    background: var(--surface); border-left: 3px solid var(--border-strong);
+    padding: 8px 12px; border-radius: 0 var(--radius) var(--radius) 0;
+    color: var(--muted);
+  }
+  .line.sent .speaker { color: var(--muted); }
+  .line { position: relative; }
+  .line.history { opacity: 0.6; }
+  .line .source-icon {
+    display: inline-flex; vertical-align: middle; opacity: 0.25;
+    margin-right: 3px; color: var(--muted);
+  }
+  .line .source-icon svg {
+    width: calc(var(--content-size) - 4px);
+    height: calc(var(--content-size) - 4px);
+  }
+  .line { position: relative; }
+  .line .copy-btn {
+    position: absolute; top: 4px; right: 4px;
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; opacity: 0.3; padding: 4px;
+    transition: opacity 0.15s ease, color 0.15s ease;
+    display: flex; align-items: center; justify-content: center;
+    /* Same reason as .play-btn — sit above the scrub bar so clicks
+       reach the copy button instead of being interpreted as a scrub. */
+    z-index: 2;
+  }
+  .line .copy-btn svg { width: 18px; height: 18px; }
+  .line .copy-btn:hover { opacity: 0.8; color: var(--primary); }
+  .line .line-ts {
+    position: absolute; top: 6px; right: 34px;
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--muted); opacity: 0.5;
+    letter-spacing: 0.04em;
+  }
+  .line.interim { opacity: 0.45; font-style: italic; }
+
+  /* ── Draft block: unsent voice transcript ──
+     Right-aligned to match user bubbles — this is user input, not agent
+     output. Orange fill + "UNSENT" header carry identity (no left-gutter
+     needed; the live interim span inside follows the same alignment). */
+  .draft-block {
+    position: relative;
+    margin: 8px 0 8px auto;
+    max-width: 72%;
+    background: rgba(201, 146, 44, 0.10);
+    border-radius: var(--radius);
+    padding: 6px 0;
+    transition: opacity 0.4s ease, background 0.4s ease;
+  }
+  .draft-block.queued .draft-text { opacity: 0.6; font-style: italic; }
+  /* Text recovered from a network gap via sttBackfill. Italic + muted
+     tint so the user can see it was post-hoc filled in. Editable,
+     same as any other draft text. */
+  .draft-block .draft-backfill {
+    font-style: italic;
+    color: var(--muted);
+    opacity: 0.85;
+  }
+  .draft-block .draft-backfill::before {
+    content: '↩ ';
+    color: var(--muted);
+    opacity: 0.55;
+    font-style: normal;
+    margin-right: 2px;
+  }
+  .draft-block .draft-interim {
+    opacity: 0.45; font-style: italic;
+    color: var(--muted);
+    display: inline;
+    padding: 0 12px 0 0;
+    user-select: none;
+  }
+
+  /* ── Voice memo card ── */
+  /* Memo cards are user-authored (voice recordings) — right-align to
+     match the user bubble style. Symmetric rounded corners + sage fill,
+     same max-width as .line.s0 so they stack cleanly with text bubbles. */
+  .memo-card {
+    background: var(--primary-soft);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    margin-left: auto;
+    margin-bottom: 10px;
+    max-width: 72%;
+    position: relative;
+  }
+  .memo-card.queued {
+    background: rgba(201, 146, 44, 0.10);
+  }
+  .memo-card .memo-card-top {
+    display: flex; align-items: center; gap: 10px;
+    padding-right: 56px; /* clear the absolutely-positioned timestamp + copy icon */
+  }
+  .memo-card .memo-card-play {
+    flex-shrink: 0;
+    width: 32px; height: 32px; border-radius: 50%;
+    border: none; background: var(--primary); color: var(--primary-fg);
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    padding: 0;
+  }
+  .memo-card .memo-card-play:hover { filter: brightness(1.08); }
+  .memo-card .memo-card-play svg { width: 14px; height: 14px; }
+  .memo-card .memo-card-wave { flex: 1; height: 32px; min-width: 0; }
+  .memo-card .memo-card-duration {
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+    flex-shrink: 0; min-width: 32px;
+  }
+  .memo-card .memo-card-status {
+    font-size: 14px; flex-shrink: 0;
+  }
+  .memo-card .memo-card-transcript {
+    margin-top: 8px; font-size: var(--content-size); color: var(--fg);
+    line-height: 1.5;
+    display: none;  /* shown via :not(:empty) below */
+  }
+  .memo-card .memo-card-transcript:not(:empty) { display: block; }
+  /* Failed-transcribe variant: muted italic text + warning glyph in
+     status. Card stays playable — user can still hear what they said. */
+  .memo-card.failed .memo-card-transcript { color: var(--muted); font-style: italic; }
+  .memo-card.failed .memo-card-status { color: var(--muted); }
+  .draft-block .draft-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 2px 10px 4px 12px;
+    font: 500 10.5px/1 var(--font-mono); letter-spacing: 0.1em;
+    text-transform: uppercase; color: #c9922c; opacity: 0.7;
+  }
+  .draft-block .draft-header span { flex: 1; }
+  .draft-block .draft-label-edit { display: none; }
+  .draft-block.editing .draft-label-idle { display: none; }
+  .draft-block.editing .draft-label-edit { display: inline; }
+  .draft-block .draft-dismiss {
+    background: none; border: none; color: #c9922c; cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 2px 4px; opacity: 0.6;
+    transition: opacity 0.15s ease;
+  }
+  .draft-block .draft-send, .draft-block .draft-dismiss {
+    background: none; border: 1px solid transparent; cursor: pointer;
+    font-size: 18px; line-height: 1; padding: 4px 8px; opacity: 0.5;
+    border-radius: 6px; transition: all 0.15s ease;
+  }
+  .draft-block .draft-send { color: var(--primary); }
+  .draft-block .draft-dismiss { color: #c9922c; }
+  .draft-block .draft-send:hover { opacity: 1; border-color: var(--primary); }
+  .draft-block .draft-dismiss:hover { opacity: 1; border-color: #c9922c; }
+  .draft-block .draft-text {
+    padding: 8px 12px; font-size: var(--content-size); line-height: 1.55;
+    color: var(--fg); white-space: pre-wrap; word-break: break-word;
+    min-height: 2em; cursor: text; border-radius: 4px;
+    transition: background 0.15s ease;
+  }
+  .draft-block .draft-text:empty::before {
+    content: 'listening…'; color: var(--muted); font-style: italic;
+  }
+  .draft-block .draft-text:hover { background: rgba(201, 146, 44, 0.06); }
+  .draft-block .draft-text:focus {
+    outline: none; background: rgba(201, 146, 44, 0.1);
+    box-shadow: inset 0 0 0 1px rgba(201, 146, 44, 0.25);
+  }
+  .draft-block.flushing {
+    opacity: 0.4; border-color: var(--border);
+    pointer-events: none;
+  }
+  .line.streaming { opacity: 0.6; }
+  .line.streaming .text::after {
+    content: ''; display: inline-block; width: 2px; height: 1em;
+    background: var(--muted); margin-left: 3px; vertical-align: text-bottom;
+    animation: blink 0.8s step-end infinite;
+  }
+  /* Suppress the cursor when .text is empty (nothing to follow). */
+  .line.streaming .text:empty::after { display: none; }
+  /* "thinking…" sits on its own line below any partial reply so the box
+     isn't empty during agent.start and doesn't wipe the partial on
+     mid-reply tool-use cycles. */
+  .line.streaming .thinking-dots {
+    display: block; margin-top: 6px;
+    color: var(--muted); font-style: italic; opacity: 0.7;
+    font-size: calc(var(--content-size) - 1px);
+  }
+  .line.streaming .thinking-dots.hidden { display: none; }
+  /* Pending state: visible but dim — "we pressed send" without yet any
+     confirmation from the backend. Once onActivity fires, .pending is
+     removed (handleActivity in main.ts) and the dots reach full brightness. */
+  .line.streaming.pending .thinking-dots { opacity: 0.35; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .s0 .speaker { color: #6fa4d1; }
+  .s1 .speaker { color: #d19c6f; }
+  .s2 .speaker { color: #a98bc9; }
+  .s3 .speaker { color: #6fc9a8; }
+  .s4 .speaker { color: #c96f84; }
+
+  /* ── Attachment thumbnails in chat lines ── */
+  .line .line-attachments {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;
+  }
+  .line .line-attachments img {
+    max-width: 200px; max-height: 200px; object-fit: cover;
+    border-radius: 8px; border: 1px solid var(--border); cursor: zoom-in;
+    display: block;
+  }
+  .line .line-attachments video {
+    max-width: 280px; max-height: 200px;
+    border-radius: 8px; border: 1px solid var(--border);
+    display: block; background: #000;
+  }
+  /* Lightbox (tap thumbnail → full-screen) */
+  #lightbox {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.92);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 10000; cursor: zoom-out; padding: 20px;
+  }
+  #lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; }
+
+  /* ── System line (model switch, new chat, etc.) ── */
+  .line.system {
+    color: var(--muted); font-style: italic;
+    text-align: center; font-size: calc(var(--content-size) - 2px);
+    padding: 6px 12px; margin: 8px auto; max-width: 80%;
+    opacity: 0.75; letter-spacing: 0.02em;
+  }
+
+  /* ── Composer (unified text + actions box) ── */
+  .composer {
+    display: flex; flex-direction: column;
+    margin: 10px 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) * 1.25);
+    overflow: hidden;
+    transition: border-color .15s ease;
+  }
+  .composer:focus-within { border-color: var(--primary); }
+  @media (hover: none) and (pointer: coarse) {
+    .composer { margin-bottom: 25px; }
+  }
+  .composer textarea {
+    resize: none; min-height: 44px; max-height: 160px;
+    background: transparent; color: var(--fg); border: none;
+    padding: 12px 14px 4px; line-height: 1.45;
+    font-family: var(--font-sans); font-size: var(--content-size);
+    outline: none; width: 100%; box-sizing: border-box;
+  }
+  .composer textarea::placeholder { color: #666; }
+
+  .composer-actions {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 4px 8px 8px;
+  }
+  .composer-attachments {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 8px 10px 0;
+  }
+  /* Live STT interim preview inside the composer. Shown below the textarea
+     when autoSend is off and the mic is delivering non-final partials.
+     Small, faded, italic — visible feedback without fighting the textarea. */
+  .composer-interim {
+    font-style: italic; color: var(--muted);
+    padding: 0 12px 4px; min-height: 0;
+    max-height: 0; overflow: hidden;
+    transition: max-height 0.15s ease;
+    font-size: 0.85em;
+  }
+  .composer-interim.active { max-height: 2.4em; }
+  .attachment-chip {
+    position: relative; width: 48px; height: 48px; border-radius: 8px;
+    overflow: hidden; background: var(--surface); border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .attachment-chip img,
+  .attachment-chip video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .attachment-chip .chip-remove {
+    position: absolute; top: 2px; right: 2px; width: 18px; height: 18px;
+    border: none; border-radius: 50%; background: rgba(0,0,0,0.7); color: #fff;
+    font-size: 14px; line-height: 16px; cursor: pointer; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .attachment-chip .chip-remove:hover { background: rgba(0,0,0,0.9); }
+  .composer-actions-left,
+  .composer-actions-right { display: flex; align-items: center; gap: 4px; }
+
+  /* Icon buttons on the left + camera (attach, new-chat, camera): small, bare */
+  .composer .icon-btn {
+    padding: 0; background: none; border: none; cursor: pointer;
+    color: var(--muted); border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    width: 36px; height: 36px;
+    transition: color .15s, background .15s;
+  }
+  .composer .icon-btn:hover:not(:disabled) {
+    color: var(--fg); background: var(--surface);
+  }
+  .composer .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .composer .icon-btn svg { width: 22px; height: 22px; }
+  /* Desktop has no real rear camera — `capture="environment"` is ignored
+     there, so the button just opens a file picker identical to attach. Hide it. */
+  @media (hover: hover) and (pointer: fine) {
+    #btn-camera { display: none; }
+  }
+
+  /* Mic button: no chrome at all, stand-alone icon */
+  .composer .icon-btn-plain {
+    padding: 0; background: none; border: none; cursor: pointer;
+    color: var(--muted);
+    display: flex; align-items: center; justify-content: center;
+    width: 36px; height: 36px;
+    transition: color .15s;
+  }
+  .composer .icon-btn-plain:hover { color: var(--fg); }
+  .composer .icon-btn-plain svg { width: 22px; height: 22px; }
+
+  /* Send: circle, paper-airplane icon. Grey when idle, green when active. */
+  .composer .send-btn {
+    padding: 0; border: none; cursor: pointer;
+    width: 36px; height: 36px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--muted); color: var(--bg);
+    transition: background .15s, opacity .15s;
+  }
+  .composer .send-btn.active {
+    background: var(--primary); color: var(--primary-fg);
+  }
+  .composer .send-btn.active:hover { filter: brightness(1.08); }
+  .composer .send-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .composer .send-btn svg { width: 18px; height: 18px; }
+
+  /* Voice memo recording bar — replaces textarea when recording */
+  .memo-bar {
+    flex: 1; display: flex; align-items: center; gap: 8px;
+    background: var(--bg); border: none;
+    border-radius: var(--radius); padding: 6px 10px; min-height: 48px;
+    min-width: 0; overflow: hidden;
+    animation: memo-fade-in 0.2s ease;
+  }
+  @keyframes memo-fade-in { from { opacity: 0; transform: scaleX(0.95); } to { opacity: 1; transform: scaleX(1); } }
+  .memo-btn {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    padding: 4px; border-radius: 6px; display: flex; align-items: center;
+    transition: color 0.15s;
+  }
+  .memo-btn:hover { color: var(--fg); }
+  .memo-btn svg { width: 18px; height: 18px; }
+  .memo-trash:hover { color: var(--danger); }
+  .memo-send { color: var(--primary); }
+  .memo-send:hover { color: var(--fg); }
+  .memo-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--danger);
+    animation: memo-pulse 3.2s ease-in-out infinite; flex-shrink: 0;
+  }
+  @keyframes memo-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .memo-timer {
+    font-family: var(--font-mono); font-size: 12px; color: var(--muted);
+    min-width: 32px; flex-shrink: 0;
+  }
+  .memo-wave { flex: 1; height: 32px; min-width: 0; }
+  .memo-timer { white-space: nowrap; }
+  .memo-btn { flex-shrink: 0; }
+  .memo-dot { flex-shrink: 0; }
+
+  /* ── Debug ── */
+  #debug {
+    position: fixed; bottom: 0; left: 0; right: 0; max-height: 30vh;
+    overflow-y: auto; background: var(--debug-bg); color: var(--debug-fg);
+    font: 11px/1.45 var(--font-mono); padding: 8px 10px;
+    border-top: 1px solid var(--border); white-space: pre-wrap; display: none;
+    z-index: 100;
+  }
+  #debug.on { display: block; }
+  /* .toolbar button.dbg, .toolbar button.set — legacy, superseded by .toolbar-btn */
+
+  /* ── Main: chat column, center-constrained like Anthropic ── */
+  .main { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+  .chat-column {
+    flex: 1; display: flex; flex-direction: column; min-width: 0;
+    /* Center the column contents within a readable max-width. */
+    width: 100%; max-width: 760px; margin: 0 auto;
+    position: relative;  /* anchor for the jump-to-bottom button */
+  }
+
+  /* Jump-to-bottom button — appears when the user scrolls up during
+     an active reply; click returns to the live edge. Positioned
+     centered horizontally above the composer (matches the Anthropic /
+     ChatGPT placement), so the user's eye lands on it without needing
+     to scan a corner. */
+  .scroll-to-bottom {
+    position: absolute;
+    /* Overlap the composer's top edge — matches the Anthropic/ChatGPT
+       placement where the button's center sits right above the composer
+       top with a slight inset. */
+    bottom: calc(var(--composer-height, 64px) + 64px);
+    left: 50%; transform: translateX(-50%) translateY(8px) scale(0.9);
+    width: 36px; height: 36px; border-radius: 50%;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--muted); cursor: pointer; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0;
+    transition: opacity .15s ease, transform .15s ease, color .15s;
+    pointer-events: none; z-index: 15;
+    box-shadow: 0 4px 14px -6px rgba(0,0,0,0.25);
+  }
+  .scroll-to-bottom.visible {
+    opacity: 1; transform: translateX(-50%); pointer-events: auto;
+  }
+  .scroll-to-bottom:hover { color: var(--fg); border-color: var(--border-strong); }
+  .scroll-to-bottom svg { width: 18px; height: 18px; }
+  .scroll-to-bottom-badge {
+    position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px;
+    padding: 0 4px; border-radius: 8px; background: var(--primary);
+    color: #fff; font: 600 10px/16px var(--font-sans); text-align: center;
+    display: none;
+  }
+  .scroll-to-bottom.has-unread .scroll-to-bottom-badge { display: block; }
+
+  /* ── Inline attachments on agent bubbles ── */
+  .line-cards {
+    display: flex; flex-direction: column; gap: 12px;
+    margin-top: 10px;
+  }
+  .card-slot { min-width: 0; }
+
+  /* Image card */
+  .card-image img {
+    width: 100%; max-height: 70vh; object-fit: contain;
+    background: var(--bg); border-radius: var(--radius); border: 1px solid var(--border);
+    display: block;
+  }
+  .card-image .caption {
+    margin-top: 10px; font-size: 13px; color: var(--muted); line-height: 1.45;
+  }
+
+  /* Link list card */
+  .card-links { display: flex; flex-direction: column; gap: 12px; }
+  .card-links a.link-preview {
+    display: block; padding: 0; background: var(--bg);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--fg); text-decoration: none; overflow: hidden;
+    transition: all .15s ease;
+  }
+  .card-links a.link-preview:hover { border-color: var(--primary); box-shadow: 0 0 20px -8px var(--primary-glow); }
+  .card-links .preview-image {
+    width: 100%; aspect-ratio: 16/9; background: var(--surface-2);
+    object-fit: cover; display: block; border-bottom: 1px solid var(--border);
+  }
+  .card-links .preview-body { padding: 12px 14px; }
+  .card-links .preview-host {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11.5px; color: var(--primary); font-family: var(--font-mono);
+    letter-spacing: 0.04em; text-transform: lowercase;
+  }
+  .card-links .preview-host img { width: 16px; height: 16px; border-radius: 3px; }
+  .card-links .preview-title {
+    font-size: var(--content-size); font-weight: 600; color: var(--fg);
+    margin-top: 6px; line-height: 1.35; display: -webkit-box;
+    -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .card-links .preview-desc {
+    font-size: calc(var(--content-size) - 2px); color: var(--muted); margin-top: 6px; line-height: 1.45;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+
+  /* Inline iframe preview for frameable links */
+  .link-iframe-wrap {
+    width: 100%; aspect-ratio: 16/10; border-radius: var(--radius);
+    overflow: hidden; border: 1px solid var(--border);
+    background: #fff; margin-bottom: 12px;
+  }
+  .link-iframe-wrap iframe {
+    width: 100%; height: 100%; border: 0; display: block;
+  }
+  .link-iframe-wrap.maps { aspect-ratio: 4/3; }
+
+  /* Embed cards (YouTube, Spotify) */
+  .card-embed .embed-wrap { position: relative; width: 100%; border-radius: var(--radius); overflow: hidden; background: var(--bg); border: 1px solid var(--border); }
+  .card-embed.youtube .embed-wrap { aspect-ratio: 16 / 9; }
+  .card-embed iframe { width: 100%; height: 100%; border: 0; display: block; }
+  .card-embed.spotify .embed-wrap { height: 232px; }
+  .card-embed .open-ext {
+    display: inline-block; margin-top: 10px; font-size: 12px; color: var(--muted);
+    text-decoration: none; font-family: var(--font-mono);
+  }
+  .card-embed .open-ext:hover { color: var(--primary); }
+
+  /* Markdown/text card */
+  .card-text { font-size: var(--content-size); line-height: 1.6; color: var(--fg); }
+  .card-text p { margin-bottom: 10px; }
+  .card-text a { color: var(--primary); text-decoration: underline; }
+  .card-text ul, .card-text ol { margin: 10px 0 10px 22px; }
+  .card-text li { margin-bottom: 4px; }
+  .card-text code {
+    font-family: var(--font-mono); background: var(--bg); padding: 2px 6px;
+    border-radius: 4px; font-size: 12.5px; color: var(--primary);
+  }
+
+  /* Loading state */
+  .card-loading {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 40px 20px; color: var(--muted); font-family: var(--font-mono);
+    font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase;
+  }
+  .card-loading::before {
+    content: ''; width: 28px; height: 28px; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--primary);
+    animation: spin 0.9s linear infinite; margin-bottom: 14px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Ambient widget (desktop only) — small floating clock+weather ── */
+  .ambient-widget {
+    position: fixed; bottom: 16px; right: 16px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 999px; padding: 7px 14px;
+    display: flex; align-items: center; gap: 10px;
+    font: 500 13px/1 var(--font-mono); color: var(--muted);
+    letter-spacing: 0.04em; opacity: 0.55;
+    transition: opacity .15s ease, border-radius .2s ease, padding .2s ease;
+    cursor: pointer; pointer-events: auto; z-index: 20;
+    user-select: none;
+  }
+  .ambient-widget:hover { opacity: 1; }
+  .ambient-widget .ambient-time {
+    font-variant-numeric: tabular-nums; font-weight: 600;
+    color: var(--fg);
+  }
+  .ambient-widget .ambient-weather {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding-left: 10px; border-left: 1px solid var(--border);
+  }
+  .ambient-widget .ambient-temp { font-variant-numeric: tabular-nums; }
+
+  /* ── Expanded HUD state ── */
+  .ambient-widget.expanded {
+    border-radius: 14px; padding: 16px 18px 14px;
+    width: 240px; flex-direction: column; align-items: stretch; gap: 0;
+    opacity: 1;
+    box-shadow: 0 10px 30px -12px rgba(0,0,0,0.35);
+  }
+  .ambient-widget.expanded .amb-clock {
+    font: 700 44px/1 var(--font-sans); letter-spacing: -0.02em;
+    color: var(--fg); font-variant-numeric: tabular-nums;
+    text-align: center;
+  }
+  .ambient-widget.expanded .amb-date {
+    font: 400 11px/1.4 var(--font-mono); letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--muted);
+    text-align: center; margin-top: 6px;
+  }
+  .ambient-widget.expanded .amb-current {
+    margin-top: 14px; padding: 10px 12px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .ambient-widget.expanded .amb-icon { font-size: 28px; line-height: 1; }
+  .ambient-widget.expanded .amb-cur-temp {
+    font: 600 22px/1 var(--font-sans); color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .ambient-widget.expanded .amb-cur-desc {
+    font: 400 11px/1.3 var(--font-mono); color: var(--muted);
+    letter-spacing: 0.05em; text-transform: uppercase; margin-top: 3px;
+  }
+  .ambient-widget.expanded .amb-forecast {
+    margin-top: 10px; display: flex; flex-direction: column; gap: 2px;
+  }
+  .ambient-widget.expanded .amb-forecast-row {
+    display: grid; grid-template-columns: 1fr auto auto; align-items: center;
+    gap: 10px; padding: 4px 4px;
+    font: 500 12px/1 var(--font-mono); color: var(--muted);
+  }
+  .ambient-widget.expanded .amb-fc-day {
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .ambient-widget.expanded .amb-fc-icon { font-size: 16px; }
+  .ambient-widget.expanded .amb-fc-temps {
+    color: var(--fg); font-variant-numeric: tabular-nums; font-size: 12px;
+  }
+  .ambient-widget.expanded .amb-fc-lo { color: var(--muted); margin-left: 2px; }
+
+  @media (max-width: 860px) {
+    .ambient-widget { display: none; }
+  }
