@@ -129,8 +129,8 @@ export async function stop() {
     // `mediaRecorder` while we're waiting for onstop to fire, which
     // made the post-await `mediaRecorder.mimeType` access crash.
     const mimeType = mediaRecorder.mimeType;
-    await new Promise(resolve => {
-      mediaRecorder.onstop = resolve;
+    await new Promise<void>(resolve => {
+      mediaRecorder.onstop = () => resolve();
       try { mediaRecorder.stop(); } catch { resolve(); }
       setTimeout(resolve, 1000); // safety net
     });

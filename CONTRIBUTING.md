@@ -1,4 +1,4 @@
-# Contributing to ClawPortal
+# Contributing to Sidekick
 
 Thanks for wanting to contribute.
 
@@ -49,7 +49,7 @@ Please include:
 
 ## Scope
 
-ClawPortal is specifically a voice-first client for OpenClaw. PRs that generalise
+Sidekick is specifically a voice-first client for OpenClaw. PRs that generalise
 to other agent backends are welcome but need to pass through an adapter — see
 `src/gateway.mjs` for the current interface. Per-model quirks (e.g. Deepgram
 wedge detection) stay in their provider modules.

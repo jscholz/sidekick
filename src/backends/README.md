@@ -1,6 +1,6 @@
 # Backends
 
-ClawPortal's shell talks to a single backend adapter chosen at install
+Sidekick's shell talks to a single backend adapter chosen at install
 time via `SIDEKICK_BACKEND`. The adapter handles all wire-format
 parsing + protocol specifics; the shell only sees normalized events.
 

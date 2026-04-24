@@ -563,9 +563,11 @@ async function handleTranscribe(req, res) {
 // secrets are not hardcoded in the HTML, and so per-deployment tuning
 // (keyterms, app name, default coords) can be set without a rebuild.
 const GW_TOKEN = process.env.GW_TOKEN || '';
-// Default Deepgram key-term hints — biasing for the OpenClaw ecosystem
-// Default OpenClaw ecosystem terms. Always included.
-const DEFAULT_KEYTERMS = ['OpenClaw', 'Clawdian', 'Claw', 'SideKick', 'Deepgram'];
+// Default Deepgram key-term hints. Empty by default — per-install terms
+// live in `keyterms.txt` (gitignored) or `SIDEKICK_STT_KEYTERMS` env var.
+// Both are additive to this list; the DEFAULT is intentionally minimal so
+// forks don't inherit vocabulary biases from another project's agent.
+const DEFAULT_KEYTERMS: string[] = ['Sidekick', 'Deepgram'];
 
 // Optional env-var override (useful for Docker / CI where a file mount
 // is awkward). Additive to the file list below.

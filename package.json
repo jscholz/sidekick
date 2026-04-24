@@ -1,14 +1,14 @@
 {
-  "name": "clawportal",
+  "name": "sidekick",
   "version": "0.2.0",
   "type": "module",
   "private": true,
   "description": "Voice-first PWA frontend for OpenClaw — streaming speech-to-text, Deepgram Aura TTS, inline card renderers, and a pocket-lock overlay for mobile use.",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/jscholz/clawportal",
+  "homepage": "https://github.com/jscholz/sidekick",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jscholz/clawportal.git"
+    "url": "https://github.com/jscholz/sidekick.git"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -23,6 +23,7 @@
     "ws": "^8.20.0"
   },
   "devDependencies": {
+    "@types/node": "^25.6.0",
     "esbuild": "^0.28.0",
     "typescript": "^6.0.2"
   }

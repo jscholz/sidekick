@@ -1,4 +1,4 @@
-# ClawPortal
+# Sidekick
 
 Voice-first PWA frontend for [OpenClaw](https://github.com/openclaw/openclaw). Designed to run on a Raspberry Pi or any Linux host, installed as a standalone home-screen app on iOS / Android / desktop Chrome.
 
@@ -21,7 +21,7 @@ DEEPGRAM_API_KEY=xxx  GW_TOKEN=xxx  npm start
 
 Then open `http://localhost:3001` (install as a PWA from the browser menu for full lockscreen / background-audio support).
 
-ClawPortal expects an [OpenClaw](https://github.com/openclaw/openclaw) gateway reachable at `wss://<same-host>:18789/ws`. See OpenClaw's own quickstart for how to stand one up.
+Sidekick expects an [OpenClaw](https://github.com/openclaw/openclaw) gateway reachable at `wss://<same-host>:18789/ws`. See OpenClaw's own quickstart for how to stand one up.
 
 ### Environment
 
@@ -32,7 +32,7 @@ ClawPortal expects an [OpenClaw](https://github.com/openclaw/openclaw) gateway r
 | `GOOGLE_API_KEY` | no | Enables `/gen-image` (Gemini image gen) — the app runs fine without it |
 | `MAPS_EMBED_KEY` | no | Google Maps Embed API key for map cards |
 | `PORT` | no | Defaults to 3001 |
-| `SIDEKICK_APP_NAME` | no | Display name in the toolbar + browser tab (default `ClawPortal`) |
+| `SIDEKICK_APP_NAME` | no | Display name in the toolbar + browser tab (default `Sidekick`) |
 | `SIDEKICK_AGENT_LABEL` | no | Speaker label for agent bubbles / lockscreen (default `Clawdian`, i.e. the default `messages.responsePrefix` in openclaw.json) |
 | `SIDEKICK_STT_KEYTERMS` | no | Comma-separated proper nouns for Deepgram keyterm biasing. Additive to `keyterms.txt` (file is the normal home — see below). |
 | `SIDEKICK_WEATHER_LAT` | no | Default latitude for the ambient weather widget (fallback: London, 51.5074) |

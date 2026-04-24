@@ -1,6 +1,6 @@
 # Audio providers
 
-ClawPortal's speech-to-text and text-to-speech paths both dispatch through
+Sidekick's speech-to-text and text-to-speech paths both dispatch through
 provider modules in this directory. The goal is: adding a new STT/TTS
 backend is a drop-in module, not a surgical edit of the orchestrator.
 

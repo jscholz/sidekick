@@ -35,15 +35,23 @@ let mediaSessionInit = false;
 // mic path when any <audio> element is playing, even one with zero samples).
 let listeningActive = false;
 
-/** @type {{ onPlay?: () => void, onPause?: () => void, onStop?: () => void, onForeground?: () => void, onNextTrack?: () => void, onPreviousTrack?: () => void, onSeekTo?: (time: number) => void }} */
-let handlers = {};
+type SessionHandlers = {
+  onPlay?: () => void;
+  onPause?: () => void;
+  onStop?: () => void;
+  onForeground?: () => void;
+  onNextTrack?: () => void;
+  onPreviousTrack?: () => void;
+  onSeekTo?: (time: number) => void;
+};
+let handlers: SessionHandlers = {};
 
 /** Call once on app load. Sets up Media Session metadata + lifecycle log.
  *  Does NOT pin audioSession.type — callers (main.ts, tts.ts) set that
  *  just-in-time before getUserMedia / TTS playback. Pinning at boot made
  *  the hint sticky and prevented iOS from transitioning BT from HFP to
  *  A2DP for TTS, silencing mobile audio output. */
-export function init(opts = {}) {
+export function init(opts: SessionHandlers = {}) {
   handlers = opts;
   initMediaSession();
   initLifecycleLogging();
@@ -55,8 +63,8 @@ export function init(opts = {}) {
  *  A2DP output is available, whether new mic capture is allowed, etc.
  *  This is the single seam for session-type changes — no other module
  *  should touch navigator.audioSession.type directly. */
-function setSessionType(type) {
-  const as = /** @type {any} */ (navigator).audioSession;
+function setSessionType(type: string) {
+  const as = (navigator as any).audioSession;
   if (!as) return;
   try { as.type = type; } catch {}
 }
@@ -76,7 +84,7 @@ export function isStandalone() {
   try {
     if (window.matchMedia('(display-mode: standalone)').matches) return true;
     // iOS Safari legacy flag
-    if (/** @type {any} */ (window.navigator).standalone === true) return true;
+    if ((window.navigator as any).standalone === true) return true;
   } catch {}
   return false;
 }

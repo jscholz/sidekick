@@ -5,7 +5,7 @@
 
 import { log } from '../util/log.ts';
 
-let audioCtx = null;
+let audioCtx: AudioContext | null = null;
 let unlocked = false;
 let staleRoute = false;
 
@@ -19,8 +19,8 @@ export function getAudioCtx() { return audioCtx; }
  *  and the state machine keeps reporting "playing" while the new
  *  context produces silence. Tear-down runs synchronously; subscribers
  *  can still use getAudioCtx() to fade out before the close. */
-const routeChangeListeners = new Set();
-export function onRouteChange(fn) { routeChangeListeners.add(fn); }
+const routeChangeListeners = new Set<() => void>();
+export function onRouteChange(fn: () => void) { routeChangeListeners.add(fn); }
 
 /**
  * Call synchronously in a click handler. Creates AudioContext + primes <audio>.
@@ -29,7 +29,7 @@ export function onRouteChange(fn) { routeChangeListeners.add(fn); }
  * rebuild the context so iOS binds playback to the new route.
  * @param {HTMLAudioElement} player
  */
-export function unlock(player) {
+export function unlock(player: HTMLAudioElement) {
   if (unlocked && !staleRoute) return;
   if (unlocked && staleRoute) {
     // Notify subscribers BEFORE closing the ctx so they can use the old
@@ -53,7 +53,7 @@ export function unlock(player) {
 
   // Create AudioContext inside the gesture — iOS requirement.
   try {
-    const Ctx = window.AudioContext || /** @type {any} */ (window).webkitAudioContext;
+    const Ctx = window.AudioContext || (window as any).webkitAudioContext;
     audioCtx = new Ctx();
     log('audioCtx created, state=', audioCtx.state, 'rate=', audioCtx.sampleRate);
     const r = audioCtx.resume();
