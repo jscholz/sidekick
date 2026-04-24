@@ -259,7 +259,7 @@ export const openclawAdapter = {
     return gateway.isConnected();
   },
 
-  sendMessage(text, opts = {}) {
+  sendMessage(text: string, opts: { voice?: boolean; attachments?: any[] } = {}) {
     // Apply openclaw's voice convention — agent reads "[voice]" as a hint
     // to be lenient about transcription errors. Shell passes voice:true
     // from dictation / memo paths; we prefix here so the shell doesn't
