@@ -80,20 +80,15 @@ async function refreshModelState() {
       parent.appendChild(opt);
     };
 
-    if (preferred.length > 0 && other.length > 0) {
-      // Real partition → render as <optgroup>s. Avoids ambiguous ordering
-      // between a curated list and the long tail.
-      const gPref = document.createElement('optgroup');
-      gPref.label = 'Preferred';
-      for (const entry of preferred) appendOption(gPref, entry);
-      sel.appendChild(gPref);
-      const gOther = document.createElement('optgroup');
-      gOther.label = 'All models';
-      for (const entry of other) appendOption(gOther, entry);
-      sel.appendChild(gOther);
+    if (preferred.length > 0) {
+      // Curated filter is active — show only the preferred set. Widening
+      // the picker is a server-side concern (edit SIDEKICK_PREFERRED_MODELS
+      // or clear it to get the full catalog back), not a per-user toggle.
+      for (const entry of preferred) appendOption(sel, entry);
     } else {
-      // No preferred config (or catalog came back flat) → render one list.
-      for (const entry of [...preferred, ...other]) appendOption(sel, entry);
+      // No preferred config (or catalog came back flat) → render the full
+      // catalog. This covers backends that don't tag groups (e.g. openclaw).
+      for (const entry of other) appendOption(sel, entry);
     }
 
     // `current` should now match exactly one <option> (either a catalog
