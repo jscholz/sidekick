@@ -248,8 +248,8 @@
     </div>
     <div class="row">
       <label for="set-sessions-filter">Sessions filter</label>
-      <input type="text" id="set-sessions-filter" placeholder="sidekick-*" style="flex:1">
-      <span class="hint">glob patterns (comma-sep) for which webchat sessions show in the drawer. Telegram sessions always show.</span>
+      <input type="text" id="set-sessions-filter" placeholder="sidekick-*,*whatsapp*,*telegram*" style="flex:1">
+      <span class="hint">comma-separated globs matched against each session's title, source, id, or stored conversation name. Tap <code>&#8942;</code> &rarr; Info on any row to see the raw values. Empty = show all sessions.</span>
     </div>
     <div class="row">
       <label for="set-tts-engine">TTS engine</label>

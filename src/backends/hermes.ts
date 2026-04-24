@@ -427,19 +427,32 @@ export const hermesAdapter = {
       throw new Error(`resumeSession HTTP ${r.status}`);
     }
     const d = await r.json();
+    const result = {
+      messages: d.messages || [],
+      firstId: d.firstId ?? null,
+      hasMore: !!d.hasMore,
+    };
     if (myToken !== conversationToken) {
-      // Superseded — another rotation happened while we were fetching. Don't
-      // overwrite conversationName; return messages so the caller can still
-      // use them (e.g., replay into chat if they want), but the adapter's
-      // active conversation stays on whatever the latest op set it to.
       log(`hermes: resumeSession(${id}) superseded; not rewriting conversationName`);
-      return { messages: d.messages || [] };
+      return result;
     }
     conversationName = id;
     currentReplyId = null;
     cumulativeText = '';
-    log(`hermes: resumed session (conversation=${id}, ${d.messages?.length || 0} messages)`);
-    return { messages: d.messages || [] };
+    log(`hermes: resumed session (conversation=${id}, ${result.messages.length} messages, hasMore=${result.hasMore})`);
+    return result;
+  },
+
+  async loadEarlier(id: string, beforeId: number) {
+    const q = new URLSearchParams({ before: String(beforeId) });
+    const r = await fetch(`${location.origin}/api/hermes/sessions/${encodeURIComponent(id)}/messages?${q}`);
+    if (!r.ok) throw new Error(`loadEarlier HTTP ${r.status}`);
+    const d = await r.json();
+    return {
+      messages: d.messages || [],
+      firstId: d.firstId ?? null,
+      hasMore: !!d.hasMore,
+    };
   },
 
   async renameSession(id: string, title: string) {

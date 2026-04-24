@@ -20,7 +20,7 @@ import * as backend from './backend.ts';
 import * as sessionCache from './sessionCache.ts';
 import { log, diag } from './util/log.ts';
 
-let onResumeCb: ((id: string, messages: any[]) => void) | null = null;
+let onResumeCb: ((id: string, messages: any[], pagination?: { firstId: number | null; hasMore: boolean }) => void) | null = null;
 
 /** Optimistic active-id override for refresh(). The adapter's
  *  `getCurrentSessionId()` doesn't update until `resumeSession()` returns
@@ -198,6 +198,10 @@ function openMenu(li: HTMLLIElement, s: any) {
   const menu = document.createElement('div');
   menu.className = 'sess-menu';
 
+  const infoBtn = document.createElement('button');
+  infoBtn.textContent = 'Info';
+  infoBtn.onclick = (e) => { e.stopPropagation(); menu.remove(); showInfo(s); };
+
   const renameBtn = document.createElement('button');
   renameBtn.textContent = 'Rename';
   renameBtn.onclick = (e) => { e.stopPropagation(); menu.remove(); promptRename(s); };
@@ -207,6 +211,7 @@ function openMenu(li: HTMLLIElement, s: any) {
   deleteBtn.className = 'danger';
   deleteBtn.onclick = (e) => { e.stopPropagation(); menu.remove(); promptDelete(s); };
 
+  menu.appendChild(infoBtn);
   menu.appendChild(renameBtn);
   menu.appendChild(deleteBtn);
   li.appendChild(menu);
@@ -220,6 +225,24 @@ function openMenu(li: HTMLLIElement, s: any) {
     };
     document.addEventListener('click', closer);
   }, 0);
+}
+
+/** Surface the raw filterable fields (title / source / id) so the user
+ *  can see exactly what any sessions-filter glob would match against.
+ *  Intentionally plain-text + copy-friendly rather than a styled modal —
+ *  the whole point is to show the raw values. */
+function showInfo(s: any) {
+  const lines = [
+    `Title:  ${s.title || '(none)'}`,
+    `Source: ${s.source || '(unknown)'}`,
+    `ID:     ${s.id}`,
+    `Msgs:   ${s.messageCount ?? 0}`,
+  ];
+  // Any of these fields are matched by the sessions-filter globs (see
+  // server.ts handleHermesSessionsList). The dialog itself is just a
+  // prompt() so the user can copy values straight out — minimal chrome,
+  // works offline, no extra z-index juggling.
+  alert(lines.join('\n') + '\n\nSessions-filter globs match any of these.');
 }
 
 async function promptRename(s: any) {
@@ -289,13 +312,17 @@ async function resume(id: string) {
     //    has new turns), the second replay catches up. resumeSession also
     //    abort-in-flights any stray stream from a prior session.
     try {
-      const { messages } = await backend.resumeSession(id);
-      log(`sessionDrawer: resumed ${id} (${messages.length} messages)`);
+      const result: any = await backend.resumeSession(id);
+      const messages = result.messages || [];
+      const pagination = { firstId: result.firstId ?? null, hasMore: !!result.hasMore };
+      log(`sessionDrawer: resumed ${id} (${messages.length} messages, hasMore=${pagination.hasMore})`);
       await sessionCache.putMessagesCache(id, messages);
-      // Only re-replay if server actually differs from cached count.
-      // Full diff isn't worth it — count mismatch is the common stale signal.
       if (!cached || cached.messages.length !== messages.length) {
-        onResumeCb?.(id, messages);
+        onResumeCb?.(id, messages, pagination);
+      } else {
+        // Cache matched — still need to hand fresh pagination state to the
+        // chat pane (cached replay couldn't know firstId/hasMore).
+        onResumeCb?.(id, messages, pagination);
       }
       refresh();
     } catch (e: any) {

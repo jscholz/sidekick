@@ -522,6 +522,7 @@ async function boot() {
   // Chat
   const transcriptEl = document.getElementById('transcript');
   const chatRestored = await chat.init(transcriptEl);
+  chat.onLoadEarlier(loadEarlierHistory);
   // Backfill ALWAYS runs on connect — dedup by text handles duplicates.
   // The snapshot lives in IndexedDB (survives tab close, PWA kills, and
   // cross-SW-version reloads); backfill plugs any residual gap on connect.
@@ -1399,7 +1400,11 @@ async function boot() {
 /** Replay a transcript into the chat UI after the adapter resumes a session.
  *  Clears current chat + replyCache, re-renders the messages, and marks
  *  history as loaded so backfillHistory doesn't double-append. */
-function replaySessionMessages(id: string, messages: any[]) {
+function replaySessionMessages(
+  id: string,
+  messages: any[],
+  pagination?: { firstId: number | null; hasMore: boolean }
+) {
   chat.clear();
   replyCache.clear();
   voice.cancelPendingFlush();
@@ -1413,30 +1418,68 @@ function replaySessionMessages(id: string, messages: any[]) {
   // re-seed the drawer highlight to this session even though adapter
   // state (conversationName) resets to default on reload.
   chat.trackViewedSession(id);
+  viewedSessionForLoadEarlier = id;
   const label = getAgentLabel();
   for (const m of messages) {
-    const raw = (m.content || '').trim();
-    // Same stripper as the live delta path — hides Gemma reasoning-tag
-    // leftovers ("thought" / "thinking" / "reasoning" bare words) from
-    // historical replay.
-    const text = stripReasoningLeak(raw);
-    if (!text) continue;
-    // Hermes state.db stores timestamp as float UNIX seconds. chat.addLine's
-    // formatTime passes through new Date(ts) which expects milliseconds, so
-    // without the *1000 it'd render 1970. If ts is already >= 1e12 it's
-    // probably ms already (openclaw / openai-compat backends), so pass
-    // through unchanged.
-    const rawTs = m.timestamp || m.created_at || m.at;
-    const ts = typeof rawTs === 'number' && rawTs < 1e12 ? rawTs * 1000 : rawTs;
-    if (m.role === 'assistant') {
-      if (NO_REPLY_RE.test(text)) continue;
-      chat.addLine(label, text, 'agent history', { markdown: true, timestamp: ts });
-    } else if (m.role === 'user') {
-      chat.addLine('You', text, 's0 history', { timestamp: ts });
-    }
-    // Tool role / system role: skip for now; UI has no slot for them.
+    renderHistoryMessage(m, label);
   }
+  // Register pagination state AFTER messages land so the scroll listener
+  // doesn't fire mid-render. hasMore=false (or missing) disables lazy-load.
+  chat.setPaginationState(pagination?.firstId ?? null, !!pagination?.hasMore);
   chat.forceScrollToBottom();
+}
+
+/** Shared rendering for both initial replay (append) and load-earlier
+ *  (prepend, batched). The caller owns scroll behavior + persist. */
+function renderHistoryMessage(m: any, label: string, mode: 'append' | 'prepend' = 'append') {
+  const raw = (m.content || '').trim();
+  // Same stripper as the live delta path — hides Gemma reasoning-tag
+  // leftovers ("thought" / "thinking" / "reasoning" bare words) from
+  // historical replay.
+  const text = stripReasoningLeak(raw);
+  if (!text) return;
+  // Hermes state.db stores timestamp as float UNIX seconds. chat.addLine's
+  // formatTime passes through new Date(ts) which expects milliseconds, so
+  // without the *1000 it'd render 1970. If ts is already >= 1e12 it's
+  // probably ms already (openclaw / openai-compat backends), so pass
+  // through unchanged.
+  const rawTs = m.timestamp || m.created_at || m.at;
+  const ts = typeof rawTs === 'number' && rawTs < 1e12 ? rawTs * 1000 : rawTs;
+  const prepend = mode === 'prepend';
+  if (m.role === 'assistant') {
+    if (NO_REPLY_RE.test(text)) return;
+    chat.addLine(label, text, 'agent history', { markdown: true, timestamp: ts, prepend, batch: prepend });
+  } else if (m.role === 'user') {
+    chat.addLine('You', text, 's0 history', { timestamp: ts, prepend, batch: prepend });
+  }
+  // Tool role / system role: skip for now; UI has no slot for them.
+}
+
+/** Session id the chat is currently viewing — used by the load-earlier
+ *  callback so it knows which session to fetch older messages for.
+ *  Updated by replaySessionMessages. */
+let viewedSessionForLoadEarlier: string | null = null;
+
+async function loadEarlierHistory(beforeId: number) {
+  const id = viewedSessionForLoadEarlier;
+  if (!id) return;
+  const result: any = await backend.loadEarlier(id, beforeId);
+  const older = result.messages || [];
+  if (!older.length) {
+    chat.setPaginationState(null, false);
+    return;
+  }
+  const label = getAgentLabel();
+  chat.prependHistory(() => {
+    // Iterate oldest→newest. Each prepend inserts at firstChild, so the
+    // LAST call ends up topmost — which is what we want since older
+    // messages should sit above newer ones that were already on screen.
+    // (The returned `messages` array is chronological oldest→newest.)
+    for (let i = older.length - 1; i >= 0; i--) {
+      renderHistoryMessage(older[i], label, 'prepend');
+    }
+  });
+  chat.setPaginationState(result.firstId ?? null, !!result.hasMore);
 }
 
 // ─── Session history backfill ────────────────────────────────────────────────

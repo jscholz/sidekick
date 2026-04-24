@@ -179,10 +179,15 @@
  *   reconnect. Null if no session has been opened yet.
  * @property {(limit?: number) => Promise<SessionInfo[]>} [listSessions]
  *   Available when `capabilities.sessionBrowsing` is true.
- * @property {(id: string) => Promise<{ messages: SessionMessage[] }>} [resumeSession]
+ * @property {(id: string) => Promise<{ messages: SessionMessage[], firstId?: number|null, hasMore?: boolean }>} [resumeSession]
  *   Point the adapter at an existing session and return its transcript. The
  *   shell replays the messages into chat UI. Next `sendMessage` continues
  *   that session server-side (e.g. hermes chains via previous_response_id).
+ *   May return only the newest page; `firstId` + `hasMore` describe the
+ *   cursor for loadEarlier (omitted = full transcript returned).
+ * @property {(id: string, beforeId: number) => Promise<{ messages: SessionMessage[], firstId?: number|null, hasMore?: boolean }>} [loadEarlier]
+ *   Fetch the next older page of a session's transcript. Called by the
+ *   chat pane when the user scrolls near the top and `hasMore` was true.
  */
 
 // JSDoc-only.

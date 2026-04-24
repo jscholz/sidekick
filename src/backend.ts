@@ -139,6 +139,12 @@ export async function resumeSession(id) {
   return a.resumeSession(id);
 }
 
+export async function loadEarlier(id, beforeId) {
+  const a = await loadAdapter();
+  if (!a.loadEarlier) return { messages: [], firstId: null, hasMore: false };
+  return a.loadEarlier(id, beforeId);
+}
+
 export async function renameSession(id, title) {
   const a = await loadAdapter();
   if (!a.renameSession) throw new Error(`backend ${a.name} does not support session rename`);

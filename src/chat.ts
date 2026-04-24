@@ -164,12 +164,13 @@ export async function init(el) {
     scrollToBottomBtn.addEventListener('click', () => forceScrollToBottom());
   }
   if (transcriptEl) {
-    // Update pinned state whenever the user scrolls. Passive for perf.
     transcriptEl.addEventListener('scroll', () => {
       const wasPinned = pinnedToBottom;
       pinnedToBottom = isPinned();
       if (pinnedToBottom && !wasPinned) missedWhileScrolled = 0;
       updateButton();
+      // Lazy-load older history when the user scrolls near the top.
+      maybeLoadEarlier();
     }, { passive: true });
   }
 
@@ -264,6 +265,12 @@ export function addLine(speaker: string, text: string, cls = '', opts: {
   timestamp?: number | Date | string;
   attachments?: Array<{ dataUrl: string; mimeType: string; fileName?: string }>;
   replyId?: string;
+  /** Insert at the top of the transcript instead of appending. Used by
+   *  lazy-loaded history. */
+  prepend?: boolean;
+  /** Skip autoScroll + persist. Caller runs them once after the batch.
+   *  Used by prependHistory to preserve scroll position and avoid N IDB writes. */
+  batch?: boolean;
 } = {}) {
   if (!transcriptEl) return null;
   const div = document.createElement('div');
@@ -369,10 +376,71 @@ export function addLine(speaker: string, text: string, cls = '', opts: {
     if (attDiv.children.length > 0) div.appendChild(attDiv);
   }
 
-  transcriptEl.appendChild(div);
-  autoScroll();
-  persist();
+  if (opts.prepend) {
+    transcriptEl.insertBefore(div, transcriptEl.firstChild);
+  } else {
+    transcriptEl.appendChild(div);
+  }
+  if (!opts.batch) {
+    autoScroll();
+    persist();
+  }
   return div;
+}
+
+// ─── Lazy-load / pagination ─────────────────────────────────────────────────
+
+let paginationOldestId: number | null = null;
+let paginationHasMore = false;
+let paginationLoading = false;
+let paginationCb: ((beforeId: number) => Promise<void>) | null = null;
+/** Pixels from the top that trigger a background "load earlier" fetch. */
+const LOAD_EARLIER_THRESHOLD_PX = 150;
+
+/** Called by main.ts after replaying a page of session history so chat
+ *  knows whether there's older content to fetch and what cursor to use.
+ *  Pass oldestId=null, hasMore=false to disable pagination (e.g. for
+ *  fresh sessions or cached replays with the full transcript). */
+export function setPaginationState(oldestId: number | null, hasMore: boolean) {
+  paginationOldestId = oldestId;
+  paginationHasMore = hasMore;
+  paginationLoading = false;
+}
+
+/** Register the cursor-to-messages callback. Called once on boot; the cb
+ *  is expected to fetch, prepend via prependHistory(), and re-call
+ *  setPaginationState with the new cursor. */
+export function onLoadEarlier(cb: (beforeId: number) => Promise<void>) {
+  paginationCb = cb;
+}
+
+/** Batch-prepend historical messages while preserving the user's scroll
+ *  position. renderFn should call addLine(..., {prepend: true, batch: true})
+ *  per message, iterating oldest→newest so chronological order is
+ *  preserved at the top of the transcript. */
+export function prependHistory(renderFn: () => void) {
+  if (!transcriptEl) { renderFn(); return; }
+  const oldScrollTop = transcriptEl.scrollTop;
+  const oldScrollHeight = transcriptEl.scrollHeight;
+  renderFn();
+  const newScrollHeight = transcriptEl.scrollHeight;
+  transcriptEl.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
+  persist();
+}
+
+async function maybeLoadEarlier() {
+  if (!paginationHasMore || paginationLoading || !paginationCb || paginationOldestId == null) return;
+  if (!transcriptEl) return;
+  if (transcriptEl.scrollTop > LOAD_EARLIER_THRESHOLD_PX) return;
+  paginationLoading = true;
+  const cursor = paginationOldestId;
+  try {
+    await paginationCb(cursor);
+  } catch (e: any) {
+    diag(`chat.loadEarlier failed: ${e?.message || e}`);
+  } finally {
+    paginationLoading = false;
+  }
 }
 
 /** Open a full-screen overlay showing the given image. Tap anywhere to dismiss. */

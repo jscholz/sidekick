@@ -154,11 +154,10 @@ const DEFAULTS = {
   audioFeedbackVolume: 0.5,
   theme: 'dark',
   // Session drawer filter — passed as `?prefix=` to /api/hermes/sessions.
-  // Supports comma-separated glob patterns (e.g. 'sidekick-*,work-*');
-  // '*' converts to SQL LIKE '%' on the server. Sessions whose source
-  // isn't webchat (telegram, cli) always use the raw UUID as id, so the
-  // filter only restricts webchat rows — telegram always shows.
-  sessionsFilter: 'sidekick-*',
+  // Comma-separated globs matched against the session's title, source,
+  // id, or stored conversation name (tap ⋮ → Info on any row to see the
+  // raw values). Empty → show ALL sessions. Non-empty → union of matches.
+  sessionsFilter: 'sidekick-*,*whatsapp*,*telegram*',
 };
 
 let current = { ...DEFAULTS };
@@ -441,7 +440,7 @@ export function hydrate(handlers: {
 
   if (setSessionsFilter) {
     setSessionsFilter.addEventListener('change', () => {
-      set('sessionsFilter', setSessionsFilter.value.trim() || 'sidekick-*');
+      set('sessionsFilter', setSessionsFilter.value.trim());
       if (handlers.onSessionsFilterChange) handlers.onSessionsFilterChange();
     });
   }

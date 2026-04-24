@@ -923,45 +923,44 @@ async function sqlQuery(db: string, sql: string): Promise<any[]> {
 async function handleHermesSessionsList(req, res) {
   const url = new URL(req.url, 'http://x');
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
-  // Prefix filter: accept a user-supplied glob (e.g. 'sidekick-*,work-*'),
-  // convert '*' → SQL LIKE '%', fall back to the env/default prefix. Only
-  // applied to webchat (api_server) rows; telegram always shows because
-  // it uses the UUID as id and naming doesn't follow the sidekick
-  // convention. Strictly strip to the chars our adapter actually
-  // produces so the value can be string-concat into SQL safely.
-  const rawPrefix = url.searchParams.get('prefix') || HERMES_SESSION_PREFIX;
-  const prefixes = rawPrefix.split(',')
-    .map(p => p.trim().replace(/[^a-zA-Z0-9_\-*]/g, ''))
+
+  // Filter: comma-separated globs matched against any of the fields
+  // exposed in the session Info panel (title, conversation name, source,
+  // id). Empty filter → show all sessions. Non-empty → union of matches.
+  const rawFilter = url.searchParams.get('prefix') || '';
+  const globs = rawFilter
+    .split(',')
+    .map(t => t.trim())
     .filter(Boolean)
-    .map(p => p.replace(/\*/g, '%'));
-  const prefixClause = prefixes.length
-    ? '(' + prefixes.map(p => `c.name LIKE '${p}'`).join(' OR ') + ')'
-    : '1=0';
-  const prefix = prefixes[0]?.replace(/%$/, '') || 'sidekick-';
-  // Authoritative source is state.db/sessions — every channel (api_server /
-  // telegram / cli) writes here. Previously we queried response_store.db/
-  // conversations by 'sidekick-' name prefix, which hid telegram sessions
-  // entirely (telegram goes straight to state.db without a response_store
-  // conversations row). New approach:
-  //   - For api_server (sidekick webchat), join to conversations to get the
-  //     stable `sidekick-*` id the hermes adapter uses for resume.
-  //   - For telegram (and any other non-webchat source), use the session
-  //     UUID directly as the id — drawer renders these as read-only
-  //     transcripts (send path still routes through the active sidekick
-  //     conversation).
-  const sources = HERMES_SESSION_SOURCES
-    .map(s => s.replace(/[^a-zA-Z0-9_]/g, ''))
+    .map(t => t.replace(/[^a-zA-Z0-9_\-*:@.]/g, '').replace(/\*/g, '%'))
     .filter(Boolean);
-  if (!sources.length) {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ sessions: [] }));
-    return;
+
+  let whereClause: string;
+  if (globs.length === 0) {
+    // Still hide 'tool'-source sessions (never user-facing).
+    whereClause = "s.source != 'tool'";
+  } else {
+    const globClauses: string[] = [];
+    for (const g of globs) {
+      globClauses.push(`s.title LIKE '${g}'`);
+      globClauses.push(`s.source LIKE '${g}'`);
+      globClauses.push(`s.id LIKE '${g}'`);
+      globClauses.push(`EXISTS (
+        SELECT 1 FROM store.responses r
+        JOIN store.conversations c ON c.response_id = r.response_id
+        WHERE json_extract(r.data, '$.session_id') = s.id
+          AND c.name LIKE '${g}'
+      )`);
+    }
+    whereClause = globClauses.join(' OR ');
   }
-  const sourceList = sources.map(s => `'${s}'`).join(',');
-  // Resolve the conversation name lazily via scalar subquery so we don't
-  // fan out into N rows when a session has N turns (each turn is a
-  // response row in response_store.db). Returns exactly one row per
-  // state.db session.
+
+  // For api_server rows, pick the stable 'sidekick-*' conversation name
+  // if one exists (so the hermes adapter can resume). For telegram /
+  // whatsapp / cli and for orphan api_server sessions without a
+  // conversation name, return s.id directly. We pick whichever
+  // conversation name is most recent regardless of whether it matched
+  // the filter — the filter decides INCLUSION, not name resolution.
   const sql = `
     ATTACH '${HERMES_STORE_DB.replace(/'/g, "''")}' AS store;
     SELECT
@@ -970,7 +969,6 @@ async function handleHermesSessionsList(req, res) {
           (SELECT c.name FROM store.responses r
              JOIN store.conversations c ON c.response_id = r.response_id
              WHERE json_extract(r.data, '$.session_id') = s.id
-               AND ${prefixClause}
              ORDER BY r.accessed_at DESC LIMIT 1),
           s.id)
         ELSE s.id END AS id,
@@ -982,23 +980,13 @@ async function handleHermesSessionsList(req, res) {
          WHERE m.session_id = s.id AND m.role IN ('user','assistant') AND m.content IS NOT NULL
          ORDER BY id DESC LIMIT 1) AS snippet
     FROM sessions s
-    WHERE s.source IN (${sourceList})
-      -- Hide subagent/delegate spawns. Hermes's delegate tool creates
-      -- new api_server sessions as children of the main session (tracked
-      -- via parent_session_id). They're agent-internal, not user-facing
-      -- conversations — showing them in the drawer confused the user
-      -- into thinking their message went "to a new session" when really
-      -- it stayed in the parent and just spawned delegate work.
+    WHERE (${whereClause})
+      -- Always hide subagent/delegate spawns (parent_session_id != NULL) —
+      -- agent-internal, never user-facing.
       AND s.parent_session_id IS NULL
     ORDER BY lastMessageAt DESC NULLS LAST
     LIMIT ${limit}
   `;
-  // Note: the prefix filter only restricts the NAME returned for api_server
-  // sessions — the scalar subquery above picks a matching conversation name
-  // or falls back to s.id. Orphan api_server sessions (no conversation row
-  // at all) always show by UUID. Intentional: users can still see their
-  // full chat history regardless of which conversation names happen to
-  // match their filter.
   try {
     const rows = await sqlQuery(HERMES_STATE_DB, sql);
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -1268,16 +1256,18 @@ async function handleHermesSessionMessages(req, res, name: string) {
     res.end(JSON.stringify({ error: 'invalid session id' }));
     return;
   }
+  const url = new URL(req.url, 'http://x');
+  const limit = Math.max(1, Math.min(500, parseInt(url.searchParams.get('limit') || '200', 10)));
+  // Pagination cursor: fetch messages with id < before. Omitted = newest page.
+  const beforeRaw = url.searchParams.get('before');
+  const before = beforeRaw && /^\d+$/.test(beforeRaw) ? parseInt(beforeRaw, 10) : null;
   // AUTHORITATIVE read path: state.db/messages keyed by the session UUID.
   // Earlier implementation read from responses.data.conversation_history
   // but that payload compounds across turns (each response embeds its
   // full input-context, which includes prior turns' contexts, growing
-  // recursively) — rendering it produced wildly duplicated bubbles in
-  // the chat. state.db/messages is the per-turn log hermes updates
+  // recursively). state.db/messages is the per-turn log hermes updates
   // exactly once per user/assistant entry.
   try {
-    // Resolve the UUID: sidekick names go through conversations lookup;
-    // anything else is assumed to already be a state.db session id.
     let uuid: string | null = null;
     if (name.startsWith('sidekick-') || name.startsWith('sideclaw-')) {
       const uuidSql = `SELECT json_extract(r.data, '$.session_id') AS uuid
@@ -1298,17 +1288,30 @@ async function handleHermesSessionMessages(req, res, name: string) {
       res.end(JSON.stringify({ error: 'derived session_id failed validation' }));
       return;
     }
-    const msgSql = `SELECT role, content, tool_name, timestamp FROM messages
-      WHERE session_id='${uuid}' ORDER BY id`;
+    // Newest-first page, reversed client-visibly below. SQLite's `id` is
+    // autoincrement so lower = older. hasMore is a peek of 1 extra row.
+    const whereCursor = before !== null ? `AND id < ${before}` : '';
+    const msgSql = `SELECT id, role, content, tool_name, timestamp FROM messages
+      WHERE session_id='${uuid}' ${whereCursor}
+      ORDER BY id DESC LIMIT ${limit + 1}`;
     const rows = await sqlQuery(HERMES_STATE_DB, msgSql);
-    const messages = rows.map((m: any) => ({
+    const hasMore = rows.length > limit;
+    const trimmed = hasMore ? rows.slice(0, limit) : rows;
+    // Reverse to chronological (oldest → newest).
+    trimmed.reverse();
+    const messages = trimmed.map((m: any) => ({
+      id: m.id,
       role: m.role,
       content: m.content || '',
       timestamp: m.timestamp,
       toolName: m.tool_name || undefined,
     }));
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ messages }));
+    res.end(JSON.stringify({
+      messages,
+      firstId: messages.length ? messages[0].id : null,
+      hasMore,
+    }));
   } catch (e: any) {
     console.error('hermes session messages failed:', e.message);
     res.writeHead(500, { 'content-type': 'application/json' });
