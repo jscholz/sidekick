@@ -59,10 +59,15 @@
     font: 15px/1.55 var(--font-sans);
     display: flex; flex-direction: column;
     -webkit-font-smoothing: antialiased;
-    /* Leave room for the collapsed sidebar rail on the left. */
+    /* Leave room for the collapsed sidebar rail on the left. Shifts to 260px
+     * when the sidebar is expanded on desktop (Gemini-style — content moves
+     * rather than being overlaid, so the header/logo stay visible). The
+     * transition duration matches the sidebar width animation. */
     padding-left: 48px;
+    transition: padding-left 0.18s ease;
     /* --content-size: 15px; comes from :root, controlled by settings slider */
   }
+  body.sidebar-expanded { padding-left: 260px; }
 
   /* ── Sidebar (Gemini-style): persistent collapsed rail, expands on hamburger ── */
   #sidebar {
@@ -74,7 +79,9 @@
     transition: width 0.18s ease;
     overflow: hidden;
   }
-  #sidebar.expanded { width: 260px; box-shadow: 0 0 24px rgba(0,0,0,0.35); }
+  /* Desktop expand: no shadow — content shifts right so the panel isn't
+   * overlaying anything. Mobile re-adds the shadow below since it overlays. */
+  #sidebar.expanded { width: 260px; }
   .sidebar-top { display: flex; flex-direction: column; padding: 10px 8px 6px; gap: 4px; }
   .sidebar-content {
     flex: 1; overflow-y: auto; padding: 8px;
@@ -119,6 +126,8 @@
   .toolbar .toolbar-btn.mobile-only { display: none; }
   @media (max-width: 699px) {
     body { padding-left: 0; }  /* no rail reserved */
+    /* Mobile: sidebar overlays content, so don't shift padding. */
+    body.sidebar-expanded { padding-left: 0; }
     #sidebar.collapsed {
       /* Slide off-screen instead of drawing a rail. The element stays in the
        * DOM so the global click-outside handler still works — it just isn't
@@ -129,6 +138,9 @@
     #sidebar.expanded {
       width: min(85vw, 300px);
       transform: translateX(0);
+      /* Overlay-style shadow — only on mobile, where the panel sits on top
+       * of content instead of pushing it. */
+      box-shadow: 0 0 24px rgba(0,0,0,0.35);
     }
     .toolbar .toolbar-btn.mobile-only { display: flex; }
     body.sidebar-expanded #sb-toggle-mobile { display: none; }

@@ -332,11 +332,13 @@ async function boot() {
 
   // Sidebar — always visible (48px rail), expands on hamburger. Holds
   // new-chat, sessions list (if backend supports it), and info/settings
-  // at the bottom. The expand state is ephemeral (not persisted) — taps
-  // outside collapse it so the chat reclaims focus quickly.
+  // at the bottom. Desktop: expand state persists across reload and shifts
+  // body content right (Gemini-style). Mobile: overlay-style, never
+  // persisted (taps outside collapse it so the chat reclaims focus).
   const sidebar = document.getElementById('sidebar');
   const sbToggle = document.getElementById('sb-toggle');
   const sbToggleMobile = document.getElementById('sb-toggle-mobile');
+  const SIDEBAR_PREF_KEY = 'sidekick.sidebar.expanded';
   if (sidebar && sbToggle) {
     const setExpanded = (exp: boolean) => {
       sidebar.classList.toggle('expanded', exp);
@@ -344,10 +346,23 @@ async function boot() {
       sidebar.setAttribute('aria-expanded', exp ? 'true' : 'false');
       // Body class drives mobile-only CSS: hide the toolbar hamburger when
       // the sidebar is open so the user taps outside to close (no competing
-      // toggle on top of the overlay).
+      // toggle on top of the overlay). On desktop, the same class shifts
+      // body.padding-left to 260px so the main content slides right.
       document.body.classList.toggle('sidebar-expanded', exp);
       if (exp) sessionDrawer.refresh();  // fresh data each time we open
+      // Persist only on desktop — a mobile toggle is a transient navigation
+      // action, not a global preference, and we don't want it forcing the
+      // drawer open on the next desktop load (or vice versa).
+      if (window.innerWidth >= 700) {
+        try { localStorage.setItem(SIDEBAR_PREF_KEY, exp ? '1' : '0'); } catch {}
+      }
     };
+    // Restore persisted state on desktop only. Mobile always starts collapsed.
+    if (window.innerWidth >= 700) {
+      try {
+        if (localStorage.getItem(SIDEBAR_PREF_KEY) === '1') setExpanded(true);
+      } catch {}
+    }
     const toggle = (e?: Event) => {
       if (e) e.stopPropagation();  // don't let the same click count as "outside"
       setExpanded(!sidebar.classList.contains('expanded'));
