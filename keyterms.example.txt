@@ -15,11 +15,6 @@
 
 # Default OpenClaw ecosystem terms — keep these unless you want to
 # replace them.
-OpenClaw
-Clawdian
-Claw
-SideKick
-Deepgram
 
 # Add your project / personal vocab below. Examples:
 # YourCompany

@@ -162,7 +162,7 @@ function getKeyterms() {
     const cfg = getConfig();
     const terms = Array.isArray(cfg?.sttKeyterms) && cfg.sttKeyterms.length
       ? cfg.sttKeyterms
-      : ['OpenClaw', 'Clawdian', 'Claw', 'SideKick', 'Deepgram'];
+      : ['Sidekick', 'Deepgram'];
     return terms.map(t => `keyterm=${encodeURIComponent(t)}`).join('&');
   } catch {
     return '';
