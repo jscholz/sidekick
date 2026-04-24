@@ -140,6 +140,14 @@ export function setPositionState(duration, position, rate = 1.0) {
   } catch {}
 }
 
+/** Exposed for diagnostic tracers (bgTrace) so they can observe the
+ *  keepalive element's paused/currentTime state across backgrounding
+ *  events. Returns null until ensureKeepalive() has run at least once
+ *  (happens on setPlaybackState('playing')). */
+export function getKeepaliveEl(): HTMLMediaElement | null {
+  return keepaliveEl;
+}
+
 /** Set Media Session playback state — drives lock-screen UI + suspension
  *  heuristics. 'playing' while streaming or TTS is active; 'paused' when
  *  idle but still ready; 'none' when not listening at all. */

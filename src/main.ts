@@ -38,6 +38,7 @@ import * as composer from './composer.ts';
 import * as voice from './pipelines/classic/voice.ts';
 import * as replyPlayer from './pipelines/classic/replyPlayer.ts';
 import * as replyCache from './pipelines/classic/replyCache.ts';
+import * as bgTrace from './bgTrace.ts';
 
 // Card kind modules
 import imageCard from './canvas/cards/image.ts';
@@ -235,6 +236,23 @@ async function boot() {
     status: document.getElementById('status'),
     statusText: document.getElementById('status-text'),
   });
+
+  // Background-lifecycle diagnostic tracer — opt-in via ?bg_trace=1 or
+  // localStorage.sidekick_bg_trace=1. Noop when not enabled. Install
+  // before audioSession/capture touch anything so we catch the first
+  // transitions. Getters are lazy — each poll reads live state, no
+  // eager construction.
+  bgTrace.install({
+    getStream: () => capture.getActiveStream(),
+    getAudioCtx: () => getAudioCtx(),
+    getKeepaliveEl: () => audioSession.getKeepaliveEl(),
+  });
+  // Expose dump() globally when tracing is enabled so the bench-test
+  // protocol can grab the buffer from devtools with `sidekickBgTrace()`
+  // and paste it into a bug report.
+  if (bgTrace.isEnabled()) {
+    (window as any).sidekickBgTrace = () => bgTrace.dump();
+  }
 
   // Background audio session — Media Session (lock-screen + BT headset tap)
   // + silent keepalive. BT taps map to play/pause handlers so a Pixel Buds
