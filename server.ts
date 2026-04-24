@@ -689,6 +689,51 @@ async function handleKeytermsGet(_req, res) {
   res.end(body);
 }
 
+/** Serve the current preferred-model globs. Newline-separated for the
+ *  chip-input UI. Sourced from models.preferred in the yaml, falling
+ *  through to the SIDEKICK_PREFERRED_MODELS env var (comma-sep) for
+ *  deployments that haven't switched to the yaml yet. */
+async function handlePreferredModelsGet(_req, res) {
+  res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-cache' });
+  res.end(PREFERRED_MODELS_RAW.join('\n') + (PREFERRED_MODELS_RAW.length ? '\n' : ''));
+}
+
+/** Write the request body (newline- or comma-separated globs) to the
+ *  yaml's models.preferred list and re-derive the runtime matcher so
+ *  the next /api/hermes/models-catalog call partitions correctly
+ *  without a server restart. */
+async function handlePreferredModelsPost(req, res) {
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c);
+  const body = Buffer.concat(chunks).toString('utf8');
+  const seen = new Set<string>();
+  const globs: string[] = [];
+  for (const line of body.split('\n')) {
+    const nocomment = line.replace(/#.*$/, '');
+    for (const part of nocomment.split(',')) {
+      const t = part.trim();
+      if (t && !seen.has(t)) { seen.add(t); globs.push(t); }
+    }
+  }
+  try {
+    const target = CONFIG_PATH || path.join(__dirname, 'sidekick.config.yaml');
+    if (!deployDoc) deployDoc = YAML.parseDocument('models:\n  preferred: []\n');
+    deployDoc.setIn(['models', 'preferred'], globs);
+    await fs.writeFile(target, deployDoc.toString(), 'utf8');
+    DEPLOY_CFG = cfgAsJS();
+    // Re-derive the live matcher. PREFERRED_MODELS_RAW/GLOBS are module
+    // consts, so swap them via reassignment through let if needed.
+    rebuildPreferredModels(globs);
+    // Invalidate openrouter catalog cache so the next fetch re-partitions.
+    openrouterCatalogCache = null;
+    res.writeHead(204); res.end();
+  } catch (e: any) {
+    console.error('preferred-models write failed:', e.message);
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end(`write failed: ${e.message}`);
+  }
+}
+
 /** Write the request body (newline-separated, comments/commas tolerated)
  *  to the config file's stt.keyterms list. Uses the YAML Document model
  *  so comments and formatting elsewhere in the file are preserved on
@@ -1041,20 +1086,27 @@ const OPENROUTER_CATALOG_TTL_MS = 10 * 60 * 1000;
 // set, the models-catalog route partitions the openrouter response into
 // `preferred` (any glob matches) and `other` (none). UI shows only the
 // preferred set when non-empty. Empty = full catalog.
-const PREFERRED_MODELS_RAW: string[] = (() => {
+/** Live-mutable so the POST /api/preferred-models handler can refresh
+ *  the matcher without a server restart. */
+let PREFERRED_MODELS_RAW: string[] = [];
+let PREFERRED_MODELS_GLOBS: RegExp[] = [];
+function rebuildPreferredModels(globs: string[]): void {
+  PREFERRED_MODELS_RAW = globs.filter(Boolean);
+  PREFERRED_MODELS_GLOBS = PREFERRED_MODELS_RAW.map((glob) => {
+    // Escape regex metachars, then turn `*` into `.*`. Anchored at both ends
+    // so "anthropic/*" matches "anthropic/claude-haiku-4.5" but not
+    // "fooanthropic/whatever".
+    const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`);
+  });
+}
+rebuildPreferredModels((() => {
   const env = process.env.SIDEKICK_PREFERRED_MODELS;
   if (env) return env.split(',').map((s) => s.trim()).filter(Boolean);
   const cfg = DEPLOY_CFG?.models?.preferred;
   if (Array.isArray(cfg)) return cfg.map((s: any) => String(s).trim()).filter(Boolean);
   return [];
-})();
-const PREFERRED_MODELS_GLOBS: RegExp[] = PREFERRED_MODELS_RAW.map((glob) => {
-  // Escape regex metachars, then turn `*` into `.*`. Anchored at both ends so
-  // "anthropic/*" matches "anthropic/claude-haiku-4.5" but not
-  // "fooanthropic/whatever".
-  const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-  return new RegExp(`^${escaped}$`);
-});
+})());
 
 function isPreferredModel(id: string): boolean {
   if (PREFERRED_MODELS_GLOBS.length === 0) return false;
@@ -1285,6 +1337,8 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/config') return handleConfig(req, res);
   if (req.method === 'GET' && req.url === '/api/keyterms') return handleKeytermsGet(req, res);
   if (req.method === 'POST' && req.url === '/api/keyterms') return handleKeytermsPost(req, res);
+  if (req.method === 'GET' && req.url === '/api/preferred-models') return handlePreferredModelsGet(req, res);
+  if (req.method === 'POST' && req.url === '/api/preferred-models') return handlePreferredModelsPost(req, res);
   if (req.method === 'POST' && req.url === '/api/chat') return handleOpenAICompatChat(req, res);
   if (req.method === 'POST' && req.url.startsWith('/tts')) return handleTts(req, res);
   if (req.method === 'POST' && req.url.startsWith('/gen-image')) return handleGenImage(req, res);

@@ -212,6 +212,12 @@
         <option value="">Loading…</option>
       </select>
     </div>
+    <div class="row row-wide">
+      <label>Preferred models</label>
+      <div class="keyterms-chips" id="preferred-models-chips" aria-label="preferred model globs"></div>
+      <input type="text" id="set-preferred-models" placeholder="e.g. anthropic/* + Enter" autocomplete="off" spellcheck="false">
+      <span class="hint">glob patterns that filter the model picker above (e.g. <code>anthropic/*</code>, <code>google/gemini-*</code>). Empty = full openrouter catalog. Saves to models.preferred in sidekick.config.yaml.</span>
+    </div>
   </div>
 
   <div class="settings-group">
