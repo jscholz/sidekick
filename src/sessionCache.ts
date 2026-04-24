@@ -95,3 +95,14 @@ export async function removeMessagesCache(id: string): Promise<void> {
     db.close();
   } catch {}
 }
+
+/** Drop the cached session list. Used when the user changes the filter —
+ *  the cached list reflects the OLD filter, so refresh() would paint
+ *  stale results until the background fetch lands. */
+export async function clearListCache(): Promise<void> {
+  try {
+    const db = await openDB();
+    await reqP(db.transaction(LIST_STORE, 'readwrite').objectStore(LIST_STORE).delete('current'));
+    db.close();
+  } catch {}
+}

@@ -559,7 +559,20 @@ export function hydrate(handlers: {
     refreshModelState();
     modelHandlers.reloadKeyterms?.();
   };
-  const closePanel = () => { if (panel) panel.classList.remove('on'); };
+  const closePanel = () => {
+    // Commit pending sessions-filter edits on close — the text input's
+    // 'change' event only fires on blur/Enter, so tapping Close or the
+    // backdrop directly would otherwise drop the typed value until the
+    // next page load.
+    if (setSessionsFilter) {
+      const typed = setSessionsFilter.value.trim();
+      if (typed !== current.sessionsFilter) {
+        set('sessionsFilter', typed);
+        if (handlers.onSessionsFilterChange) handlers.onSessionsFilterChange();
+      }
+    }
+    if (panel) panel.classList.remove('on');
+  };
   if (btnSet) btnSet.onclick = openPanel;
   const closeBtn = $any('settings-close');
   if (closeBtn) closeBtn.onclick = closePanel;

@@ -440,6 +440,7 @@ async function boot() {
   settings.applyVisuals();
   settings.hydrate({
     onThemeChange: () => theme.applyTheme(settings.get().theme),
+    onSessionsFilterChange: () => sessionDrawer.refreshAfterFilterChange(),
     onVoiceChange: () => {
       // Drop cached audio that was synthesized in the old voice so future
       // replays re-synthesize in the voice the user just picked.

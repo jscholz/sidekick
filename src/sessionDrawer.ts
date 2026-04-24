@@ -352,6 +352,17 @@ export function init(opts: { onResume: (id: string, messages: any[]) => void }) 
   onResumeCb = opts.onResume;
 }
 
+/** Called after the user changes the sessions-filter setting. Drops the
+ *  cached list (stale for the new filter), paints an immediate "Loading…"
+ *  so there's instant feedback even if the server fetch takes a beat,
+ *  then fires refresh() which repopulates from the server. */
+export async function refreshAfterFilterChange() {
+  const listEl = document.getElementById('sessions-list');
+  if (listEl) listEl.innerHTML = '<li class="sess-empty">Loading…</li>';
+  await sessionCache.clearListCache();
+  refresh();
+}
+
 /** Show/hide the sessions section inside the sidebar based on the active
  *  backend's capabilities. Sidebar itself is always present — the new-chat
  *  button must work even when no session browser is available.
