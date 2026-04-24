@@ -1,7 +1,7 @@
 # Conversational pipeline (stub)
 
-**Not implemented yet.** See `docs/gemini-live-vs-three-phase.md` in
-the monorepo for the full design context.
+**Not implemented yet.** Design notes live in the project tracker; this
+README captures the touchpoints a future implementation should hit.
 
 ## What this pipeline would do
 
@@ -48,12 +48,12 @@ Recommended order of operations:
 1. Write a 200-line standalone Gemini Live client as a sanity check —
    pure WS, pure audio in/out, no app integration. Validate the
    protocol shape in isolation.
-2. Add a `backends/geminilive.mjs` adapter with `capabilities.
+2. Add a `src/backends/geminilive.ts` adapter with `capabilities.
    conversationalVoice: true`. Standard chat methods can no-op or
    throw — the shell never calls them because it'll take the
    conversational dispatch branch.
 3. Build this module with the entry points above.
-4. Create `src/pipeline.mjs` dispatcher that reads the backend's
+4. Create `src/pipeline.ts` dispatcher that reads the backend's
    `conversationalVoice` flag and lazy-loads `pipelines/classic/` or
    `pipelines/conversational/` as appropriate.
 5. Feature flag the whole thing until it's proven on a real commute.

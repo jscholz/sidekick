@@ -20,6 +20,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -244,7 +245,7 @@ async function handleLinkPreview(req, res) {
       signal: ctrl.signal,
       redirect: 'follow',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; BlueberryClaw/1.0; +https://reimaginerobotics.ai)',
+        'User-Agent': 'Mozilla/5.0 (compatible; Sidekick/1.0; +https://github.com/jscholz/sidekick)',
         'Accept': 'text/html,application/xhtml+xml',
       },
     });
@@ -711,12 +712,13 @@ const HERMES_TOKEN = process.env.SIDEKICK_HERMES_TOKEN || '';
 // dependency on the auth-gated dashboard API.
 
 const execFileP = promisify(execFile);
+const HOME = os.homedir();
 const HERMES_STORE_DB = process.env.SIDEKICK_HERMES_STORE_DB
-  || '/home/jscholz/.hermes/response_store.db';
+  || path.join(HOME, '.hermes/response_store.db');
 const HERMES_STATE_DB = process.env.SIDEKICK_HERMES_STATE_DB
-  || '/home/jscholz/.hermes/state.db';
+  || path.join(HOME, '.hermes/state.db');
 const HERMES_CLI = process.env.SIDEKICK_HERMES_CLI
-  || '/home/jscholz/.local/bin/hermes';
+  || path.join(HOME, '.local/bin/hermes');
 // Filter so random test names / non-sidekick conversations don't clutter the UI.
 // hermes adapter generates names as 'sidekick-main' or 'sidekick-<timestamp>'.
 const HERMES_SESSION_PREFIX = process.env.SIDEKICK_HERMES_SESSION_PREFIX || 'sidekick-';
@@ -953,11 +955,11 @@ function isPreferredModel(id: string): boolean {
 async function handleHermesModelsCatalog(req, res) {
   // Hermes's own /v1/models only returns the 'hermes-agent' placeholder —
   // the actual inference catalog is whatever the configured provider
-  // exposes. Jonathan uses openrouter, so fetch openrouter's catalog
-  // directly and return it in the ModelEntry shape the settings picker
-  // expects. OPENROUTER_API_KEY is read server-side so the client never
-  // sees it; catalog listing doesn't strictly require an API key but
-  // providing one gets better availability.
+  // exposes. We assume OpenRouter here (common hermes setup), so fetch
+  // its catalog directly and return it in the ModelEntry shape the
+  // settings picker expects. OPENROUTER_API_KEY is read server-side so
+  // the client never sees it; catalog listing doesn't strictly require
+  // an API key but providing one gets better availability.
   const now = Date.now();
   const havePrefs = PREFERRED_MODELS_GLOBS.length > 0;
   const sendCatalog = (entries: any[], cached: boolean) => {

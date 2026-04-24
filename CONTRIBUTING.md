@@ -6,30 +6,30 @@ Thanks for wanting to contribute.
 
 ```bash
 npm install
-cp ../.env.example .env    # or equivalent — fill in DEEPGRAM_API_KEY, GW_TOKEN
+cp .env.example .env    # fill in DEEPGRAM_API_KEY, and backend-specific vars
 npm test
 npm run typecheck
 npm start
 ```
 
-Open `http://localhost:3001`. If you don't have an OpenClaw gateway running, most of the UI still loads — the gateway-status pill just stays red.
+Open `http://localhost:3001`. If you don't have an agent backend running, most of the UI still loads — the backend-status pill just stays red.
 
 ## Tests
 
 Keep `npm test` green:
 ```
-npm test        # node:test suite — commit-word, fallback parser, markdown,
-                # card pipeline, card validators
-npm run typecheck  # tsc --noEmit against JSDoc annotations
+npm test           # node:test suite — commit-word, fallback parser, markdown,
+                   # card pipeline, card validators, voice interim-promotion, tts cleanup
+npm run typecheck  # tsc --noEmit over TypeScript sources
 ```
 
-TypeScript isn't used for compilation; we're JavaScript + JSDoc checked by tsc.
-Don't add a bundler, don't rewrite in TypeScript.
+Source is TypeScript compiled to `.mjs` via esbuild (`scripts/build.mjs`) — the
+browser loads the compiled output, no runtime bundler.
 
 ## Code style
 
-- ES modules, plain JS, no bundler. Browser loads `src/` directly.
-- JSDoc for types (annotated so `tsc --noEmit` catches mistakes).
+- ES modules, native `import` graph, no bundler. Browser loads `build/` directly.
+- TypeScript sources under `src/`; JSDoc casts where inference falls short.
 - Minimal comments; prefer well-named identifiers. Comments explain *why* not *what*.
 - No emoji in committed code unless the feature is explicitly about emoji.
 
@@ -45,14 +45,14 @@ Don't add a bundler, don't rewrite in TypeScript.
 Please include:
 - Browser + OS + whether you're running as an installed PWA
 - The `?debug=1` panel output or `localStorage.sidekick_debug='1'` log dump covering the failure
-- OpenClaw gateway version you're pointing at (if relevant)
+- Which backend you're pointing at (hermes, openclaw, openai-compat, zeroclaw) and its version
 
 ## Scope
 
-Sidekick is specifically a voice-first client for OpenClaw. PRs that generalise
-to other agent backends are welcome but need to pass through an adapter — see
-`src/gateway.mjs` for the current interface. Per-model quirks (e.g. Deepgram
-wedge detection) stay in their provider modules.
+Sidekick is a voice-first PWA for agent backends. New backends plug in via the
+adapter interface — see `src/backends/types.ts` and the existing adapters in
+`src/backends/`. Per-provider quirks (e.g. Deepgram wedge detection) stay in
+their provider modules.
 
 ## License
 

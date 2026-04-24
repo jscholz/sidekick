@@ -2,7 +2,7 @@
 
 Sidekick dispatches the voice loop through one of two "audio pipelines"
 — the module cluster that owns mic-in → speaker-out. The shell
-(`src/main.mjs`, transcript, attachments, settings, pocket-lock,
+(`src/main.ts`, transcript, attachments, settings, pocket-lock,
 ambient, canvas) is pipeline-agnostic.
 
 ## The two shapes
@@ -16,15 +16,15 @@ sequencing. Per-bubble playback UI: scrub bar, pause/resume, replay,
 reply cache.
 
 Files:
-- `tts.mjs` — chunked synthesis + playback state machine
-- `deepgram.mjs` — streaming STT orchestrator (wraps providers)
-- `providers/webspeech.mjs` — Web Speech API STT provider
-- `bargeIn.mjs` — sliding-window peak VAD for interruption
-- `sttBackfill.mjs` — retry queue for audio dropped during WS outages
-- `wav.mjs` — WAV header encoder for backfill / memo uploads
-- `voice.mjs` — STT result → draft text + commit-word detection
-- `replyCache.mjs` — in-memory LRU of synthesised AudioBuffers
-- `replyPlayer.mjs` — per-bubble play/pause/scrub UI wiring
+- `tts.ts` — chunked synthesis + playback state machine
+- `deepgram.ts` — streaming STT orchestrator (wraps providers)
+- `providers/webspeech.ts` — Web Speech API STT provider
+- `bargeIn.ts` — sliding-window peak VAD for interruption
+- `sttBackfill.ts` — retry queue for audio dropped during WS outages
+- `wav.ts` — WAV header encoder for backfill / memo uploads
+- `voice.ts` — STT result → draft text + commit-word detection
+- `replyCache.ts` — in-memory LRU of synthesised AudioBuffers
+- `replyPlayer.ts` — per-bubble play/pause/scrub UI wiring
 
 ### `conversational/` — Live-native (stub)
 
@@ -34,26 +34,24 @@ VAD handles interruption. Currently a stub — see its own README.
 
 ## Why two, not one unified pipeline
 
-See `docs/gemini-live-vs-three-phase.md` in the monorepo for the
-product-feature comparison. Short version: the two models optimise for
-different things (latency, cost, offline, tool-call latency, privacy,
-reliability). A single PWA wants to offer both so the user can route
-between them without changing apps.
+The two models optimise for different things (latency, cost, offline,
+tool-call latency, privacy, reliability). A single PWA wants to offer
+both so the user can route between them without changing apps.
 
 ## Picking one
 
 Currently the classic pipeline is the only implementation — it's what
 loads unconditionally. When `pipelines/conversational/` gains a real
-impl, a small `src/pipeline.mjs` dispatcher (mirroring `src/backend.mjs`)
+impl, a small `src/pipeline.ts` dispatcher (mirroring `src/backend.ts`)
 will read a capability flag from the backend (`conversationalVoice:
 true`) and load the right pipeline.
 
 ## Shared audio primitives
 
 Not pipeline-specific. Stay in `src/audio/`:
-- `unlock.mjs` — iOS AudioContext gesture-unlock
-- `session.mjs` — MediaSession integration for lockscreen / BT headset
+- `unlock.ts` — iOS AudioContext gesture-unlock
+- `session.ts` — MediaSession integration for lockscreen / BT headset
 - `audio-processor.js` — AudioWorklet for mic peak + buffer
-- `micMeter.mjs` — pub/sub for mic peak UI feedback
-- `feedback.mjs` — click / receive sound effects
-- `memo.mjs` — voice-memo MediaRecorder path (its own UX, not a pipeline)
+- `micMeter.ts` — pub/sub for mic peak UI feedback
+- `feedback.ts` — click / receive sound effects
+- `memo.ts` — voice-memo MediaRecorder path (its own UX, not a pipeline)

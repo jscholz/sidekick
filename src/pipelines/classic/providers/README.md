@@ -73,9 +73,9 @@ register it in the orchestrator's provider map.
 ## Adding a new provider — checklist
 
 1. New module in this directory. Implement the contract.
-2. Wire it into `apps/sidekick/src/audio/deepgram.mjs` (STT) or
-   `audio/tts.mjs` (TTS) as a new branch of the provider selector.
-3. Add its id to the settings picker in `index.html` + `settings.mjs`.
-4. Add it to `sw.js` `APP_SHELL` so the service worker caches it.
+2. Wire it into `src/pipelines/classic/deepgram.ts` (STT) or
+   `src/pipelines/classic/tts.ts` (TTS) as a new branch of the provider selector.
+3. Add its id to the settings picker in `index.html` + `src/settings.ts`.
+4. Add it to `sw.js` `APP_SHELL` so the service worker caches its compiled `.mjs`.
 5. Tests — a unit test of `isAvailable` + a mocked `start` contract
    check is usually enough.

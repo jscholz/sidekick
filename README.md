@@ -176,4 +176,4 @@ Keyboard shortcuts:
 
 ## License
 
-TBD — the intent is to open-source as a public frontend. Until a `LICENSE` file is added here, treat this as "all rights reserved" for upstream redistribution.
+Apache License 2.0 — see [`LICENSE`](LICENSE).

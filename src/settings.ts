@@ -286,8 +286,8 @@ export function hydrate(handlers: {
     if (handlers.onStreamingEngineChange) handlers.onStreamingEngineChange();
   };
   if (setAutoFallback) setAutoFallback.onchange = () => { set('autoFallback', setAutoFallback.checked); };
-  // Keyterms: chip-based input, backed by apps/sidekick/keyterms.txt on
-  // the server. Each chip is one keyterm — Enter or comma commits, × on
+  // Keyterms: chip-based input, backed by keyterms.txt in the sidekick
+  // repo root on the server. Each chip is one keyterm — Enter or comma commits, × on
   // a chip removes. File persists one term per line with '#' comments;
   // we parse both newline and comma delimiters when loading so users
   // editing the file directly can use either.

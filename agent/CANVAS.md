@@ -101,6 +101,6 @@ a visual representation.
 
 ## Adding new kinds
 
-New card kinds are added in `apps/sidekick/src/canvas/cards/<kind>.mjs`.
+New card kinds are added in `src/canvas/cards/<kind>.ts`.
 Each module exports `{ kind, icon, label, validate, render }`.
-Register it in `main.mjs`. The agent docs (this file) are updated to match.
+Register it in `src/canvas/registry.ts`. The agent docs (this file) are updated to match.
