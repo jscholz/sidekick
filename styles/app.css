@@ -155,7 +155,13 @@
   }
   .header .logo {
     width: 36px; height: 36px; border-radius: 8px;
-    box-shadow: 0 0 20px -4px var(--primary-glow);
+    /* SVG uses fill="currentColor" — set the CSS color so the icon
+     * inherits the theme primary (sage) rather than defaulting to --fg.
+     * box-shadow removed: the waveform bars don't play nicely with a
+     * rounded-square glow behind them — the glow sits on transparent
+     * negative space between bars and looks blotchy. Color itself
+     * carries the brand accent now. */
+    color: var(--primary);
   }
   .header .brand { display: flex; flex-direction: column; line-height: 1.1; }
   .header .title { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }

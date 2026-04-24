@@ -309,8 +309,14 @@ export function init(opts: { onResume: (id: string, messages: any[]) => void }) 
 
 /** Show/hide the sessions section inside the sidebar based on the active
  *  backend's capabilities. Sidebar itself is always present — the new-chat
- *  button must work even when no session browser is available. */
+ *  button must work even when no session browser is available.
+ *  Also triggers a refresh when sessionBrowsing becomes enabled — covers the
+ *  boot path where the sidebar is auto-restored (desktop persistence) BEFORE
+ *  the backend connects: the first refresh() bails early because
+ *  capabilities aren't yet applied, so without this the drawer stays empty. */
 export function applyCapabilities() {
   const section = document.getElementById('sb-sessions-section');
-  if (section) section.style.display = backend.capabilities().sessionBrowsing ? '' : 'none';
+  const enabled = backend.capabilities().sessionBrowsing;
+  if (section) section.style.display = enabled ? '' : 'none';
+  if (enabled) refresh();
 }
