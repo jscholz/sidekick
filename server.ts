@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Sidekick server.
+ * SideKick server.
  * - GET /              → serves index.html
  * - GET /<path>        → serves static assets
  * - GET /config        → runtime config (gateway token) from env
@@ -13,25 +13,20 @@
  * - POST /transcribe   → Deepgram pre-recorded STT proxy (audio blob → transcript)
  * - GET  /screenshot   → ?url= → page screenshot via persistent Chromium (fallback for sites with no OG)
  * - GET  /render       → ?url=&mode=text|html → DOM after JS (for the `browser` agent skill)
- *
- * Backend-specific routes live in server/plugins/*. Each plugin exports a
- * single `mountXyzRoutes(req, res)` function; the request handler below
- * calls it early. See server/plugins/hermes.ts for a reference.
  */
 import http from 'node:http';
+import https from 'node:https';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { validators } from './src/canvas/validators.ts';
-// Opt-in backend plugin for Hermes. If your fork targets a different
-// agent, delete server/plugins/hermes.ts and remove this import +
-// the mountHermesRoutes() call in the request handler below.
-import { mountHermesRoutes } from './server/plugins/hermes.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT) || 3001;
+const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || '127.0.0.1';
 
 const DEEPGRAM_KEY = process.env.DEEPGRAM_API_KEY || '';
@@ -249,7 +244,7 @@ async function handleLinkPreview(req, res) {
       signal: ctrl.signal,
       redirect: 'follow',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; Sidekick/1.0; +https://github.com/jscholz/sidekick)',
+        'User-Agent': 'Mozilla/5.0 (compatible; BlueberryClaw/1.0; +https://reimaginerobotics.ai)',
         'Accept': 'text/html,application/xhtml+xml',
       },
     });
@@ -665,7 +660,7 @@ async function handleOpenAICompatChat(req, res) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const body = Buffer.concat(chunks);
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json' };
   if (OPENAI_COMPAT_KEY) headers.Authorization = `Bearer ${OPENAI_COMPAT_KEY}`;
   try {
     const upstream = await fetch(OPENAI_COMPAT_URL, { method: 'POST', headers, body });
@@ -688,16 +683,381 @@ async function handleOpenAICompatChat(req, res) {
   }
 }
 
-// Hermes backend handlers have moved to server/plugins/hermes.ts — see the
-// mountHermesRoutes() call in the request handler below.
+// ── Hermes API proxy: /api/hermes/* → http://127.0.0.1:8642/v1/* ────────────
+// Sideclaw-facing shim for Hermes's OpenAI-compatible API server. Keeps the
+// upstream loopback-bound and injects the bearer token server-side so the
+// browser never handles it. Pipes responses (including SSE for
+// /responses) straight through without buffering — SSE breaks if buffered.
+const HERMES_UPSTREAM = process.env.SIDEKICK_HERMES_URL || 'http://127.0.0.1:8642';
+const HERMES_TOKEN = process.env.SIDEKICK_HERMES_TOKEN || '';
 
+// ─── Hermes session browser (direct sqlite read of response_store.db) ────────
+// Hermes chains conversation turns server-side via previous_response_id,
+// keyed by a `conversation:` name we send on each /v1/responses POST. The
+// response_store.db holds (a) a conversations table mapping name → latest
+// response_id, and (b) a responses table whose JSON payload includes the
+// full conversation_history. We read both directly — fast, stable, no
+// dependency on the auth-gated dashboard API.
+
+const execFileP = promisify(execFile);
+const HERMES_STORE_DB = process.env.SIDEKICK_HERMES_STORE_DB
+  || '/home/jscholz/.hermes/response_store.db';
+const HERMES_STATE_DB = process.env.SIDEKICK_HERMES_STATE_DB
+  || '/home/jscholz/.hermes/state.db';
+const HERMES_CLI = process.env.SIDEKICK_HERMES_CLI
+  || '/home/jscholz/.local/bin/hermes';
+// Filter so random test names / non-sidekick conversations don't clutter the UI.
+// hermes adapter generates names as 'sidekick-main' or 'sidekick-<timestamp>'.
+const HERMES_SESSION_PREFIX = process.env.SIDEKICK_HERMES_SESSION_PREFIX || 'sidekick-';
+
+async function sqlQuery(db: string, sql: string): Promise<any[]> {
+  const { stdout } = await execFileP('sqlite3', ['-json', db, sql], {
+    maxBuffer: 50 * 1024 * 1024,
+  });
+  if (!stdout.trim()) return [];
+  return JSON.parse(stdout);
+}
+
+async function handleHermesSessionsList(req, res) {
+  const url = new URL(req.url, 'http://x');
+  const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
+  // Strict prefix sanitization — value is used in string-concatenated SQL.
+  const prefix = HERMES_SESSION_PREFIX.replace(/[^a-zA-Z0-9_\-]/g, '');
+  // ATTACH state.db so we can pull title from its sessions table alongside
+  // the conversation + response data in response_store.db. Titles get set
+  // via `hermes sessions rename` (see rename route below) and stored on
+  // state.db/sessions.title keyed by derived session UUID.
+  const sql = `
+    ATTACH '${HERMES_STATE_DB.replace(/'/g, "''")}' AS s;
+    SELECT c.name AS id, r.accessed_at AS lastMessageAt,
+      json_array_length(json_extract(r.data, '$.conversation_history')) AS messageCount,
+      substr(json_extract(r.data, '$.conversation_history[#-1].content'), 1, 120) AS snippet,
+      s.sessions.title AS title
+    FROM conversations c
+    LEFT JOIN responses r ON r.response_id = c.response_id
+    LEFT JOIN s.sessions ON s.sessions.id = json_extract(r.data, '$.session_id')
+    WHERE c.name LIKE '${prefix}%'
+    ORDER BY r.accessed_at DESC
+    LIMIT ${limit}
+  `;
+  try {
+    const rows = await sqlQuery(HERMES_STORE_DB, sql);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ sessions: rows }));
+  } catch (e: any) {
+    console.error('hermes sessions list failed:', e.message);
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message }));
+  }
+}
+
+/** Map a conversation name to the derived session UUID (stored inside
+ *  responses.data.session_id). Needed because `hermes sessions rename /
+ *  delete` take the UUID, not the conversation name. Returns null if the
+ *  conversation or its response row can't be found. */
+async function lookupSessionUuid(name: string): Promise<string | null> {
+  const sql = `SELECT json_extract(r.data, '$.session_id') AS uuid
+    FROM conversations c
+    LEFT JOIN responses r ON r.response_id = c.response_id
+    WHERE c.name='${name}'`;
+  const rows = await sqlQuery(HERMES_STORE_DB, sql);
+  return rows[0]?.uuid || null;
+}
+
+async function handleHermesSessionRename(req, res, name: string) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(name) || name.length > 128) {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid session id' }));
+    return;
+  }
+  let body = '';
+  req.on('data', (c) => { body += c; if (body.length > 10_000) req.destroy(); });
+  req.on('end', async () => {
+    let payload: any;
+    try { payload = JSON.parse(body); }
+    catch { res.writeHead(400); res.end('invalid json'); return; }
+    const title = (payload?.title || '').toString().trim();
+    if (!title || title.length > 200) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'title required (<=200 chars)' }));
+      return;
+    }
+    try {
+      const uuid = await lookupSessionUuid(name);
+      if (!uuid) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'session not found' }));
+        return;
+      }
+      // `hermes sessions rename <session_id> <title...>` — CLI takes title
+      // as positional args (joined by argparse internally).
+      await execFileP(HERMES_CLI, ['sessions', 'rename', uuid, title], {
+        env: { ...process.env, HERMES_ACCEPT_HOOKS: '1' },
+      });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, title }));
+    } catch (e: any) {
+      console.error('hermes sessions rename failed:', e.message);
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  });
+}
+
+async function handleHermesSessionDelete(req, res, name: string) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(name) || name.length > 128) {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid session id' }));
+    return;
+  }
+  try {
+    const uuid = await lookupSessionUuid(name);
+    if (!uuid) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'session not found' }));
+      return;
+    }
+    // Step 1: hermes CLI removes the row from state.db/sessions + cascades
+    // to its messages table. --yes skips the confirmation prompt.
+    await execFileP(HERMES_CLI, ['sessions', 'delete', '--yes', uuid], {
+      env: { ...process.env, HERMES_ACCEPT_HOOKS: '1' },
+    });
+    // Step 2: hermes's CLI does NOT clean up response_store.db — conversation
+    // name + response chain stay orphaned. Our list reads from conversations,
+    // so without this cleanup the "deleted" row would still appear in the UI.
+    // Remove the conversation entry + any response rows it referenced.
+    // Strict name regex above protects against SQL injection here.
+    await execFileP('sqlite3', [HERMES_STORE_DB,
+      `DELETE FROM responses WHERE response_id IN (SELECT response_id FROM conversations WHERE name='${name}');`,
+      `DELETE FROM conversations WHERE name='${name}';`,
+    ]);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  } catch (e: any) {
+    console.error('hermes sessions delete failed:', e.message);
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message }));
+  }
+}
+
+// ─── Hermes model selector (shells out to `hermes config`) ─────────────────
+// POST /api/hermes/model triggers a `hermes config set model <ref>` followed
+// by `systemctl --user restart hermes-gateway`. The gateway restart is brief
+// (~1-2s) but does drop any in-flight SSE; the sidekick shell picks the
+// connection back up via the existing health-check / onStatus flow in
+// hermesAdapter.connect/reconnect. GET uses `hermes config show` (there is
+// no `hermes config get` subcommand — config show is the supported read path).
+// In-memory cache for the openrouter catalog — it's a ~100KB payload that
+// rarely changes. Avoid hammering the API on every settings-panel open.
+let openrouterCatalogCache: { at: number; entries: any[] } | null = null;
+const OPENROUTER_CATALOG_TTL_MS = 10 * 60 * 1000;
+
+async function handleHermesModelsCatalog(req, res) {
+  // Hermes's own /v1/models only returns the 'hermes-agent' placeholder —
+  // the actual inference catalog is whatever the configured provider
+  // exposes. Jonathan uses openrouter, so fetch openrouter's catalog
+  // directly and return it in the ModelEntry shape the settings picker
+  // expects. OPENROUTER_API_KEY is read server-side so the client never
+  // sees it; catalog listing doesn't strictly require an API key but
+  // providing one gets better availability.
+  const now = Date.now();
+  if (openrouterCatalogCache && now - openrouterCatalogCache.at < OPENROUTER_CATALOG_TTL_MS) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ data: openrouterCatalogCache.entries, cached: true }));
+    return;
+  }
+  const key = process.env.OPENROUTER_API_KEY || '';
+  try {
+    const r = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: key ? { 'Authorization': `Bearer ${key}` } : {},
+    });
+    if (!r.ok) {
+      res.writeHead(r.status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: `openrouter ${r.status}` }));
+      return;
+    }
+    const d: any = await r.json();
+    // Project to the sidekick ModelEntry shape + filter out models we can't
+    // actually use (hermes enforces a 64K context minimum at startup).
+    const entries = (d.data || [])
+      .filter((m: any) => (m.context_length || 0) >= 64000)
+      .map((m: any) => ({ id: m.id, name: m.name || m.id }));
+    entries.sort((a: any, b: any) => a.name.localeCompare(b.name));
+    openrouterCatalogCache = { at: now, entries };
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ data: entries, cached: false }));
+  } catch (e: any) {
+    console.error('openrouter catalog fetch failed:', e.message);
+    res.writeHead(502, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message }));
+  }
+}
+
+async function handleHermesModelGet(req, res) {
+  try {
+    const { stdout } = await execFileP(HERMES_CLI, ['config', 'show'], {
+      env: { ...process.env, HERMES_ACCEPT_HOOKS: '1' },
+    });
+    // Output has a "◆ Model" section containing a "  Model:        <ref>" line.
+    // Match the first such line after the Model section heading.
+    const m = stdout.match(/◆ Model[\s\S]*?Model:\s*(\S+)/);
+    const model = m ? m[1] : null;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ model }));
+  } catch (e: any) {
+    console.error('hermes config show failed:', e.message);
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message }));
+  }
+}
+
+async function handleHermesModelSet(req, res) {
+  let body = '';
+  req.on('data', (c) => { body += c; if (body.length > 10_000) req.destroy(); });
+  req.on('end', async () => {
+    let payload: any;
+    try { payload = JSON.parse(body); }
+    catch { res.writeHead(400); res.end('invalid json'); return; }
+    const model = (payload?.model || '').toString().trim();
+    // Strict allow-list — value goes into a shelled-out command. Accept only
+    // chars that appear in real model refs (vendor/name.variant-size).
+    if (!model || model.length > 128 || !/^[a-zA-Z0-9._/\-]+$/.test(model)) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'invalid model ref (letters, digits, -, /, ., max 128 chars)' }));
+      return;
+    }
+    try {
+      await execFileP(HERMES_CLI, ['config', 'set', 'model', model], {
+        env: { ...process.env, HERMES_ACCEPT_HOOKS: '1' },
+      });
+      // Restart hermes-gateway so the new model takes effect for subsequent
+      // /v1/responses calls. Brief downtime; client reconnects via onStatus.
+      await execFileP('systemctl', ['--user', 'restart', 'hermes-gateway']);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, model }));
+    } catch (e: any) {
+      console.error('hermes model set failed:', e.message);
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  });
+}
+
+async function handleHermesSessionMessages(req, res, name: string) {
+  // Session names are user-chosen strings; we only accept the chars the
+  // adapter actually produces ('sidekick-main', 'sidekick-<base36>').
+  if (!/^[a-zA-Z0-9_-]+$/.test(name) || name.length > 128) {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid session id' }));
+    return;
+  }
+  // AUTHORITATIVE read path: state.db/messages keyed by the session UUID
+  // derived from responses.data.session_id. Earlier implementation read from
+  // responses.data.conversation_history but that payload compounds across
+  // turns (each response embeds its full input-context, which includes
+  // prior turns' contexts, growing recursively) — rendering it produced
+  // wildly duplicated bubbles in the chat. state.db/messages is the
+  // per-turn log hermes updates exactly once per user/assistant entry.
+  const uuidSql = `SELECT json_extract(r.data, '$.session_id') AS uuid
+    FROM conversations c LEFT JOIN responses r ON r.response_id = c.response_id
+    WHERE c.name='${name}'`;
+  try {
+    const uuidRows = await sqlQuery(HERMES_STORE_DB, uuidSql);
+    const uuid = uuidRows[0]?.uuid;
+    if (!uuid) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'session not found' }));
+      return;
+    }
+    // session_id values are either UUIDs or hermes-generated timestamp_hash
+    // strings. Sanity check so the value going into the next SQL query can't
+    // break things.
+    if (!/^[a-zA-Z0-9_-]+$/.test(uuid) || uuid.length > 128) {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'derived session_id failed validation' }));
+      return;
+    }
+    const msgSql = `SELECT role, content, tool_name, timestamp FROM messages
+      WHERE session_id='${uuid}' ORDER BY id`;
+    const rows = await sqlQuery(HERMES_STATE_DB, msgSql);
+    const messages = rows.map((m: any) => ({
+      role: m.role,
+      content: m.content || '',
+      timestamp: m.timestamp,
+      toolName: m.tool_name || undefined,
+    }));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ messages }));
+  } catch (e: any) {
+    console.error('hermes session messages failed:', e.message);
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message }));
+  }
+}
+
+function handleHermesProxy(req, res) {
+  // Map /api/hermes/<path> → /v1/<path> upstream.
+  const suffix = req.url.replace(/^\/api\/hermes/, '') || '/';
+  const upstreamPath = `/v1${suffix}`;
+  const upstream = new URL(upstreamPath, HERMES_UPSTREAM);
+
+  const headers = {};
+  // Forward content headers + accept. Strip cookies/host — the upstream
+  // only cares about method + body + our injected auth.
+  for (const h of ['content-type', 'content-length', 'accept']) {
+    if (req.headers[h]) headers[h] = req.headers[h];
+  }
+  if (HERMES_TOKEN) headers['authorization'] = `Bearer ${HERMES_TOKEN}`;
+
+  const lib = upstream.protocol === 'https:' ? https : http;
+  const upReq = lib.request({
+    hostname: upstream.hostname,
+    port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
+    path: upstream.pathname + upstream.search,
+    method: req.method,
+    headers,
+  }, (upRes) => {
+    // Strip hop-by-hop headers; keep SSE-critical ones.
+    const out = { ...upRes.headers };
+    delete out.connection;
+    delete out['transfer-encoding'];
+    // Preserve content-type (text/event-stream for /responses with stream=true).
+    res.writeHead(upRes.statusCode || 502, out);
+    upRes.pipe(res);
+  });
+
+  upReq.on('error', (e) => {
+    console.error('hermes proxy: upstream error:', e.message);
+    if (!res.headersSent) {
+      res.writeHead(502, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: `upstream unreachable: ${e.message}` }));
+    } else {
+      res.end();
+    }
+  });
+
+  // Forward client body (POST) or just end (GET).
+  if (req.method === 'POST' || req.method === 'PUT') req.pipe(upReq);
+  else upReq.end();
+}
 
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-  // Hermes plugin — handles /api/hermes/* routes. Cheap no-op for other
-  // URLs. If your fork targets a different backend, delete the plugin file
-  // and remove this call.
-  if (mountHermesRoutes(req, res)) return;
+  // Hermes session-browser routes (handled locally via sqlite; must match
+  // before the generic /api/hermes pass-through proxy below).
+  if (req.url) {
+    const msgMatch = req.method === 'GET' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)\/messages(?:\?.*)?$/);
+    if (msgMatch) return handleHermesSessionMessages(req, res, decodeURIComponent(msgMatch[1]));
+    const renameMatch = req.method === 'POST' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)\/rename(?:\?.*)?$/);
+    if (renameMatch) return handleHermesSessionRename(req, res, decodeURIComponent(renameMatch[1]));
+    const deleteMatch = req.method === 'DELETE' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)(?:\?.*)?$/);
+    if (deleteMatch) return handleHermesSessionDelete(req, res, decodeURIComponent(deleteMatch[1]));
+    if (req.method === 'GET' && /^\/api\/hermes\/sessions(?:\?.*)?$/.test(req.url)) return handleHermesSessionsList(req, res);
+    if (req.method === 'GET' && /^\/api\/hermes\/models-catalog(?:\?.*)?$/.test(req.url)) return handleHermesModelsCatalog(req, res);
+    if (req.method === 'GET' && /^\/api\/hermes\/model(?:\?.*)?$/.test(req.url)) return handleHermesModelGet(req, res);
+    if (req.method === 'POST' && /^\/api\/hermes\/model(?:\?.*)?$/.test(req.url)) return handleHermesModelSet(req, res);
+  }
+  if (req.url && req.url.startsWith('/api/hermes')) return handleHermesProxy(req, res);
   if (req.method === 'GET' && req.url === '/config') return handleConfig(req, res);
   if (req.method === 'GET' && req.url === '/api/keyterms') return handleKeytermsGet(req, res);
   if (req.method === 'POST' && req.url === '/api/keyterms') return handleKeytermsPost(req, res);
@@ -734,7 +1094,7 @@ const ZC_TOKEN = process.env.SIDEKICK_ZEROCLAW_TOKEN || '';
 // ── Canvas broadcast: POST /canvas/show → all connected /ws/canvas clients ──
 // The canvas CLI tool POSTs a CanvasCard JSON here. We validate the envelope
 // and broadcast to all connected browser clients.
-const canvasClients = new Set<WebSocket>();
+const canvasClients = new Set();
 
 canvasWss.on('connection', (ws) => {
   canvasClients.add(ws);
@@ -930,5 +1290,5 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Sidekick server on http://${HOST}:${PORT} (TTS: ${DEFAULT_TTS_MODEL})`);
+  console.log(`SideKick server on http://${HOST}:${PORT} (TTS: ${DEFAULT_TTS_MODEL})`);
 });

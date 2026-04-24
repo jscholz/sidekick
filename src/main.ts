@@ -58,9 +58,9 @@ const NO_REPLY_RE = /^\s*NO[-_]?(?:REPL(?:Y)?)?\.?\s*$/i;
 function findAgentReplyAfter(currentReplyId) {
   const el = document.getElementById('transcript');
   if (!el) return null;
-  const bubbles = Array.from(
+  const bubbles = /** @type {HTMLElement[]} */ (Array.from(
     el.querySelectorAll('.line.agent[data-reply-id]:not(.streaming)')
-  ) as HTMLElement[];
+  ));
   if (!currentReplyId) return null;
   const idx = bubbles.findIndex(b => b.dataset.replyId === currentReplyId);
   if (idx < 0 || idx === bubbles.length - 1) return null;
@@ -73,9 +73,9 @@ function findAgentReplyAfter(currentReplyId) {
 function findAgentReplyBefore(currentReplyId) {
   const el = document.getElementById('transcript');
   if (!el) return null;
-  const bubbles = Array.from(
+  const bubbles = /** @type {HTMLElement[]} */ (Array.from(
     el.querySelectorAll('.line.agent[data-reply-id]:not(.streaming)')
-  ) as HTMLElement[];
+  ));
   if (bubbles.length === 0) return null;
   if (!currentReplyId) {
     const last = bubbles[bubbles.length - 1];
@@ -131,7 +131,7 @@ function handleNavAction(action: 'prev' | 'next' | 'pause') {
   skipTo(action);
 }
 window.addEventListener('sidekick:nav', (e) => {
-  const detail = (e as CustomEvent).detail;
+  const detail = /** @type {any} */ ((e as CustomEvent).detail);
   if (detail && typeof detail.action === 'string') handleNavAction(detail.action);
 });
 
@@ -166,8 +166,8 @@ let streamingTtsReplyId = null;
  *  Sendable = memo recording in progress, typed text, draft content, or
  *  a pending voice transcript ready to send. */
 function updateSendButtonState() {
-  const send = document.getElementById('composer-send') as HTMLButtonElement | null;
-  const input = document.getElementById('composer-input') as HTMLTextAreaElement | null;
+  const send = /** @type {HTMLButtonElement|null} */ (document.getElementById('composer-send'));
+  const input = /** @type {HTMLTextAreaElement|null} */ (document.getElementById('composer-input'));
   if (!send) return;
   const sendable = memoActive
     || (input?.value?.trim().length ?? 0) > 0
@@ -182,7 +182,7 @@ function updateSendButtonState() {
 /** Populate the mic <select> with available audio input devices.
  *  Must be called after getUserMedia grants permission (labels are hidden until then). */
 async function populateMicPicker() {
-  const select = document.getElementById('set-mic') as HTMLSelectElement | null;
+  const select = /** @type {HTMLSelectElement|null} */ (document.getElementById('set-mic'));
   if (!select) return;
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -393,10 +393,10 @@ async function boot() {
       const next = settings.get().streamingEngine === 'server' ? 'local' : 'server';
       settings.set('streamingEngine', next);
       // Keep Settings dropdown in sync
-      const select = document.getElementById('set-streaming-engine') as HTMLSelectElement | null;
+      const select = /** @type {HTMLSelectElement|null} */ (document.getElementById('set-streaming-engine'));
       if (select) select.value = next;
       // Restart streaming with the new engine (same pattern as setting change)
-      const btnMic = document.getElementById('btn-mic') as HTMLButtonElement | null;
+      const btnMic = /** @type {HTMLButtonElement|null} */ (document.getElementById('btn-mic'));
       if (btnMic) { btnMic.click(); setTimeout(() => btnMic.click(), 800); }
     };
   }
@@ -418,7 +418,7 @@ async function boot() {
       // before re-acquiring — race here produces a stream that looks live
       // but won't route audio to createMediaStreamSource.
       if (listening) {
-        const btnMic = document.getElementById('btn-mic') as HTMLButtonElement | null;
+        const btnMic = /** @type {HTMLButtonElement|null} */ (document.getElementById('btn-mic'));
         if (btnMic) { btnMic.click(); setTimeout(() => btnMic.click(), 800); }
       }
     },
@@ -441,7 +441,7 @@ async function boot() {
     },
     onAutoSendChange: () => syncSpeakingButton(),
     onModelChange: (ref, catalog, opts = {}) => {
-      const entry = catalog.find((e: any) => e.id === ref) as any;
+      const entry = catalog.find(e => e.id === ref);
       const label = entry ? (entry.name || entry.id).replace(/^openrouter\//, '') : ref;
       if (!opts.silent) chat.addSystemLine(`Model: ${label}`);
       attachments.updateModelGate();
@@ -543,7 +543,7 @@ async function boot() {
   // text inputs). Alt+M toggles the mic stream. Esc closes an open
   // settings or info panel.
   document.addEventListener('keydown', (e) => {
-    const t = e.target as HTMLElement;
+    const t = /** @type {HTMLElement} */ (e.target);
     const tag = t?.tagName;
     const inText = tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable;
 
@@ -594,7 +594,6 @@ async function boot() {
     onChange: updateSendButtonState,
     onFocus: voice.cancelPendingFlush,
     onFlush: (text) => {
-      log(`[DBG] draft.onFlush: addLine You (voice) "${text.slice(0,30)}"`);
       // User bubble FIRST, then send. Send fires backend.onSend → the
       // "thinking…" agent bubble, which appends at the end of the
       // transcript. If we sent first, the thinking bubble would land
@@ -621,7 +620,7 @@ async function boot() {
   await restoreMemoCards();
 
   // TTS
-  const player = document.getElementById('player') as HTMLAudioElement;
+  const player = /** @type {HTMLAudioElement} */ (document.getElementById('player'));
   tts.init(player);
   tts.setListeningGetter(() => listening);
   tts.setOnStop((reason) => {
@@ -743,7 +742,7 @@ async function boot() {
 
     try {
       const micDevice = settings.get().micDevice;
-      const audioConstraints: MediaTrackConstraints = {
+      const audioConstraints = {
         echoCancellation: true, noiseSuppression: true, autoGainControl: true,
       };
       if (micDevice) audioConstraints.deviceId = { exact: micDevice };
@@ -846,8 +845,8 @@ async function boot() {
   syncSpeakingButton();
 
   // ── Composer ────────────────────────────────────────────────────────────
-  const composerInput = document.getElementById('composer-input') as HTMLTextAreaElement;
-  const composerSend = document.getElementById('composer-send') as HTMLButtonElement;
+  const composerInput = /** @type {HTMLTextAreaElement} */ (document.getElementById('composer-input'));
+  const composerSend = /** @type {HTMLButtonElement} */ (document.getElementById('composer-send'));
 
   function autoResize() {
     composerInput.style.height = 'auto';
@@ -898,7 +897,6 @@ async function boot() {
         pendingReply = null;  // drop any FIFO-queued reply
         historyLoaded = false;
       } else {
-        log(`[DBG] sendTypedMessage: addLine You "${text.slice(0,30)}"`);
         chat.addLine('You', text || '', 's0', {
           source: 'text',
           attachments: hasAttachments ? attachments.toChatEcho() : undefined,
@@ -952,7 +950,7 @@ async function boot() {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     if (!(e.metaKey || e.ctrlKey)) return;
-    const target = document.activeElement as HTMLElement | null;
+    const target = /** @type {HTMLElement|null} */ (document.activeElement);
     // Draft textEl has its own handler (flushes the draft) — don't double-fire.
     if (target?.classList?.contains('draft-text')) return;
     // Avoid double-firing when focus is already in the composer — the
@@ -965,10 +963,10 @@ async function boot() {
   // Camera + attach — each triggers a hidden <input type=file>. On change,
   // attachments.add() reads the file + renders the chip. Send happens via
   // the existing composer-send path.
-  const cameraInput = document.getElementById('camera-input') as HTMLInputElement | null;
-  const attachInput = document.getElementById('attach-input') as HTMLInputElement | null;
-  const btnCamera = document.getElementById('btn-camera') as HTMLButtonElement | null;
-  const btnAttach = document.getElementById('btn-attach') as HTMLButtonElement | null;
+  const cameraInput = /** @type {HTMLInputElement|null} */ (document.getElementById('camera-input'));
+  const attachInput = /** @type {HTMLInputElement|null} */ (document.getElementById('attach-input'));
+  const btnCamera = /** @type {HTMLButtonElement|null} */ (document.getElementById('btn-camera'));
+  const btnAttach = /** @type {HTMLButtonElement|null} */ (document.getElementById('btn-attach'));
   if (btnCamera && cameraInput) {
     btnCamera.onclick = () => {
       if (btnCamera.disabled) return;
@@ -1196,7 +1194,7 @@ async function boot() {
     return { id, card };
   }
 
-  async function handleMemoResult(audioBlob: Blob, durationMs?: number) {
+  async function handleMemoResult(audioBlob, durationMs) {
     if (!audioBlob) return;
     // Always render the placeholder card + enqueue the blob, regardless
     // of connectivity. Matches the "user gets immediate visual feedback"
@@ -1264,7 +1262,7 @@ async function boot() {
       };
       const composerEl = composerInput.parentElement;
       // Insert the recording bar where the textarea was — before the actions row.
-      const composerActionsEl = composerEl?.querySelector('.composer-actions') as HTMLElement | null;
+      const composerActionsEl = /** @type {HTMLElement|null} */ (composerEl?.querySelector('.composer-actions'));
       const ok = await memo.start({
         container: composerEl,
         insertBefore: composerActionsEl || composerSend,
@@ -1291,7 +1289,7 @@ async function boot() {
         e.preventDefault();
         memo.stop();
         // Click the trash button to properly clean up the bar
-        const trash = document.querySelector('.memo-trash') as HTMLButtonElement | null;
+        const trash = /** @type {HTMLButtonElement|null} */ (document.querySelector('.memo-trash'));
         if (trash) trash.click();
         else exitMemoMode();
       } else if (e.key === 'Enter' && !e.shiftKey) {
@@ -1352,7 +1350,6 @@ async function boot() {
  *  Clears current chat + replyCache, re-renders the messages, and marks
  *  history as loaded so backfillHistory doesn't double-append. */
 function replaySessionMessages(id: string, messages: any[]) {
-  log(`[DBG] replaySessionMessages: id=${id} count=${messages.length}`);
   chat.clear();
   replyCache.clear();
   voice.cancelPendingFlush();
@@ -1709,6 +1706,13 @@ function handleReplyDelta({ replyId, cumulativeText }) {
 /** Complete reply. `content` (if present) is the raw block array used to
  *  pull out image attachments. */
 function handleReplyFinal({ replyId, text, content = [] }) {
+  // A completed turn means hermes has persisted this response to
+  // response_store.db (+ state.db/sessions gets the derived entry). If
+  // this was the first turn of a brand-new session, the drawer's
+  // placeholder row needs to be replaced with the real row — trigger a
+  // refresh. Background fetch will repopulate the cached list.
+  sessionDrawer.refresh();
+
   const imageBlocks = extractImageBlocks(content);
 
   if (NO_REPLY_RE.test(text)) {

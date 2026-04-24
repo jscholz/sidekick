@@ -35,23 +35,15 @@ let mediaSessionInit = false;
 // mic path when any <audio> element is playing, even one with zero samples).
 let listeningActive = false;
 
-type SessionHandlers = {
-  onPlay?: () => void;
-  onPause?: () => void;
-  onStop?: () => void;
-  onForeground?: () => void;
-  onNextTrack?: () => void;
-  onPreviousTrack?: () => void;
-  onSeekTo?: (time: number) => void;
-};
-let handlers: SessionHandlers = {};
+/** @type {{ onPlay?: () => void, onPause?: () => void, onStop?: () => void, onForeground?: () => void, onNextTrack?: () => void, onPreviousTrack?: () => void, onSeekTo?: (time: number) => void }} */
+let handlers = {};
 
 /** Call once on app load. Sets up Media Session metadata + lifecycle log.
  *  Does NOT pin audioSession.type — callers (main.ts, tts.ts) set that
  *  just-in-time before getUserMedia / TTS playback. Pinning at boot made
  *  the hint sticky and prevented iOS from transitioning BT from HFP to
  *  A2DP for TTS, silencing mobile audio output. */
-export function init(opts: SessionHandlers = {}) {
+export function init(opts = {}) {
   handlers = opts;
   initMediaSession();
   initLifecycleLogging();

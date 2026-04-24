@@ -191,7 +191,7 @@ export function send(method, params) {
 
 /** Generic request/response: send a method + params, await the matching
  *  res payload. Resolves with payload on ok, null on error/timeout. */
-export function request(method: string, params: any = {}, timeoutMs = 5000): Promise<any> {
+export function request(method, params = {}, timeoutMs = 5000) {
   return new Promise((resolve) => {
     if (!socket) { resolve(null); return; }
     const s = socket;
@@ -220,15 +220,8 @@ export function request(method: string, params: any = {}, timeoutMs = 5000): Pro
  * @param {Array<{type?:string, mimeType:string, fileName?:string, content:string}>} [opts.attachments]
  *   Each attachment's `content` is base64 (data-url prefix also accepted).
  */
-export function sendChat(text: string, opts: {
-  attachments?: Array<{ type?: string; mimeType: string; fileName?: string; content: string }>;
-} = {}) {
-  const params: {
-    sessionKey: string;
-    message: any;
-    idempotencyKey: string;
-    attachments?: Array<{ type?: string; mimeType: string; fileName?: string; content: string }>;
-  } = {
+export function sendChat(text, opts = {}) {
+  const params = {
     sessionKey: 'agent:main:main',
     message: text,
     idempotencyKey: crypto.randomUUID(),

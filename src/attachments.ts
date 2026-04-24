@@ -20,7 +20,7 @@ const MAX_BYTES = 5_000_000;  // matches openclaw gateway maxBytes
  *  composer send-button enabled state. */
 let onChange = () => {};
 
-export function init(opts: { onChange?: () => void } = {}) {
+export function init(opts = {}) {
   onChange = opts.onChange || (() => {});
 }
 
@@ -148,7 +148,7 @@ export function updateModelGate() {
   const entry = settings.getCurrentModelEntry?.();
   const canImage = Array.isArray(entry?.input) && entry.input.includes('image');
   for (const id of ['btn-attach', 'btn-camera']) {
-    const btn = document.getElementById(id) as HTMLButtonElement | null;
+    const btn = /** @type {HTMLButtonElement|null} */ (document.getElementById(id));
     if (!btn) continue;
     btn.disabled = !canImage;
     btn.title = canImage

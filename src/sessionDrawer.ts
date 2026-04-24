@@ -75,14 +75,47 @@ export async function refresh() {
 }
 
 function renderList(listEl: HTMLElement, sessions: any[], activeId: string) {
-  if (sessions.length === 0) {
+  // Optimistic placeholder: if the adapter's current session isn't in the
+  // server-returned list yet (brand-new conversation, no turn persisted),
+  // show a "New conversation" row at the top so the user has immediate
+  // visual feedback that the new-chat click landed. Gets replaced by the
+  // real row on the next refresh after a reply lands.
+  const activeInList = activeId && sessions.some(s => s.id === activeId);
+  const showPlaceholder = activeId && !activeInList;
+
+  if (sessions.length === 0 && !showPlaceholder) {
     listEl.innerHTML = '<li class="sess-empty">No past sessions yet.</li>';
     return;
   }
   listEl.innerHTML = '';
+  if (showPlaceholder) listEl.appendChild(renderPlaceholderRow(activeId));
   for (const s of sessions) {
     listEl.appendChild(renderRow(s, activeId));
   }
+}
+
+function renderPlaceholderRow(id: string): HTMLLIElement {
+  const li = document.createElement('li');
+  li.classList.add('active');
+  const body = document.createElement('div');
+  body.className = 'sess-body';
+  const snippet = document.createElement('div');
+  snippet.className = 'sess-snippet';
+  snippet.textContent = 'New conversation';
+  snippet.style.fontStyle = 'italic';
+  snippet.style.opacity = '0.7';
+  const meta = document.createElement('div');
+  meta.className = 'sess-meta';
+  meta.innerHTML =
+    `<span>just now</span>` +
+    `<span>not yet started</span>` +
+    `<span style="color:var(--primary)">· current</span>`;
+  body.appendChild(snippet);
+  body.appendChild(meta);
+  li.appendChild(body);
+  // Intentionally no click (already active) or menu (nothing to rename/delete
+  // until the session is registered server-side).
+  return li;
 }
 
 function renderRow(s: any, activeId: string): HTMLLIElement {
@@ -185,9 +218,18 @@ async function promptDelete(s: any) {
   if (!confirm(`Delete session "${label}"? This cannot be undone.`)) return;
   try {
     await backend.deleteSession(s.id);
-    // Drop cached transcript too so a tap on a same-named session later
-    // doesn't flash stale messages from this one.
+    // Server confirmed deletion. Surgically patch the cached list so the
+    // drawer paints the row gone immediately — without this, refresh()
+    // would read from IDB cache (still has the row) and repaint it for
+    // the 5-10s the server fetch takes. No divergence risk: deleteSession
+    // threw above if the server call failed, so reaching here means the
+    // row IS gone server-side.
     await sessionCache.removeMessagesCache(s.id);
+    const cached = await sessionCache.getListCache();
+    if (cached?.sessions?.length) {
+      const filtered = cached.sessions.filter((c: any) => c.id !== s.id);
+      await sessionCache.putListCache(filtered);
+    }
     refresh();
   } catch (e: any) {
     diag(`sessionDrawer: delete failed: ${e.message}`);

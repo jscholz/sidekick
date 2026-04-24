@@ -38,6 +38,16 @@ let inflight: AbortController | null = null;
 let currentReplyId: string | null = null;
 let cumulativeText = '';
 
+/** Monotonic token for conversation-name changes. Any operation that
+ *  intends to set `conversationName` (newSession, resumeSession) claims
+ *  a fresh token at start. If the operation is async and its token isn't
+ *  the latest by the time it settles, another rotation has superseded it
+ *  and the late write is dropped. Fixes: slow resumeSession server fetch
+ *  resolving AFTER a user-triggered newSession, which was silently
+ *  reverting the conversation name back to the old session and sending
+ *  subsequent messages to the wrong server-side thread. */
+let conversationToken = 0;
+
 function newReplyId(): string {
   return `hm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -256,8 +266,10 @@ export const hermesAdapter = {
 
   newSession() {
     // Rotate the conversation name so next send starts fresh server-side.
-    // Old name remains addressable if we ever want resume semantics.
+    // Bump the token so any in-flight resumeSession that's still fetching
+    // can't write its stale name over ours when it finally resolves.
     conversationName = `sidekick-${Date.now().toString(36)}`;
+    conversationToken++;
     currentReplyId = null;
     cumulativeText = '';
     log(`hermes: new session (conversation=${conversationName})`);
@@ -343,11 +355,24 @@ export const hermesAdapter = {
     if (inflight) { try { inflight.abort(); } catch {} inflight = null; }
     subs?.onActivity?.({ working: false });
 
+    // Claim a token. If a newer op (newSession, another resumeSession) runs
+    // between here and this fetch resolving, conversationToken will have
+    // incremented — we'll see that and skip the write below.
+    const myToken = ++conversationToken;
+
     const r = await fetch(`${location.origin}/api/hermes/sessions/${encodeURIComponent(id)}/messages`);
     if (!r.ok) {
       throw new Error(`resumeSession HTTP ${r.status}`);
     }
     const d = await r.json();
+    if (myToken !== conversationToken) {
+      // Superseded — another rotation happened while we were fetching. Don't
+      // overwrite conversationName; return messages so the caller can still
+      // use them (e.g., replay into chat if they want), but the adapter's
+      // active conversation stays on whatever the latest op set it to.
+      log(`hermes: resumeSession(${id}) superseded; not rewriting conversationName`);
+      return { messages: d.messages || [] };
+    }
     conversationName = id;
     currentReplyId = null;
     cumulativeText = '';

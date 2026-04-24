@@ -82,7 +82,7 @@ const sendListeners = new Set<(text: string, opts?: any) => void>();
 export function onSend(fn: (text: string, opts?: any) => void) { sendListeners.add(fn); }
 export function offSend(fn: (text: string, opts?: any) => void) { sendListeners.delete(fn); }
 
-export function sendMessage(text: string, opts?: any) {
+export function sendMessage(text, opts) {
   for (const fn of sendListeners) {
     try { fn(text, opts); } catch {}
   }

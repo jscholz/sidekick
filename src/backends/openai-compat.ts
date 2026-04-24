@@ -29,16 +29,11 @@
 import { log } from '../util/log.ts';
 import { getConfig } from '../config.ts';
 
-const history: Array<{role: string, content: string}> = [];
+/** @type {Array<{role: string, content: string}>} */
+const history = [];
 let connected = false;
-type Subs = {
-  onStatus?: (connected: boolean) => void;
-  onDelta?: (d: any) => void;
-  onFinal?: (f: any) => void;
-  onToolEvent?: (e: any) => void;
-  onActivity?: (a: any) => void;
-};
-let subs: Subs = {};
+/** @type {ConnectOpts} */
+let subs = {};
 
 function newReplyId() {
   return `r-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

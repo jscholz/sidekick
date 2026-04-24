@@ -1,6 +1,6 @@
 # Audio pipelines
 
-Sidekick dispatches the voice loop through one of two "audio pipelines"
+ClawPortal dispatches the voice loop through one of two "audio pipelines"
 — the module cluster that owns mic-in → speaker-out. The shell
 (`src/main.mjs`, transcript, attachments, settings, pocket-lock,
 ambient, canvas) is pipeline-agnostic.

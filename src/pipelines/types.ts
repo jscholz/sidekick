@@ -5,7 +5,7 @@
  * — it owns the voice loop and the reply-playback UX, and it consumes
  * backend reply events (chat.delta/final from BackendAdapter).
  *
- * Two shapes are meaningful for Sidekick:
+ * Two shapes are meaningful for ClawPortal:
  *
  *  1. Classic (3-phase): client-side STT → backend chat → client-side
  *     chunked TTS + per-bubble playback controls. Physical location:

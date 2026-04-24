@@ -53,11 +53,7 @@ let getStatus = () => ({ listening: false, speaking: false, modelLabel: '' });
  *    onNext?: () => void,
  *  }} [opts]
  */
-export function init({ statusFn, onPrev, onNext }: {
-  statusFn?: () => { listening: boolean; speaking: boolean; modelLabel: string };
-  onPrev?: () => void;
-  onNext?: () => void;
-} = {}) {
+export function init({ statusFn, onPrev, onNext } = {}) {
   if (typeof statusFn === 'function') getStatus = statusFn;
   if (typeof onPrev === 'function') onPrevReply = onPrev;
   if (typeof onNext === 'function') onNextReply = onNext;
@@ -66,7 +62,7 @@ export function init({ statusFn, onPrev, onNext }: {
   trackEl = overlayEl?.querySelector('.fake-lock-track');
   stateEl = document.getElementById('fake-lock-state');
   timeEl = document.getElementById('fake-lock-time');
-  canvasEl = document.getElementById('fake-lock-canvas') as HTMLCanvasElement | null;
+  canvasEl = /** @type {HTMLCanvasElement|null} */ (document.getElementById('fake-lock-canvas'));
   playerEl = document.getElementById('fake-lock-player');
   playerBar = playerEl?.querySelector('.fake-lock-player-bar');
   playerLoadedEl = playerEl?.querySelector('.fake-lock-player-loaded');
@@ -157,7 +153,7 @@ export function show() {
   // system alert, which then cuts audio playback. Blurring closes out
   // that state before lock takes over.
   try {
-    const a = document.activeElement as HTMLElement | null;
+    const a = /** @type {HTMLElement|null} */ (document.activeElement);
     if (a && a !== document.body && typeof a.blur === 'function') a.blur();
   } catch {}
   active = true;

@@ -1,5 +1,5 @@
 /**
- * @fileoverview Backend adapter contract — Sidekick's abstraction over
+ * @fileoverview Backend adapter contract — ClawPortal's abstraction over
  * different streaming-chat services (OpenClaw gateway, OpenAI-compatible
  * endpoints, Anthropic, custom HTTP + SSE, future conversational audio
  * services like Gemini Live).

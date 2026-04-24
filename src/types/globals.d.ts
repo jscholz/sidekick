@@ -1,6 +1,6 @@
 /**
  * @fileoverview Ambient type declarations for browser APIs that
- * Sidekick touches but aren't in TypeScript's default DOM lib.
+ * ClawPortal touches but aren't in TypeScript's default DOM lib.
  * Mostly WebKit / Safari extensions.
  */
 

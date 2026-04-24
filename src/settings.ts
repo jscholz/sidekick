@@ -14,12 +14,9 @@ const modelState = {
   /** @type {Array<Object>}  */ catalog: [],
 };
 
-type ModelHandlers = {
-  onModelChange?: (ref: string, catalog: Object[], opts?: { silent?: boolean }) => void;
-  reloadKeyterms?: () => void;
-};
-let modelHandlers: ModelHandlers = {};
-let modelPollTimer: ReturnType<typeof setInterval> | null = null;
+/** @type {{ onModelChange?: (ref: string, catalog: Object[], opts?: { silent?: boolean }) => void }} */
+let modelHandlers = {};
+let modelPollTimer = null;
 
 export function getCurrentModel() { return modelState.current; }
 export function getModelCatalog() { return modelState.catalog; }
@@ -44,7 +41,7 @@ async function refreshModelState() {
   modelState.catalog = catalog;
   if (current) modelState.current = current;
 
-  const sel = document.getElementById('set-model') as HTMLSelectElement | null;
+  const sel = /** @type {HTMLSelectElement|null} */ (document.getElementById('set-model'));
   if (sel) {
     sel.innerHTML = '';
     // Placeholder for when the effective model can't be determined or isn't
@@ -170,27 +167,20 @@ export function applyVisuals() {
 
 /**
  * Hydrate all settings controls from current values + wire change handlers.
- * @param handlers — { onThemeChange, onVoiceChange, onWakeLockChange, onSave, onModelChange }
+ * @param {Object} handlers — { onThemeChange, onVoiceChange, onWakeLockChange, onSave, onModelChange }
  */
-export function hydrate(handlers: {
-  onThemeChange?: () => void;
-  onVoiceChange?: () => void;
-  onWakeLockChange?: () => void;
-  onSave?: () => void;
-  onModelChange?: (ref: string, catalog: Object[], opts?: { silent?: boolean }) => void;
-  onMicChange?: () => void;
-  onStreamingEngineChange?: () => void;
-  onAutoSendChange?: () => void;
-} = {}) {
+export function hydrate(handlers = {}) {
   modelHandlers = { onModelChange: handlers.onModelChange };
-  const $inp = (id: string) => document.getElementById(id) as HTMLInputElement | null;
-  const $sel = (id: string) => document.getElementById(id) as HTMLSelectElement | null;
-  const $any = (id: string) => document.getElementById(id);
+  /** @type {(id: string) => HTMLInputElement} */
+  const $inp = id => /** @type {HTMLInputElement} */ (document.getElementById(id));
+  /** @type {(id: string) => HTMLSelectElement} */
+  const $sel = id => /** @type {HTMLSelectElement} */ (document.getElementById(id));
+  const $any = id => document.getElementById(id);
 
   const setMic = $sel('set-mic');
   const setStreamEngine = $sel('set-streaming-engine');
   const setAutoFallback = $inp('set-auto-fallback');
-  const setSttKeyterms = document.getElementById('set-stt-keyterms') as HTMLTextAreaElement | null;
+  const setSttKeyterms = /** @type {HTMLTextAreaElement|null} */ (document.getElementById('set-stt-keyterms'));
   const setTtsEngine = $sel('set-tts-engine');
   const setDictAutoSend = $inp('set-dictation-autosend');
   const setVoice = $sel('set-voice');
@@ -279,7 +269,7 @@ export function hydrate(handlers: {
 
   // Local TTS voice picker — populated from browser's speechSynthesis API.
   // Voice list often loads async, so we also listen on voiceschanged.
-  const setTtsVoiceLocal = document.getElementById('set-tts-voice-local') as HTMLSelectElement | null;
+  const setTtsVoiceLocal = /** @type {HTMLSelectElement|null} */ (document.getElementById('set-tts-voice-local'));
   if (setTtsVoiceLocal) {
     setTtsVoiceLocal.onchange = () => { set('ttsVoiceLocal', setTtsVoiceLocal.value); };
     populateLocalVoices();
@@ -311,8 +301,8 @@ export function hydrate(handlers: {
     let filtered = voices.filter(v => (v.lang || '').toLowerCase().startsWith(primaryLang));
     if (filtered.length === 0) filtered = voices;
     // Prefer localService voices (on-device, higher quality) at top.
-    const local = filtered.filter(v => (v as any).localService);
-    const remote = filtered.filter(v => !(v as any).localService);
+    const local = filtered.filter(v => /** @type {any} */ (v).localService);
+    const remote = filtered.filter(v => !/** @type {any} */ (v).localService);
     for (const v of [...local, ...remote]) {
       const opt = document.createElement('option');
       opt.value = v.name;
@@ -433,11 +423,11 @@ export function hydrate(handlers: {
   // so the native label + inline inputs keep their own semantics.
   if (panel) {
     panel.addEventListener('click', (e) => {
-      const row = (e.target as HTMLElement).closest('.row') as HTMLElement | null;
+      const row = /** @type {HTMLElement|null} */ (/** @type {HTMLElement} */ (e.target).closest('.row'));
       if (!row) return;
-      const cb = row.querySelector('input[type=checkbox]') as HTMLInputElement | null;
+      const cb = /** @type {HTMLInputElement|null} */ (row.querySelector('input[type=checkbox]'));
       if (!cb) return;
-      const tag = (e.target as HTMLElement).tagName;
+      const tag = /** @type {HTMLElement} */ (e.target).tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'BUTTON' || tag === 'LABEL') return;
       cb.click();
     });

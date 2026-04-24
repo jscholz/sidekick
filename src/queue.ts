@@ -7,7 +7,7 @@ const DB_NAME = 'sidekick-outbox';
 const STORE = 'messages';
 const DB_VERSION = 1;
 
-function openDB(): Promise<IDBDatabase> {
+function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
@@ -21,11 +21,11 @@ function openDB(): Promise<IDBDatabase> {
   });
 }
 
-function tx(db: IDBDatabase, mode: IDBTransactionMode) {
+function tx(db, mode) {
   return db.transaction(STORE, mode).objectStore(STORE);
 }
 
-function reqP<T = any>(r: IDBRequest<T>): Promise<T> {
+function reqP(r) {
   return new Promise((resolve, reject) => {
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);

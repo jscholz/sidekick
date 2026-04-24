@@ -108,7 +108,7 @@ export function render(container, rec, opts = {}) {
   requestAnimationFrame(() => redraw(0));
 
   // Allow late waveform updates (extraction is async + may fail/timeout)
-  (card as any)._setWaveform = (newBars: Float32Array | number[] | null) => {
+  /** @type {any} */ (card)._setWaveform = (newBars) => {
     bars = newBars instanceof Float32Array ? newBars : Float32Array.from(newBars || []);
     redraw(lastProgress);
   };
@@ -146,13 +146,10 @@ export function render(container, rec, opts = {}) {
  * @param {HTMLElement} card
  * @param {Object} patch — { transcript, status }
  */
-export function update(card: HTMLElement, { transcript, status }: {
-  transcript?: string | null;
-  status?: string;
-} = {}) {
+export function update(card, { transcript, status } = {}) {
   if (!card) return;
   if (transcript !== undefined) {
-    const el = card.querySelector('.memo-card-transcript') as HTMLElement | null;
+    const el = /** @type {HTMLElement|null} */ (card.querySelector('.memo-card-transcript'));
     if (el) {
       el.textContent = transcript || '';
       el.style.display = transcript ? '' : 'none';

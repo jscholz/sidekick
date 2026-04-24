@@ -7,20 +7,21 @@
 import { request, sendChat } from './gateway.ts';
 import { log } from './util/log.ts';
 
-export type ModelEntry = {
-  provider: string;
-  id: string;
-  name?: string;
-  contextWindow?: number;
-  reasoning?: boolean;
-  input?: string[];
-};
+/**
+ * @typedef {Object} ModelEntry
+ * @property {string} provider
+ * @property {string} id
+ * @property {string} [name]
+ * @property {number} [contextWindow]
+ * @property {boolean} [reasoning]
+ * @property {string[]} [input]
+ */
 
 /** Fetch the allowed model catalog from the gateway. */
 export async function listModels() {
   const res = await request('models.list', {});
   const models = Array.isArray(res?.models) ? res.models : [];
-  return models as ModelEntry[];
+  return /** @type {ModelEntry[]} */ (models);
 }
 
 /** Get the currently-active model for the main chat session, accounting
@@ -53,19 +54,19 @@ export async function getCurrentModel() {
 
 /** Set the session model by sending the /model slash command. This is the
  *  same mechanism the CLI uses — writes to sessionEntry.modelOverride. */
-export function setSessionModel(modelRef: string) {
+export function setSessionModel(modelRef) {
   if (!modelRef) return false;
   sendChat(`/model ${modelRef}`);
   return true;
 }
 
 /** True if the model entry supports image input. */
-export function supportsImages(entry: ModelEntry | null | undefined) {
+export function supportsImages(entry) {
   return Array.isArray(entry?.input) && entry.input.includes('image');
 }
 
 /** Find a catalog entry by id. */
-export function findEntry(catalog: ModelEntry[] | null | undefined, modelRef: string | null | undefined) {
+export function findEntry(catalog, modelRef) {
   if (!catalog || !modelRef) return null;
   return catalog.find(e => e.id === modelRef) || null;
 }

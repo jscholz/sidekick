@@ -19,8 +19,8 @@ export function getAudioCtx() { return audioCtx; }
  *  and the state machine keeps reporting "playing" while the new
  *  context produces silence. Tear-down runs synchronously; subscribers
  *  can still use getAudioCtx() to fade out before the close. */
-const routeChangeListeners = new Set<() => void>();
-export function onRouteChange(fn: () => void) { routeChangeListeners.add(fn); }
+const routeChangeListeners = new Set();
+export function onRouteChange(fn) { routeChangeListeners.add(fn); }
 
 /**
  * Call synchronously in a click handler. Creates AudioContext + primes <audio>.
