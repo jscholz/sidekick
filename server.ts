@@ -654,7 +654,7 @@ function handleConfig(_req, res) {
     // back-compat; other values: 'openai-compat' (streaming chat against
     // any /chat/completions-compatible endpoint — OpenAI, Ollama, LMStudio,
     // Groq, vLLM, etc.). See src/backends/.
-    backend: process.env.SIDEKICK_BACKEND || 'openclaw',
+    backend: process.env.SIDEKICK_BACKEND || 'hermes',
     openaiCompatModel: process.env.SIDEKICK_OPENAI_COMPAT_MODEL || '',
   }));
 }

@@ -68,11 +68,32 @@ export function applySkinning() {
 
   document.title = name;
 
-  const titleEl = document.querySelector('.header .title');
-  if (titleEl) {
-    const versionSpan = titleEl.querySelector('.version');
-    titleEl.childNodes[0].nodeValue = name + ' ';
-    if (versionSpan) titleEl.appendChild(versionSpan);  // keep version pill at end
+  // Wordmark layout: header has a logo-as-S + "idekick" split, specifically
+  // tuned for the "SideKick" wordmark. If the deployment sets a different
+  // SIDEKICK_APP_NAME, render the full name as plain text and shrink the
+  // logo to a leading icon so the split isn't lexically wrong (e.g.
+  // "[S]idekick" becoming "[S]randdesk" for a Brandesk fork).
+  const wmRest = document.querySelector('.header .wm-rest');
+  const wmS = document.querySelector('.header .wm-s');
+  if (wmRest && wmS) {
+    const defaultName = 'SideKick';
+    if (name.toLowerCase() === defaultName.toLowerCase()) {
+      // Default branding — keep the [S]idekick split. Preserve case
+      // from the config (e.g. "Sidekick" lowercases "idekick").
+      wmRest.textContent = name.slice(1);
+    } else {
+      // Custom branding — show full name and present the logo as a
+      // preceding icon (narrower, not oversized-as-cap-height).
+      wmRest.textContent = name;
+      (wmS as HTMLElement).style.width = '1em';
+      (wmS as HTMLElement).style.height = '1em';
+      (wmS as HTMLElement).style.marginRight = '6px';
+      (wmS as HTMLElement).style.marginBottom = '0';
+      // Hide the chevron layer — it was designed as a typographic accent
+      // inside the letter S, not as part of a standalone icon.
+      const chevron = wmS.querySelector('.wm-chevron') as HTMLElement | null;
+      if (chevron) chevron.style.display = 'none';
+    }
   }
   const subtitleEl = document.querySelector('.header .subtitle');
   if (subtitleEl) subtitleEl.textContent = subtitle;
