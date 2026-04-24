@@ -211,10 +211,13 @@
   }
   .header .subtitle {
     grid-column: 2 / span 2; grid-row: 2;
-    /* Left-align with the "i" in idekick — same col as .wm-rest.
-     * Match the negative margin so the start of AGENT PORTAL lines up
-     * with the "i" glyph visually, not with the cell boundary. */
-    margin-left: -0.35em; margin-top: 2px;
+    /* Pull A toward the "i" in idekick — but not so far that it overlaps
+     * the S's bottom-right radiating bars. Mid-point compromise since
+     * full alignment would crowd the fat part of the mark. Subtitle font
+     * is 10.5px so -0.55em ≈ -5.8px of the 7.7px wm-rest offset. Tight
+     * margin-top closes the vertical gap so the tagline reads as part
+     * of the wordmark block rather than a separate line. */
+    margin-left: -0.55em; margin-top: -1px;
     font-family: var(--font-mono); font-size: 10.5px; font-weight: 400;
     letter-spacing: 0.18em; text-transform: uppercase; color: var(--primary);
   }

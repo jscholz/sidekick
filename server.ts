@@ -24,11 +24,52 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
+import yaml from 'js-yaml';
 import { validators } from './src/canvas/validators.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT) || 3001;
-const HOST = process.env.HOST || '127.0.0.1';
+
+// ── Deployment config ────────────────────────────────────────────────
+// Non-secret tuning lives in sidekick.config.yaml (gitignored). Secrets
+// stay in .env. Env vars ALWAYS override the file — convenient for
+// Docker/CI where mounting a file is awkward but env injection is easy.
+// Missing file is fine; defaults + env vars cover the ground.
+function loadDeployConfig(): any {
+  const candidates = [
+    path.join(__dirname, 'sidekick.config.yaml'),
+    path.join(__dirname, 'config.yaml'),
+  ];
+  for (const p of candidates) {
+    try {
+      if (fsSync.existsSync(p)) {
+        const raw = fsSync.readFileSync(p, 'utf8');
+        const parsed = yaml.load(raw);
+        console.log(`[config] loaded ${path.basename(p)}`);
+        return parsed || {};
+      }
+    } catch (e: any) {
+      console.warn(`[config] failed to load ${p}: ${e.message}`);
+    }
+  }
+  return {};
+}
+const DEPLOY_CFG = loadDeployConfig();
+/** Resolve a value by precedence: env var → config file → fallback. */
+function cfgVal<T>(envName: string, cfgPath: string, fallback: T): T {
+  const env = process.env[envName];
+  if (env != null && env !== '') return env as unknown as T;
+  const parts = cfgPath.split('.');
+  let cur: any = DEPLOY_CFG;
+  for (const p of parts) {
+    if (cur == null) break;
+    cur = cur[p];
+  }
+  if (cur != null && cur !== '') return cur as T;
+  return fallback;
+}
+
+const PORT = Number(cfgVal('PORT', 'server.port', 3001));
+const HOST = cfgVal('HOST', 'server.host', '127.0.0.1') as string;
 
 const DEEPGRAM_KEY = process.env.DEEPGRAM_API_KEY || '';
 if (!DEEPGRAM_KEY) {
@@ -290,8 +331,8 @@ async function handleLinkPreview(req, res) {
 // Weather fallback coords. Override via SIDEKICK_WEATHER_LAT / _LON env
 // vars. London is a safe fallback — users see a real city's weather
 // until they set their own rather than a broken card on Null Island.
-const DEFAULT_WEATHER_LAT = parseFloat(process.env.SIDEKICK_WEATHER_LAT || '51.5074');
-const DEFAULT_WEATHER_LON = parseFloat(process.env.SIDEKICK_WEATHER_LON || '-0.1278');
+const DEFAULT_WEATHER_LAT = parseFloat(String(cfgVal('SIDEKICK_WEATHER_LAT', 'weather.lat', '51.5074')));
+const DEFAULT_WEATHER_LON = parseFloat(String(cfgVal('SIDEKICK_WEATHER_LON', 'weather.lon', '-0.1278')));
 
 async function handleWeather(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -644,19 +685,17 @@ function handleConfig(_req, res) {
     mapsEmbedKey: process.env.MAPS_EMBED_KEY || '',
     sttKeyterms: merged,
     // Skinning — per-install overrides for app name / agent label / primary
-    // theme color. Defaults to SideKick branding; set SIDEKICK_* env vars
-    // in the systemd unit to customize per downstream user.
-    appName: process.env.SIDEKICK_APP_NAME || 'SideKick',
-    appSubtitle: process.env.SIDEKICK_APP_SUBTITLE || 'Agent Portal',
-    agentLabel: process.env.SIDEKICK_AGENT_LABEL || 'Clawdian',
+    // theme color. Resolved via sidekick.config.yaml (app.*) then env var
+    // then default. See config.example.yaml.
+    appName: cfgVal('SIDEKICK_APP_NAME', 'app.name', 'SideKick'),
+    appSubtitle: cfgVal('SIDEKICK_APP_SUBTITLE', 'app.subtitle', 'Agent Portal'),
+    agentLabel: cfgVal('SIDEKICK_AGENT_LABEL', 'app.agent_label', 'Clawdian'),
     // Any valid CSS color (hex, rgb(), hsl()). Empty = keep stylesheet default.
-    themePrimary: process.env.SIDEKICK_THEME_PRIMARY || '',
-    // Which BackendAdapter the client loads. Default 'openclaw' for
-    // back-compat; other values: 'openai-compat' (streaming chat against
-    // any /chat/completions-compatible endpoint — OpenAI, Ollama, LMStudio,
-    // Groq, vLLM, etc.). See src/backends/.
-    backend: process.env.SIDEKICK_BACKEND || 'hermes',
-    openaiCompatModel: process.env.SIDEKICK_OPENAI_COMPAT_MODEL || '',
+    themePrimary: cfgVal('SIDEKICK_THEME_PRIMARY', 'app.theme_primary', ''),
+    // Which BackendAdapter the client loads. 'hermes' default; other values:
+    // 'openclaw', 'zeroclaw', 'openai-compat'. See src/backends/.
+    backend: cfgVal('SIDEKICK_BACKEND', 'backend.type', 'hermes'),
+    openaiCompatModel: cfgVal('SIDEKICK_OPENAI_COMPAT_MODEL', 'backend.openai_compat.model', ''),
   }));
 }
 
@@ -930,22 +969,25 @@ async function handleHermesSessionDelete(req, res, name: string) {
 let openrouterCatalogCache: { at: number; entries: any[] } | null = null;
 const OPENROUTER_CATALOG_TTL_MS = 10 * 60 * 1000;
 
-// SIDEKICK_PREFERRED_MODELS — comma-separated list of globs, e.g.
-// "anthropic/*,google/gemini-*,openai/gpt-5*". When set, the models-catalog
-// route partitions the openrouter response into `preferred` (any glob matches)
-// and `other` (none match) so the UI can surface the curated list first. When
-// unset, the route returns one flat `data` list (backward compatible).
-const PREFERRED_MODELS_GLOBS: RegExp[] = (process.env.SIDEKICK_PREFERRED_MODELS || '')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean)
-  .map((glob) => {
-    // Escape regex metachars, then turn `*` into `.*`. Anchored at both ends so
-    // "anthropic/*" matches "anthropic/claude-haiku-4.5" but not
-    // "fooanthropic/whatever".
-    const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-    return new RegExp(`^${escaped}$`);
-  });
+// Preferred-model filter. Glob list resolved from SIDEKICK_PREFERRED_MODELS
+// (comma-sep) or models.preferred in sidekick.config.yaml (YAML list). When
+// set, the models-catalog route partitions the openrouter response into
+// `preferred` (any glob matches) and `other` (none). UI shows only the
+// preferred set when non-empty. Empty = full catalog.
+const PREFERRED_MODELS_RAW: string[] = (() => {
+  const env = process.env.SIDEKICK_PREFERRED_MODELS;
+  if (env) return env.split(',').map((s) => s.trim()).filter(Boolean);
+  const cfg = DEPLOY_CFG?.models?.preferred;
+  if (Array.isArray(cfg)) return cfg.map((s: any) => String(s).trim()).filter(Boolean);
+  return [];
+})();
+const PREFERRED_MODELS_GLOBS: RegExp[] = PREFERRED_MODELS_RAW.map((glob) => {
+  // Escape regex metachars, then turn `*` into `.*`. Anchored at both ends so
+  // "anthropic/*" matches "anthropic/claude-haiku-4.5" but not
+  // "fooanthropic/whatever".
+  const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`);
+});
 
 function isPreferredModel(id: string): boolean {
   if (PREFERRED_MODELS_GLOBS.length === 0) return false;

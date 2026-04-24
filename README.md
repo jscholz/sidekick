@@ -32,9 +32,16 @@ Then open `http://localhost:3001` (install as a PWA from the browser menu for fu
 
 The default backend is Hermes. See [Backend setup](#backend-setup) below.
 
-### Environment
+### Configuration
 
-See `.env.example` for the full annotated list. The essentials:
+Two layers:
+
+- **`sidekick.config.yaml`** (optional, gitignored) — non-secret deployment tuning. Copy `config.example.yaml` → `sidekick.config.yaml` and edit to customize your instance (app name, theme, backend choice, preferred-model filter, etc.). Every key here can be overridden by an env var of the matching name — handy for Docker/CI.
+- **`.env`** (gitignored) — secrets only: API keys, bearer tokens. Precedence: env vars > config file > built-in default.
+
+See `.env.example` for the full annotated env var list and `config.example.yaml` for the YAML schema.
+
+The essentials:
 
 | Variable | Required | What |
 |---|---|---|

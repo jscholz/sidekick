@@ -1,0 +1,84 @@
+# sidekick.config.yaml — non-secret deployment configuration.
+#
+# Copy this file to `sidekick.config.yaml` (gitignored) and edit to
+# customize your sidekick instance. Secrets (API keys, bearer tokens)
+# stay in `.env`.
+#
+# Every value here can also be overridden by the environment variable
+# named in the comment — env vars win, config file is the default.
+# Omit a key to fall back to env var then to hardcoded default.
+
+# ── Branding ──────────────────────────────────────────────────────────
+app:
+  # SIDEKICK_APP_NAME
+  name: SideKick
+  # SIDEKICK_APP_SUBTITLE
+  subtitle: Agent Portal
+  # SIDEKICK_AGENT_LABEL — shown in agent bubbles + lockscreen metadata
+  agent_label: Clawdian
+  # SIDEKICK_THEME_PRIMARY — any CSS color; empty = stylesheet default (sage).
+  # Useful for rebrands: '#7a9a7a', 'hsl(210 40% 50%)', 'dodgerblue', etc.
+  theme_primary: ~
+
+# ── Backend selection ─────────────────────────────────────────────────
+backend:
+  # SIDEKICK_BACKEND — 'hermes' | 'openclaw' | 'zeroclaw' | 'openai-compat'
+  type: hermes
+
+  # Per-backend options below. Only the one matching `type` is used;
+  # others are ignored but kept here for quick switching.
+
+  hermes:
+    # SIDEKICK_HERMES_URL
+    url: http://127.0.0.1:8642
+    # SIDEKICK_HERMES_CLI — path to the hermes CLI for rename / delete
+    cli_path: ~/.local/bin/hermes
+    # SIDEKICK_HERMES_STATE_DB + SIDEKICK_HERMES_STORE_DB
+    state_db: ~/.hermes/state.db
+    store_db: ~/.hermes/response_store.db
+    # SIDEKICK_HERMES_SESSION_PREFIX — default drawer filter
+    session_prefix: sidekick-
+    # SIDEKICK_HERMES_SESSION_SOURCES — which source tags show in drawer
+    session_sources: [api_server, telegram]
+
+  openclaw:
+    # Assumes wss://<host>:18789/ws unless overridden via server code
+    ws_host: same
+    ws_port: 18789
+
+  zeroclaw:
+    # SIDEKICK_ZEROCLAW_WS
+    ws_url: ~
+
+  openai_compat:
+    # SIDEKICK_OPENAI_COMPAT_URL + _MODEL (key stays in .env)
+    url: ~
+    model: ~
+
+# ── Model picker ──────────────────────────────────────────────────────
+models:
+  # SIDEKICK_PREFERRED_MODELS — glob patterns (comma-sep via env, list here).
+  # When set, the Settings → Model picker shows ONLY these. Clear the list
+  # to let the full openrouter catalog through.
+  preferred:
+    - anthropic/*
+    - google/gemini-*
+    - google/gemma-*
+    - openai/gpt-5*
+    - deepseek/*
+
+# ── Ambient weather widget ────────────────────────────────────────────
+weather:
+  # SIDEKICK_WEATHER_LAT + _LON — default coords for the corner widget.
+  # Empty = fallback to London (51.5074, -0.1278).
+  lat: ~
+  lon: ~
+
+# ── Server ────────────────────────────────────────────────────────────
+server:
+  # PORT
+  port: 3001
+  # HOST (default 0.0.0.0 — bind all interfaces)
+  host: ~
+  # SIDEKICK_DISABLE_SCREENSHOT — any non-empty value disables /screenshot
+  disable_screenshot: false
