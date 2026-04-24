@@ -23,7 +23,7 @@ const STORE = 'transcripts';
 const SNAPSHOT_KEY = 'current';
 const LEGACY_SS_KEY = 'sidekick.transcript.v1';
 
-function dbOpen() {
+function dbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, 1);
     req.onupgradeneeded = () => {
@@ -35,7 +35,7 @@ function dbOpen() {
   });
 }
 
-function reqP(r) {
+function reqP<T = any>(r: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
@@ -231,7 +231,13 @@ function formatTime(ts) {
  * @param {Array<{dataUrl: string, mimeType: string, fileName?: string}>} [opts.attachments] Image thumbnails rendered under the line.
  * @param {string} [opts.replyId] TTS reply id for agent lines — links bubble to playback events (loading/playback bar + play icon wiring).
  */
-export function addLine(speaker, text, cls = '', opts = {}) {
+export function addLine(speaker: string, text: string, cls = '', opts: {
+  source?: 'voice' | 'text';
+  markdown?: boolean;
+  timestamp?: number | Date | string;
+  attachments?: Array<{ dataUrl: string; mimeType: string; fileName?: string }>;
+  replyId?: string;
+} = {}) {
   if (!transcriptEl) return null;
   const div = document.createElement('div');
   div.className = `line ${cls}`;
@@ -272,7 +278,7 @@ export function addLine(speaker, text, cls = '', opts = {}) {
     // round-trip paste. Falls back to textContent (strips speaker label
     // since it's in a separate .speaker span).
     const liveText = div.dataset.text
-      || /** @type {HTMLElement} */ (div.querySelector('.text'))?.textContent
+      || (div.querySelector('.text') as HTMLElement | null)?.textContent
       || '';
     navigator.clipboard.writeText(liveText).then(() => {
       copyBtn.innerHTML = checkSvg;

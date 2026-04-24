@@ -239,7 +239,7 @@ async function connectInner() {
     log('stream inactive, re-acquiring mic...');
     try {
       const micDevice = settings.get().micDevice;
-      const constraints = /** @type {MediaTrackConstraints} */ ({ ...AUDIO_CONSTRAINTS });
+      const constraints: MediaTrackConstraints = { ...AUDIO_CONSTRAINTS };
       if (micDevice) constraints.deviceId = { exact: micDevice };
       activeStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
       log('mic re-acquired:', activeStream.getAudioTracks()[0]?.label);
@@ -342,7 +342,7 @@ async function connectInner() {
 
       if (dgSocket?.readyState !== WebSocket.OPEN) return;
 
-      const player = /** @type {HTMLAudioElement} */ (document.getElementById('player'));
+      const player = document.getElementById('player') as HTMLAudioElement | null;
       const playing = player && !player.paused && !player.ended;
       const inPlayback = isSpeaking() || playing;
       bargeEvaluate(peak, inPlayback);

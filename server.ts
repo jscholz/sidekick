@@ -31,7 +31,7 @@ import { validators } from './src/canvas/validators.ts';
 import { mountHermesRoutes } from './server/plugins/hermes.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3001;
+const PORT = Number(process.env.PORT) || 3001;
 const HOST = process.env.HOST || '127.0.0.1';
 
 const DEEPGRAM_KEY = process.env.DEEPGRAM_API_KEY || '';
@@ -665,7 +665,7 @@ async function handleOpenAICompatChat(req, res) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const body = Buffer.concat(chunks);
-  const headers = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (OPENAI_COMPAT_KEY) headers.Authorization = `Bearer ${OPENAI_COMPAT_KEY}`;
   try {
     const upstream = await fetch(OPENAI_COMPAT_URL, { method: 'POST', headers, body });
@@ -734,7 +734,7 @@ const ZC_TOKEN = process.env.SIDEKICK_ZEROCLAW_TOKEN || '';
 // ── Canvas broadcast: POST /canvas/show → all connected /ws/canvas clients ──
 // The canvas CLI tool POSTs a CanvasCard JSON here. We validate the envelope
 // and broadcast to all connected browser clients.
-const canvasClients = new Set();
+const canvasClients = new Set<WebSocket>();
 
 canvasWss.on('connection', (ws) => {
   canvasClients.add(ws);

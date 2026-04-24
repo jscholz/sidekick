@@ -257,8 +257,8 @@ async function synthesizeChunk(text) {
 
 // Play through <audio> element. Used as fallback when AudioContext is missing
 // or decodeAudioData fails.
-function playBlobViaElement(blob) {
-  return new Promise((resolve) => {
+function playBlobViaElement(blob: Blob) {
+  return new Promise<void>((resolve) => {
     const url = URL.createObjectURL(blob);
     if (lastBlobUrl) { try { URL.revokeObjectURL(lastBlobUrl); } catch {} }
     lastBlobUrl = url;
@@ -359,7 +359,7 @@ function supersedePreviousReply() {
  *  that resolves when the chunk finishes naturally, or when playback is
  *  interrupted by pause/stop/seek (in which case reply.state ≠ 'playing'). */
 function playChunkSegment(reply, idx, offset) {
-  return new Promise((resolve) => {
+  return new Promise<void>((resolve) => {
     const audioCtx = getAudioCtx();
     const buffer = reply.buffers[idx];
     if (!audioCtx || !buffer) { resolve(); return; }
@@ -833,7 +833,7 @@ async function speakLocal(text, gen) {
   // with a null voice (which silently drops on some engines).
   if (speechSynthesis.getVoices().length === 0) {
     log('speechSynthesis: voices not loaded, waiting…');
-    await new Promise((resolve) => {
+    await new Promise<void>((resolve) => {
       const done = () => { speechSynthesis.onvoiceschanged = null; resolve(); };
       speechSynthesis.onvoiceschanged = done;
       setTimeout(done, 1500);  // cap the wait
@@ -1034,7 +1034,7 @@ function addChunkToReply(reply, chunkText, gen) {
 
 /** Initialize a streaming reply. Playback starts as soon as the first
  *  chunk is ready via pushReplyText(). Returns the reply id. */
-export function beginReply(opts = {}) {
+export function beginReply(opts: { replyId?: string } = {}) {
   supersedePreviousReply();  // kill any audible prior reply before swapping
   const gen = ++generation;
   const replyId = opts.replyId || `r-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1177,7 +1177,7 @@ export function endReply(finalCumulativeText) {
  *                         back into STT. Replay should always be reliable
  *                         so it forces the server path.
  */
-export async function speak(text, opts = {}) {
+export async function speak(text: string, opts: { forceServer?: boolean; replyId?: string } = {}) {
   const clean = cleanForTts(text);
   if (!clean || !player) return;
   try { player.pause(); } catch {}
@@ -1207,7 +1207,7 @@ export async function speak(text, opts = {}) {
   endReply(text);
 
   // Await natural end so existing (awaited) callers still behave the same.
-  await new Promise((resolve) => {
+  await new Promise<void>((resolve) => {
     const done = (p) => {
       if (p.replyId !== replyId) return;
       off('ended', done);

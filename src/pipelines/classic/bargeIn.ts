@@ -54,7 +54,7 @@ const REQUIRED_ABOVE = 4;
  * @param {(peak: number) => void} onFire
  * @param {{ label?: string }} [opts] Label used in the log line.
  */
-export function createBargeInEvaluator(onFire, opts = {}) {
+export function createBargeInEvaluator(onFire: (peak: number) => void, opts: { label?: string } = {}) {
   const label = opts.label ?? 'barge-in';
   /** @type {number[]} 1 = above threshold, 0 = below. */
   const window = [];

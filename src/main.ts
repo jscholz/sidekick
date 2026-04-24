@@ -58,9 +58,9 @@ const NO_REPLY_RE = /^\s*NO[-_]?(?:REPL(?:Y)?)?\.?\s*$/i;
 function findAgentReplyAfter(currentReplyId) {
   const el = document.getElementById('transcript');
   if (!el) return null;
-  const bubbles = /** @type {HTMLElement[]} */ (Array.from(
+  const bubbles = Array.from(
     el.querySelectorAll('.line.agent[data-reply-id]:not(.streaming)')
-  ));
+  ) as HTMLElement[];
   if (!currentReplyId) return null;
   const idx = bubbles.findIndex(b => b.dataset.replyId === currentReplyId);
   if (idx < 0 || idx === bubbles.length - 1) return null;
@@ -73,9 +73,9 @@ function findAgentReplyAfter(currentReplyId) {
 function findAgentReplyBefore(currentReplyId) {
   const el = document.getElementById('transcript');
   if (!el) return null;
-  const bubbles = /** @type {HTMLElement[]} */ (Array.from(
+  const bubbles = Array.from(
     el.querySelectorAll('.line.agent[data-reply-id]:not(.streaming)')
-  ));
+  ) as HTMLElement[];
   if (bubbles.length === 0) return null;
   if (!currentReplyId) {
     const last = bubbles[bubbles.length - 1];
@@ -131,7 +131,7 @@ function handleNavAction(action: 'prev' | 'next' | 'pause') {
   skipTo(action);
 }
 window.addEventListener('sidekick:nav', (e) => {
-  const detail = /** @type {any} */ ((e as CustomEvent).detail);
+  const detail = (e as CustomEvent).detail;
   if (detail && typeof detail.action === 'string') handleNavAction(detail.action);
 });
 
@@ -166,8 +166,8 @@ let streamingTtsReplyId = null;
  *  Sendable = memo recording in progress, typed text, draft content, or
  *  a pending voice transcript ready to send. */
 function updateSendButtonState() {
-  const send = /** @type {HTMLButtonElement|null} */ (document.getElementById('composer-send'));
-  const input = /** @type {HTMLTextAreaElement|null} */ (document.getElementById('composer-input'));
+  const send = document.getElementById('composer-send') as HTMLButtonElement | null;
+  const input = document.getElementById('composer-input') as HTMLTextAreaElement | null;
   if (!send) return;
   const sendable = memoActive
     || (input?.value?.trim().length ?? 0) > 0
@@ -182,7 +182,7 @@ function updateSendButtonState() {
 /** Populate the mic <select> with available audio input devices.
  *  Must be called after getUserMedia grants permission (labels are hidden until then). */
 async function populateMicPicker() {
-  const select = /** @type {HTMLSelectElement|null} */ (document.getElementById('set-mic'));
+  const select = document.getElementById('set-mic') as HTMLSelectElement | null;
   if (!select) return;
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -393,10 +393,10 @@ async function boot() {
       const next = settings.get().streamingEngine === 'server' ? 'local' : 'server';
       settings.set('streamingEngine', next);
       // Keep Settings dropdown in sync
-      const select = /** @type {HTMLSelectElement|null} */ (document.getElementById('set-streaming-engine'));
+      const select = document.getElementById('set-streaming-engine') as HTMLSelectElement | null;
       if (select) select.value = next;
       // Restart streaming with the new engine (same pattern as setting change)
-      const btnMic = /** @type {HTMLButtonElement|null} */ (document.getElementById('btn-mic'));
+      const btnMic = document.getElementById('btn-mic') as HTMLButtonElement | null;
       if (btnMic) { btnMic.click(); setTimeout(() => btnMic.click(), 800); }
     };
   }
@@ -418,7 +418,7 @@ async function boot() {
       // before re-acquiring — race here produces a stream that looks live
       // but won't route audio to createMediaStreamSource.
       if (listening) {
-        const btnMic = /** @type {HTMLButtonElement|null} */ (document.getElementById('btn-mic'));
+        const btnMic = document.getElementById('btn-mic') as HTMLButtonElement | null;
         if (btnMic) { btnMic.click(); setTimeout(() => btnMic.click(), 800); }
       }
     },
@@ -441,7 +441,7 @@ async function boot() {
     },
     onAutoSendChange: () => syncSpeakingButton(),
     onModelChange: (ref, catalog, opts = {}) => {
-      const entry = catalog.find(e => e.id === ref);
+      const entry = catalog.find((e: any) => e.id === ref) as any;
       const label = entry ? (entry.name || entry.id).replace(/^openrouter\//, '') : ref;
       if (!opts.silent) chat.addSystemLine(`Model: ${label}`);
       attachments.updateModelGate();
@@ -543,7 +543,7 @@ async function boot() {
   // text inputs). Alt+M toggles the mic stream. Esc closes an open
   // settings or info panel.
   document.addEventListener('keydown', (e) => {
-    const t = /** @type {HTMLElement} */ (e.target);
+    const t = e.target as HTMLElement;
     const tag = t?.tagName;
     const inText = tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable;
 
@@ -621,7 +621,7 @@ async function boot() {
   await restoreMemoCards();
 
   // TTS
-  const player = /** @type {HTMLAudioElement} */ (document.getElementById('player'));
+  const player = document.getElementById('player') as HTMLAudioElement;
   tts.init(player);
   tts.setListeningGetter(() => listening);
   tts.setOnStop((reason) => {
@@ -743,7 +743,7 @@ async function boot() {
 
     try {
       const micDevice = settings.get().micDevice;
-      const audioConstraints = {
+      const audioConstraints: MediaTrackConstraints = {
         echoCancellation: true, noiseSuppression: true, autoGainControl: true,
       };
       if (micDevice) audioConstraints.deviceId = { exact: micDevice };
@@ -846,8 +846,8 @@ async function boot() {
   syncSpeakingButton();
 
   // ── Composer ────────────────────────────────────────────────────────────
-  const composerInput = /** @type {HTMLTextAreaElement} */ (document.getElementById('composer-input'));
-  const composerSend = /** @type {HTMLButtonElement} */ (document.getElementById('composer-send'));
+  const composerInput = document.getElementById('composer-input') as HTMLTextAreaElement;
+  const composerSend = document.getElementById('composer-send') as HTMLButtonElement;
 
   function autoResize() {
     composerInput.style.height = 'auto';
@@ -952,7 +952,7 @@ async function boot() {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     if (!(e.metaKey || e.ctrlKey)) return;
-    const target = /** @type {HTMLElement|null} */ (document.activeElement);
+    const target = document.activeElement as HTMLElement | null;
     // Draft textEl has its own handler (flushes the draft) — don't double-fire.
     if (target?.classList?.contains('draft-text')) return;
     // Avoid double-firing when focus is already in the composer — the
@@ -965,10 +965,10 @@ async function boot() {
   // Camera + attach — each triggers a hidden <input type=file>. On change,
   // attachments.add() reads the file + renders the chip. Send happens via
   // the existing composer-send path.
-  const cameraInput = /** @type {HTMLInputElement|null} */ (document.getElementById('camera-input'));
-  const attachInput = /** @type {HTMLInputElement|null} */ (document.getElementById('attach-input'));
-  const btnCamera = /** @type {HTMLButtonElement|null} */ (document.getElementById('btn-camera'));
-  const btnAttach = /** @type {HTMLButtonElement|null} */ (document.getElementById('btn-attach'));
+  const cameraInput = document.getElementById('camera-input') as HTMLInputElement | null;
+  const attachInput = document.getElementById('attach-input') as HTMLInputElement | null;
+  const btnCamera = document.getElementById('btn-camera') as HTMLButtonElement | null;
+  const btnAttach = document.getElementById('btn-attach') as HTMLButtonElement | null;
   if (btnCamera && cameraInput) {
     btnCamera.onclick = () => {
       if (btnCamera.disabled) return;
@@ -1196,7 +1196,7 @@ async function boot() {
     return { id, card };
   }
 
-  async function handleMemoResult(audioBlob, durationMs) {
+  async function handleMemoResult(audioBlob: Blob, durationMs?: number) {
     if (!audioBlob) return;
     // Always render the placeholder card + enqueue the blob, regardless
     // of connectivity. Matches the "user gets immediate visual feedback"
@@ -1264,7 +1264,7 @@ async function boot() {
       };
       const composerEl = composerInput.parentElement;
       // Insert the recording bar where the textarea was — before the actions row.
-      const composerActionsEl = /** @type {HTMLElement|null} */ (composerEl?.querySelector('.composer-actions'));
+      const composerActionsEl = composerEl?.querySelector('.composer-actions') as HTMLElement | null;
       const ok = await memo.start({
         container: composerEl,
         insertBefore: composerActionsEl || composerSend,
@@ -1291,7 +1291,7 @@ async function boot() {
         e.preventDefault();
         memo.stop();
         // Click the trash button to properly clean up the bar
-        const trash = /** @type {HTMLButtonElement|null} */ (document.querySelector('.memo-trash'));
+        const trash = document.querySelector('.memo-trash') as HTMLButtonElement | null;
         if (trash) trash.click();
         else exitMemoMode();
       } else if (e.key === 'Enter' && !e.shiftKey) {
