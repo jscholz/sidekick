@@ -44,21 +44,58 @@ async function refreshModelState() {
   const sel = /** @type {HTMLSelectElement|null} */ (document.getElementById('set-model'));
   if (sel) {
     sel.innerHTML = '';
-    // Placeholder for when the effective model can't be determined or isn't
-    // in the catalog — better to show blank than to lie.
+    // Placeholder for when the effective model can't be determined — better
+    // to show blank than to lie. Kept at the top so the assignment below has
+    // a valid fallback target when `current` is null.
     const placeholder = document.createElement('option');
     placeholder.value = '';
     placeholder.textContent = '— select model —';
     placeholder.disabled = true;
     sel.appendChild(placeholder);
-    for (const entry of catalog) {
+
+    // Ensure the currently-active model is ALWAYS present in the dropdown,
+    // even if it didn't survive the catalog's filter (e.g. hermes config
+    // set something the openrouter feed dropped below the 64K context floor
+    // or doesn't carry at all). Without this, `sel.value = current` would
+    // silently fail and the picker would fall back to the placeholder.
+    const catalogHas = (id: string) => catalog.some((e: any) => e.id === id);
+    const extras: any[] = [];
+    if (current && !catalogHas(current)) {
+      extras.push({ id: current, name: current, group: 'preferred' });
+    }
+
+    // Partition into groups so preferred models surface first. Entries
+    // without a `group` field (backends that don't tag — e.g. openclaw)
+    // fall into `other` and render flat (no optgroup).
+    const preferred = [...extras, ...catalog.filter((e: any) => e.group === 'preferred')];
+    const other = catalog.filter((e: any) => e.group !== 'preferred');
+
+    const appendOption = (parent: Element, entry: any) => {
       const opt = document.createElement('option');
       opt.value = entry.id;
       opt.textContent = (entry.name || entry.id).replace(/^openrouter\//, '');
-      sel.appendChild(opt);
+      parent.appendChild(opt);
+    };
+
+    if (preferred.length > 0 && other.length > 0) {
+      // Real partition → render as <optgroup>s. Avoids ambiguous ordering
+      // between a curated list and the long tail.
+      const gPref = document.createElement('optgroup');
+      gPref.label = 'Preferred';
+      for (const entry of preferred) appendOption(gPref, entry);
+      sel.appendChild(gPref);
+      const gOther = document.createElement('optgroup');
+      gOther.label = 'All models';
+      for (const entry of other) appendOption(gOther, entry);
+      sel.appendChild(gOther);
+    } else {
+      // No preferred config (or catalog came back flat) → render one list.
+      for (const entry of [...preferred, ...other]) appendOption(sel, entry);
     }
-    const hasMatch = modelState.current && catalog.some(e => e.id === modelState.current);
-    sel.value = hasMatch ? modelState.current : '';
+
+    // `current` should now match exactly one <option> (either a catalog
+    // entry, an injected extra, or — if null — the placeholder).
+    sel.value = modelState.current || '';
   }
 
   if (changed && modelHandlers.onModelChange) {

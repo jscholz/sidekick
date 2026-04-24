@@ -279,10 +279,20 @@ export const hermesAdapter = {
     // Hermes's own /v1/models just returns the 'hermes-agent' placeholder.
     // The real catalog comes from the configured provider (openrouter here)
     // — sidekick server fetches + caches it behind /api/hermes/models-catalog.
+    // When SIDEKICK_PREFERRED_MODELS is set server-side, the route returns
+    // {preferred, other, data} so we can tag each entry with a `group` field
+    // and the settings UI can render an <optgroup> for the curated list.
     try {
       const r = await fetch(`${location.origin}/api/hermes/models-catalog`);
       if (!r.ok) return [];
       const d = await r.json();
+      if (Array.isArray(d.preferred) && Array.isArray(d.other)) {
+        // Preserve server ordering (already name-sorted) + prepend preferred.
+        return [
+          ...d.preferred.map((e: any) => ({ ...e, group: 'preferred' })),
+          ...d.other.map((e: any) => ({ ...e, group: 'other' })),
+        ];
+      }
       return d.data || [];
     } catch {
       return [];

@@ -2,7 +2,7 @@
  * Service worker — caches the app shell so iOS PWA survives app switches.
  * Strategy: cache-first for app shell assets, network-first for API calls.
  */
-const CACHE_NAME = 'v1.93';
+const CACHE_NAME = 'v1.94';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -85,6 +85,10 @@ self.addEventListener('fetch', (e) => {
   // API calls, WebSocket upgrades, and external URLs — always network
   if (e.request.method !== 'GET') return;
   if (url.pathname.startsWith('/ws/')) return;
+  // /api/* covers hermes proxy routes (models-catalog, model, sessions, …)
+  // and keyterms. Caching these silently stales dynamic server state —
+  // e.g. the model picker would read a cached model ref after a /set.
+  if (url.pathname.startsWith('/api/')) return;
   if (['/config', '/tts', '/gen-image', '/weather', '/link-preview',
        '/spotify-check', '/screenshot', '/canvas/show', '/transcribe'].includes(url.pathname)) return;
   if (url.origin !== self.location.origin) return;

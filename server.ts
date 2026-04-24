@@ -854,6 +854,28 @@ async function handleHermesSessionDelete(req, res, name: string) {
 let openrouterCatalogCache: { at: number; entries: any[] } | null = null;
 const OPENROUTER_CATALOG_TTL_MS = 10 * 60 * 1000;
 
+// SIDEKICK_PREFERRED_MODELS — comma-separated list of globs, e.g.
+// "anthropic/*,google/gemini-*,openai/gpt-5*". When set, the models-catalog
+// route partitions the openrouter response into `preferred` (any glob matches)
+// and `other` (none match) so the UI can surface the curated list first. When
+// unset, the route returns one flat `data` list (backward compatible).
+const PREFERRED_MODELS_GLOBS: RegExp[] = (process.env.SIDEKICK_PREFERRED_MODELS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .map((glob) => {
+    // Escape regex metachars, then turn `*` into `.*`. Anchored at both ends so
+    // "anthropic/*" matches "anthropic/claude-haiku-4.5" but not
+    // "fooanthropic/whatever".
+    const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`);
+  });
+
+function isPreferredModel(id: string): boolean {
+  if (PREFERRED_MODELS_GLOBS.length === 0) return false;
+  return PREFERRED_MODELS_GLOBS.some((re) => re.test(id));
+}
+
 async function handleHermesModelsCatalog(req, res) {
   // Hermes's own /v1/models only returns the 'hermes-agent' placeholder —
   // the actual inference catalog is whatever the configured provider
@@ -863,9 +885,19 @@ async function handleHermesModelsCatalog(req, res) {
   // sees it; catalog listing doesn't strictly require an API key but
   // providing one gets better availability.
   const now = Date.now();
-  if (openrouterCatalogCache && now - openrouterCatalogCache.at < OPENROUTER_CATALOG_TTL_MS) {
+  const havePrefs = PREFERRED_MODELS_GLOBS.length > 0;
+  const sendCatalog = (entries: any[], cached: boolean) => {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ data: openrouterCatalogCache.entries, cached: true }));
+    if (havePrefs) {
+      const preferred = entries.filter((e) => isPreferredModel(e.id));
+      const other = entries.filter((e) => !isPreferredModel(e.id));
+      res.end(JSON.stringify({ data: entries, preferred, other, cached }));
+    } else {
+      res.end(JSON.stringify({ data: entries, cached }));
+    }
+  };
+  if (openrouterCatalogCache && now - openrouterCatalogCache.at < OPENROUTER_CATALOG_TTL_MS) {
+    sendCatalog(openrouterCatalogCache.entries, true);
     return;
   }
   const key = process.env.OPENROUTER_API_KEY || '';
@@ -886,8 +918,7 @@ async function handleHermesModelsCatalog(req, res) {
       .map((m: any) => ({ id: m.id, name: m.name || m.id }));
     entries.sort((a: any, b: any) => a.name.localeCompare(b.name));
     openrouterCatalogCache = { at: now, entries };
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ data: entries, cached: false }));
+    sendCatalog(entries, false);
   } catch (e: any) {
     console.error('openrouter catalog fetch failed:', e.message);
     res.writeHead(502, { 'content-type': 'application/json' });
