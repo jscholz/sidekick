@@ -589,23 +589,27 @@ function readKeytermsFile() {
   } catch { return []; }
 }
 
-/** Serve the raw keyterms.txt file contents (for browser-side editing).
- *  If the file doesn't exist yet, return an empty body — the UI will
- *  happily let the user create it via POST. */
+/** Serve the raw keyterms.txt file contents for browser-side editing.
+ *  If the file is missing OR empty (trimmed), seed the response with
+ *  DEFAULT_KEYTERMS so the textarea shows the active vocabulary rather
+ *  than appearing empty. The first Save from the UI overwrites the file
+ *  with whatever the user has at that point — after that the file is
+ *  authoritative and defaults are no longer auto-merged in (see
+ *  handleConfig below). */
 async function handleKeytermsGet(_req, res) {
+  let raw = '';
   try {
-    const raw = await fs.readFile(KEYTERMS_PATH, 'utf8');
-    res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-cache' });
-    res.end(raw);
+    raw = await fs.readFile(KEYTERMS_PATH, 'utf8');
   } catch (e) {
-    if (e.code === 'ENOENT') {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('');
-    } else {
+    if (e.code !== 'ENOENT') {
       console.error('keyterms read failed:', e.message);
       res.writeHead(500); res.end();
+      return;
     }
   }
+  const body = raw.trim() ? raw : DEFAULT_KEYTERMS.join('\n') + '\n';
+  res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-cache' });
+  res.end(body);
 }
 
 /** Write the request body to keyterms.txt. No validation — the file is
@@ -626,8 +630,13 @@ async function handleKeytermsPost(req, res) {
 }
 
 function handleConfig(_req, res) {
-  // Merge built-in defaults + ./keyterms.txt + env var. Dedup.
-  const merged = [...new Set([...DEFAULT_KEYTERMS, ...readKeytermsFile(), ...ENV_KEYTERMS])];
+  // If keyterms.txt has content, it's authoritative — the user has edited
+  // the list and may have removed defaults on purpose. Otherwise seed with
+  // DEFAULT_KEYTERMS. ENV_KEYTERMS is always additive on top (Docker/CI
+  // override that shouldn't depend on whether a file has been saved).
+  const fileKeyterms = readKeytermsFile();
+  const base = fileKeyterms.length > 0 ? fileKeyterms : DEFAULT_KEYTERMS;
+  const merged = [...new Set([...base, ...ENV_KEYTERMS])];
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
   res.end(JSON.stringify({
     gwToken: GW_TOKEN,
@@ -730,8 +739,21 @@ async function sqlQuery(db: string, sql: string): Promise<any[]> {
 async function handleHermesSessionsList(req, res) {
   const url = new URL(req.url, 'http://x');
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
-  // Strict prefix sanitization — value is used in string-concatenated SQL.
-  const prefix = HERMES_SESSION_PREFIX.replace(/[^a-zA-Z0-9_\-]/g, '');
+  // Prefix filter: accept a user-supplied glob (e.g. 'sidekick-*,work-*'),
+  // convert '*' → SQL LIKE '%', fall back to the env/default prefix. Only
+  // applied to webchat (api_server) rows; telegram always shows because
+  // it uses the UUID as id and naming doesn't follow the sidekick
+  // convention. Strictly strip to the chars our adapter actually
+  // produces so the value can be string-concat into SQL safely.
+  const rawPrefix = url.searchParams.get('prefix') || HERMES_SESSION_PREFIX;
+  const prefixes = rawPrefix.split(',')
+    .map(p => p.trim().replace(/[^a-zA-Z0-9_\-*]/g, ''))
+    .filter(Boolean)
+    .map(p => p.replace(/\*/g, '%'));
+  const prefixClause = prefixes.length
+    ? '(' + prefixes.map(p => `c.name LIKE '${p}'`).join(' OR ') + ')'
+    : '1=0';
+  const prefix = prefixes[0]?.replace(/%$/, '') || 'sidekick-';
   // Authoritative source is state.db/sessions — every channel (api_server /
   // telegram / cli) writes here. Previously we queried response_store.db/
   // conversations by 'sidekick-' name prefix, which hid telegram sessions
@@ -764,7 +786,7 @@ async function handleHermesSessionsList(req, res) {
           (SELECT c.name FROM store.responses r
              JOIN store.conversations c ON c.response_id = r.response_id
              WHERE json_extract(r.data, '$.session_id') = s.id
-               AND c.name LIKE '${prefix}%'
+               AND ${prefixClause}
              ORDER BY r.accessed_at DESC LIMIT 1),
           s.id)
         ELSE s.id END AS id,
@@ -780,6 +802,12 @@ async function handleHermesSessionsList(req, res) {
     ORDER BY lastMessageAt DESC NULLS LAST
     LIMIT ${limit}
   `;
+  // Note: the prefix filter only restricts the NAME returned for api_server
+  // sessions — the scalar subquery above picks a matching conversation name
+  // or falls back to s.id. Orphan api_server sessions (no conversation row
+  // at all) always show by UUID. Intentional: users can still see their
+  // full chat history regardless of which conversation names happen to
+  // match their filter.
   try {
     const rows = await sqlQuery(HERMES_STATE_DB, sql);
     res.writeHead(200, { 'content-type': 'application/json' });

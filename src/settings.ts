@@ -153,6 +153,12 @@ const DEFAULTS = {
   // (e.g. bike rides). Mapped linearly to gain multiplier in feedback.ts.
   audioFeedbackVolume: 0.5,
   theme: 'dark',
+  // Session drawer filter — passed as `?prefix=` to /api/hermes/sessions.
+  // Supports comma-separated glob patterns (e.g. 'sidekick-*,work-*');
+  // '*' converts to SQL LIKE '%' on the server. Sessions whose source
+  // isn't webchat (telegram, cli) always use the raw UUID as id, so the
+  // filter only restricts webchat rows — telegram always shows.
+  sessionsFilter: 'sidekick-*',
 };
 
 let current = { ...DEFAULTS };
@@ -213,6 +219,7 @@ export function hydrate(handlers: {
   onMicChange?: () => void;
   onStreamingEngineChange?: () => void;
   onAutoSendChange?: () => void;
+  onSessionsFilterChange?: () => void;
 } = {}) {
   modelHandlers = { onModelChange: handlers.onModelChange };
   const $inp = (id: string) => document.getElementById(id) as HTMLInputElement | null;
@@ -223,6 +230,7 @@ export function hydrate(handlers: {
   const setStreamEngine = $sel('set-streaming-engine');
   const setAutoFallback = $inp('set-auto-fallback');
   const setSttKeyterms = document.getElementById('set-stt-keyterms') as HTMLTextAreaElement | null;
+  const setSessionsFilter = $inp('set-sessions-filter');
   const setTtsEngine = $sel('set-tts-engine');
   const setDictAutoSend = $inp('set-dictation-autosend');
   const setVoice = $sel('set-voice');
@@ -269,6 +277,7 @@ export function hydrate(handlers: {
   if (setFontSize) setFontSize.value = String(current.contentSize);
   if (setFontSizeVal) setFontSizeVal.textContent = `${current.contentSize}px`;
   if (setTheme) setTheme.value = current.theme;
+  if (setSessionsFilter) setSessionsFilter.value = current.sessionsFilter;
 
   // Change handlers
   if (setStreamEngine) setStreamEngine.onchange = () => {
@@ -303,6 +312,12 @@ export function hydrate(handlers: {
     // Expose a re-load hook so the settings-panel-open toggle can
     // refresh the view if someone edited the file directly on disk.
     modelHandlers.reloadKeyterms = loadKeyterms;
+  }
+  if (setSessionsFilter) {
+    setSessionsFilter.addEventListener('change', () => {
+      set('sessionsFilter', setSessionsFilter.value.trim() || 'sidekick-*');
+      if (handlers.onSessionsFilterChange) handlers.onSessionsFilterChange();
+    });
   }
   if (setTtsEngine) setTtsEngine.onchange = () => {
     set('ttsEngine', setTtsEngine.value);

@@ -154,14 +154,17 @@
     border-bottom: 1px solid var(--border);
   }
   .header .logo {
-    width: 36px; height: 36px; border-radius: 8px;
-    /* SVG uses fill="currentColor" — set the CSS color so the icon
-     * inherits the theme primary (sage) rather than defaulting to --fg.
-     * box-shadow removed: the waveform bars don't play nicely with a
-     * rounded-square glow behind them — the glow sits on transparent
-     * negative space between bars and looks blotchy. Color itself
-     * carries the brand accent now. */
-    color: var(--primary);
+    width: 36px; height: 36px;
+    display: inline-block;
+    /* SVG-as-<img> ignores CSS color — the SVG document is isolated and
+     * its fill="currentColor" resolves against its own root, not this
+     * element's computed color. Using mask-image instead flips the
+     * paradigm: the element's background-color IS the rendered color,
+     * and the SVG just carves the shape out of it. That makes
+     * var(--primary) responsive to theme (sage light vs sage dark). */
+    background-color: var(--primary);
+    mask: url(/assets/icon.svg) center/contain no-repeat;
+    -webkit-mask: url(/assets/icon.svg) center/contain no-repeat;
   }
   .header .brand { display: flex; flex-direction: column; line-height: 1.1; }
   .header .title { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }

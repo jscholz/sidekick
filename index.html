@@ -53,7 +53,7 @@
 </aside>
 
 <div class="header">
-  <img src="/assets/icon.svg" alt="" class="logo"/>
+  <span class="logo" role="img" aria-label="SideKick"></span>
   <div class="brand">
     <span class="title">SideKick <span class="version" id="app-version">—</span></span>
     <span class="subtitle">Agent Portal</span>
@@ -234,6 +234,11 @@
       <label for="set-stt-keyterms">STT keyterms</label>
       <textarea id="set-stt-keyterms" rows="6" placeholder="# one term per line, # for comments"></textarea>
       <span class="hint">edits save to apps/sidekick/keyterms.txt on the server — takes effect on next mic-stream start</span>
+    </div>
+    <div class="row">
+      <label for="set-sessions-filter">Sessions filter</label>
+      <input type="text" id="set-sessions-filter" placeholder="sidekick-*" style="flex:1">
+      <span class="hint">glob patterns (comma-sep) for which webchat sessions show in the drawer. Telegram sessions always show.</span>
     </div>
     <div class="row">
       <label for="set-tts-engine">TTS engine</label>

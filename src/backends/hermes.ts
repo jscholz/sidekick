@@ -349,7 +349,18 @@ export const hermesAdapter = {
 
   async listSessions(limit = 50) {
     try {
-      const r = await fetch(`${location.origin}/api/hermes/sessions?limit=${limit}`);
+      // Read the user's session filter from settings (glob pattern like
+      // 'sidekick-*'). Server accepts `?prefix=` and converts '*' → SQL
+      // LIKE '%'. Imported lazily to avoid a circular init between
+      // settings ↔ backend.
+      let prefix = '';
+      try {
+        const settings = await import('../settings.ts');
+        prefix = settings.get?.().sessionsFilter || '';
+      } catch {}
+      const q = new URLSearchParams({ limit: String(limit) });
+      if (prefix) q.set('prefix', prefix);
+      const r = await fetch(`${location.origin}/api/hermes/sessions?${q}`);
       if (!r.ok) return [];
       const d = await r.json();
       return d.sessions || [];
