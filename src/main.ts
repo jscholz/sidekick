@@ -451,8 +451,8 @@ async function boot() {
       // listening meant flipping the toggle with mic off did nothing,
       // and the lock quietly failed to survive in-pocket backgrounding
       // if listening had paused for any reason in between.
-      if (settings.get().wakeLock && !wakeLock.isHeld()) wakeLock.acquire();
-      if (!settings.get().wakeLock) wakeLock.release();
+      if (settings.get().wakeLock) wakeLock.acquire('setting');
+      else wakeLock.release('setting');
     },
     onAutoSendChange: () => syncSpeakingButton(),
     onModelChange: (ref: string, catalog: any[], opts: { silent?: boolean } = {}) => {
@@ -467,13 +467,12 @@ async function boot() {
   theme.applyTheme(settings.get().theme);
   theme.watchSystem(() => settings.get().theme);
 
-  // Wake lock — hold whenever the setting is on, regardless of mic
-  // state. iOS releases the lock on visibility→hidden; watchVisibility
-  // re-acquires on visibility→visible / focus / resume.
-  wakeLock.watchVisibility(() => settings.get().wakeLock);
-  // Acquire once on boot so the initial-visible state is covered
-  // (watchVisibility only fires on *change*).
-  if (settings.get().wakeLock) wakeLock.acquire();
+  // Wake lock — the ref-counted holders set in wakeLock.ts is authoritative;
+  // watchVisibility re-acquires the OS sentinel on visibility→visible / focus
+  // / resume whenever any key is held. Register the 'setting' key on boot
+  // if the user has Pocket Lock / Stay Awake enabled.
+  wakeLock.watchVisibility();
+  if (settings.get().wakeLock) wakeLock.acquire('setting');
 
   // Mic-stream resuscitation on foreground. When iOS backgrounds the
   // PWA, the MediaStream may be invalidated even though `listening`

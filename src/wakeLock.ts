@@ -1,43 +1,82 @@
 /**
  * @fileoverview Screen Wake Lock — keeps phone awake while listening.
+ *
+ * Ref-counted, keyed API so multiple subsystems can hold the lock
+ * independently without stepping on each other:
+ *
+ *   - 'setting'  — user's "Pocket Lock / Stay Awake" toggle (app-lifecycle)
+ *   - 'memo'     — voice memo capture (held while recording)
+ *   - 'streaming' — live-mic streaming (held while the mic is open)
+ *
+ * The underlying OS sentinel is acquired when the first key registers
+ * and released when the last key departs. iOS drops the OS sentinel on
+ * visibility→hidden; the holders set persists so we re-acquire on
+ * visibility→visible.
  */
 
 import { log } from './util/log.ts';
 
-let sentinel = null;
+const holders = new Set<string>();
+let sentinel: any = null;
 
-export async function acquire() {
+async function ensureSentinel(): Promise<void> {
+  if (sentinel) return;
   if (!('wakeLock' in navigator)) { log('wakeLock API not supported'); return; }
   try {
-    sentinel = await navigator.wakeLock.request('screen');
+    sentinel = await (navigator as any).wakeLock.request('screen');
     log('wakeLock acquired');
-    sentinel.addEventListener('release', () => log('wakeLock released'));
-  } catch (e) {
+    sentinel.addEventListener('release', () => {
+      log('wakeLock released');
+      // OS dropped the sentinel (visibility→hidden). Our holders set still
+      // reflects intent; watchVisibility will re-acquire when the page
+      // returns to foreground.
+      sentinel = null;
+    });
+  } catch (e: any) {
     log('wakeLock error:', e.message);
   }
 }
 
-export async function release() {
-  if (sentinel) {
-    try { await sentinel.release(); } catch {}
-    sentinel = null;
-  }
+async function dropSentinel(): Promise<void> {
+  if (!sentinel) return;
+  try { await sentinel.release(); } catch {}
+  sentinel = null;
 }
 
-export function isHeld() { return !!sentinel; }
+/** Register a holder key and ensure the OS sentinel is live. Idempotent
+ *  per key — calling twice with the same key is a no-op on the second call.
+ *  @param {string} key - Holder identity (e.g. 'setting', 'memo', 'streaming'). */
+export async function acquire(key: string = 'default'): Promise<void> {
+  holders.add(key);
+  await ensureSentinel();
+}
+
+/** Drop a holder key. If it was the last holder, release the OS sentinel. */
+export async function release(key: string = 'default'): Promise<void> {
+  holders.delete(key);
+  if (holders.size === 0) await dropSentinel();
+}
+
+/** True when any holder has the lock registered (whether or not the OS
+ *  sentinel is currently live — iOS drops it on hide). */
+export function isHeld(): boolean { return holders.size > 0; }
 
 /** Re-acquire on visibility change. iOS releases the wake lock when the
  *  page is hidden; we need to re-request every time the tab comes back
- *  if the user's intent (via `shouldHold`) is still to hold. Also
- *  re-check after the `resume` event (iOS "freeze/resume" lifecycle —
- *  fires when the page was suspended mid-foreground, a pattern that
- *  happens when the phone is pulled out of a pocket quickly). */
-export function watchVisibility(shouldHold) {
+ *  if any holder is still registered. Also re-check after the `resume`
+ *  event (iOS "freeze/resume" lifecycle — fires when the page was
+ *  suspended mid-foreground, a pattern that happens when the phone is
+ *  pulled out of a pocket quickly).
+ *
+ *  Callers used to pass a `shouldHold` predicate; the ref-counted holders
+ *  set is now authoritative, so no predicate is needed. Signature kept
+ *  permissive for backward compat but the argument is ignored. */
+export function watchVisibility(_shouldHold?: () => boolean): void {
   const tryHold = () => {
     if (document.visibilityState !== 'visible') return;
-    if (!shouldHold()) return;
+    if (holders.size === 0) return;
     if (sentinel) return;  // already held
-    acquire();
+    ensureSentinel();
   };
   document.addEventListener('visibilitychange', tryHold);
   window.addEventListener('focus', tryHold);
