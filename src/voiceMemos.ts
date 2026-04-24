@@ -8,7 +8,7 @@ const DB_NAME = 'sidekick-voice-memos';
 const STORE = 'memos';
 const DB_VERSION = 1;
 
-function openDB() {
+function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
@@ -22,7 +22,7 @@ function openDB() {
   });
 }
 
-function reqP(r) {
+function reqP<T = any>(r: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
@@ -93,10 +93,10 @@ export async function clearSent() {
 }
 
 /** Extract a ~nBars amplitude envelope from an audio blob. Times out after 5s. */
-export async function extractWaveform(blob, nBars = 40) {
-  const extract = async () => {
+export async function extractWaveform(blob: Blob, nBars = 40): Promise<Float32Array> {
+  const extract = async (): Promise<Float32Array> => {
     const arrayBuffer = await blob.arrayBuffer();
-    const Ctx = window.AudioContext || /** @type {any} */ (window).webkitAudioContext;
+    const Ctx = window.AudioContext || (window as any).webkitAudioContext;
     const ctx = new Ctx();
     try {
       const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
@@ -121,6 +121,6 @@ export async function extractWaveform(blob, nBars = 40) {
   // Race against timeout — decodeAudioData can hang on some browsers/states
   return Promise.race([
     extract(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('extract timeout')), 5000)),
+    new Promise<Float32Array>((_, reject) => setTimeout(() => reject(new Error('extract timeout')), 5000)),
   ]);
 }
