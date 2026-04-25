@@ -930,85 +930,21 @@ async function sqlQuery(db: string, sql: string): Promise<any[]> {
   return JSON.parse(stdout);
 }
 
+// TODO: migrate callers to /api/hermes/search?kind=sessions and retire
+// this endpoint. Kept as a thin alias so the existing client (backend.
+// listSessions, deployed service workers with cached old bundles) keeps
+// working while sidekickv2.29+ rolls out. The `prefix` query param is
+// also accepted for the same reason — older clients still send it.
 async function handleHermesSessionsList(req, res) {
   const url = new URL(req.url, 'http://x');
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
-
-  // Filter: comma-separated globs matched against any of the fields
-  // exposed in the session Info panel (title, conversation name, source,
-  // id). Empty filter → show all sessions. Non-empty → union of matches.
+  // Legacy `prefix=` is comma-separated globs; the unified endpoint
+  // accepts the same syntax via `q`, so we just pass it through.
   const rawFilter = url.searchParams.get('prefix') || '';
-  const globs = rawFilter
-    .split(',')
-    .map(t => t.trim())
-    .filter(Boolean)
-    .map(t => t.replace(/[^a-zA-Z0-9_\-*:@.]/g, '').replace(/\*/g, '%'))
-    .filter(Boolean);
-
-  let whereClause: string;
-  if (globs.length === 0) {
-    // Still hide 'tool'-source sessions (never user-facing).
-    whereClause = "s.source != 'tool'";
-  } else {
-    const globClauses: string[] = [];
-    for (const g of globs) {
-      globClauses.push(`s.title LIKE '${g}'`);
-      globClauses.push(`s.source LIKE '${g}'`);
-      globClauses.push(`s.id LIKE '${g}'`);
-      globClauses.push(`EXISTS (
-        SELECT 1 FROM store.responses r
-        JOIN store.conversations c ON c.response_id = r.response_id
-        WHERE json_extract(r.data, '$.session_id') = s.id
-          AND c.name LIKE '${g}'
-      )`);
-    }
-    whereClause = globClauses.join(' OR ');
-  }
-
-  // For api_server rows, pick the stable 'sidekick-*' conversation name
-  // if one exists (so the hermes adapter can resume). For telegram /
-  // whatsapp / cli and for orphan api_server sessions without a
-  // conversation name, return s.id directly. We pick whichever
-  // conversation name is most recent regardless of whether it matched
-  // the filter — the filter decides INCLUSION, not name resolution.
-  const sql = `
-    ATTACH '${HERMES_STORE_DB.replace(/'/g, "''")}' AS store;
-    SELECT
-      CASE WHEN s.source = 'api_server'
-        THEN COALESCE(
-          (SELECT c.name FROM store.responses r
-             JOIN store.conversations c ON c.response_id = r.response_id
-             WHERE json_extract(r.data, '$.session_id') = s.id
-               -- Only accept sidekick/sideclaw conversation names. Hermes
-               -- sometimes writes conversation rows keyed by an UPSTREAM
-               -- session id (e.g. a whatsapp session's YYYYMMDD_... id)
-               -- when the api_server replies on behalf of another source;
-               -- using those as the drawer row id causes a collision with
-               -- the source session that owns the same id string, and
-               -- both rows end up painted .active on match.
-               AND (c.name LIKE 'sidekick-%' OR c.name LIKE 'sideclaw-%')
-             ORDER BY r.accessed_at DESC LIMIT 1),
-          s.id)
-        ELSE s.id END AS id,
-      s.source,
-      s.title,
-      s.message_count AS messageCount,
-      (SELECT MAX(timestamp) FROM messages m WHERE m.session_id = s.id) AS lastMessageAt,
-      (SELECT substr(content, 1, 120) FROM messages m
-         WHERE m.session_id = s.id AND m.role IN ('user','assistant') AND m.content IS NOT NULL
-         ORDER BY id DESC LIMIT 1) AS snippet
-    FROM sessions s
-    WHERE (${whereClause})
-      -- Always hide subagent/delegate spawns (parent_session_id != NULL) —
-      -- agent-internal, never user-facing.
-      AND s.parent_session_id IS NULL
-    ORDER BY lastMessageAt DESC NULLS LAST
-    LIMIT ${limit}
-  `;
   try {
-    const rows = await sqlQuery(HERMES_STATE_DB, sql);
+    const sessions = await searchSessionsImpl(rawFilter, limit);
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ sessions: rows }));
+    res.end(JSON.stringify({ sessions }));
   } catch (e: any) {
     console.error('hermes sessions list failed:', e.message);
     res.writeHead(500, { 'content-type': 'application/json' });
@@ -1478,39 +1414,141 @@ async function handleHermesSessionLastResponseId(req, res, name: string) {
   }
 }
 
-/** Cmd+K palette message search — FTS5 against state.db/messages_fts.
- *  Joins to messages + sessions so each hit carries the session_id (so
- *  the client can resume into it), source, and a 160-char snippet.
+/** Unified search endpoint — handles three modes via `kind`:
  *
- *  Sanitization: input is restricted to [a-zA-Z0-9_\s\-*] — strips
- *  punctuation FTS5 would otherwise interpret as syntax (parens, NEAR,
- *  quotes, colons, etc.) so users can't accidentally hit a syntax error
- *  by typing a question mark or apostrophe. Tokens are joined with spaces
- *  for FTS5's default AND semantics. */
+ *    kind=sessions  → SQL LIKE (glob → %) over title/source/id/conv-name.
+ *                     Same shape as /api/hermes/sessions: {sessions: [...]}.
+ *                     Empty `q` returns ALL sessions (limit=50), so the
+ *                     drawer can call this endpoint for both filter and
+ *                     no-filter cases.
+ *    kind=messages  → FTS5 against messages_fts. {hits: [...]}.
+ *    kind=both      → both keys in the same envelope: {sessions, hits}.
+ *
+ *  Default kind=both keeps cmd+K's existing behavior for ANY caller that
+ *  was hitting /api/hermes/search without a kind param — but the cmd+K
+ *  client now passes kind=both explicitly so this default is a safety
+ *  net, not load-bearing.
+ *
+ *  Sanitization (FTS5 path): input is restricted to [a-zA-Z0-9_\s\-*] —
+ *  strips punctuation FTS5 would otherwise interpret as syntax (parens,
+ *  NEAR, quotes, colons, etc.) so users can't accidentally hit a syntax
+ *  error by typing a question mark or apostrophe. Tokens are joined with
+ *  spaces for FTS5's default AND semantics.
+ *
+ *  Sanitization (sessions path): same character class as the legacy
+ *  /api/hermes/sessions endpoint — `[a-zA-Z0-9_\-*:@.]`. Differs from
+ *  the FTS5 path because `:` and `@` and `.` are valid in session ids
+ *  and source labels, and we want users to be able to filter on them. */
 async function handleHermesSearch(req, res) {
   const url = new URL(req.url, 'http://x');
   const rawQ = url.searchParams.get('q') || '';
-  const limit = Math.max(1, Math.min(50, parseInt(url.searchParams.get('limit') || '20', 10)));
-  // Strip anything FTS5 might choke on. Empty result → 200 with empty hits.
+  const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '20', 10)));
+  const kind = (url.searchParams.get('kind') || 'both').toLowerCase();
+
+  let sessions: any[] | undefined;
+  let hits: any[] | undefined;
+  let hitsError: string | undefined;
+
+  if (kind === 'sessions' || kind === 'both') {
+    sessions = await searchSessionsImpl(rawQ, limit);
+  }
+  if (kind === 'messages' || kind === 'both') {
+    const r = await searchMessagesImpl(rawQ, limit);
+    hits = r.hits;
+    hitsError = r.error;
+  }
+
+  const body: any = {};
+  if (sessions !== undefined) body.sessions = sessions;
+  if (hits !== undefined) body.hits = hits;
+  if (hitsError !== undefined) body.error = hitsError;
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+/** Shared session-search implementation. Returns the same row shape as
+ *  /api/hermes/sessions (title/source/id/snippet/messageCount/lastMessageAt)
+ *  so callers can swap endpoints without re-mapping. Empty `rawQ` → all
+ *  sessions (limit). Non-empty → glob-split (commas + whitespace), each
+ *  token converted `*` → `%` and matched against title/source/id/conv-name. */
+async function searchSessionsImpl(rawQ: string, limit: number): Promise<any[]> {
+  // Tokenize on commas + whitespace. Sanitizer matches the legacy
+  // /api/hermes/sessions semantics; `:` permitted because users may try
+  // `source:whatsapp` (we strip the prefix client-side, but the colon
+  // can still slip through if they type fast).
+  const tokens = rawQ
+    .split(/[\s,]+/)
+    .map(t => t.trim())
+    .filter(Boolean)
+    .map(t => t.replace(/[^a-zA-Z0-9_\-*:@.]/g, '').replace(/\*/g, '%'))
+    .filter(Boolean);
+
+  let whereClause: string;
+  if (tokens.length === 0) {
+    // Empty query → all sessions (still hide tool-source).
+    whereClause = "s.source != 'tool'";
+  } else {
+    const clauses: string[] = [];
+    for (const t of tokens) {
+      // If the token has no glob, wrap with %…% so it acts as a substring
+      // match (matches the client-side applyFilter behavior). If it
+      // already had a glob, the user explicitly anchored — leave it.
+      const needle = t.includes('%') ? t : `%${t}%`;
+      clauses.push(`s.title LIKE '${needle}'`);
+      clauses.push(`s.source LIKE '${needle}'`);
+      clauses.push(`s.id LIKE '${needle}'`);
+      clauses.push(`EXISTS (
+        SELECT 1 FROM store.responses r
+        JOIN store.conversations c ON c.response_id = r.response_id
+        WHERE json_extract(r.data, '$.session_id') = s.id
+          AND c.name LIKE '${needle}'
+      )`);
+    }
+    whereClause = clauses.join(' OR ');
+  }
+
+  const sql = `
+    ATTACH '${HERMES_STORE_DB.replace(/'/g, "''")}' AS store;
+    SELECT
+      CASE WHEN s.source = 'api_server'
+        THEN COALESCE(
+          (SELECT c.name FROM store.responses r
+             JOIN store.conversations c ON c.response_id = r.response_id
+             WHERE json_extract(r.data, '$.session_id') = s.id
+               AND (c.name LIKE 'sidekick-%' OR c.name LIKE 'sideclaw-%')
+             ORDER BY r.accessed_at DESC LIMIT 1),
+          s.id)
+        ELSE s.id END AS id,
+      s.source,
+      s.title,
+      s.message_count AS messageCount,
+      (SELECT MAX(timestamp) FROM messages m WHERE m.session_id = s.id) AS lastMessageAt,
+      (SELECT substr(content, 1, 120) FROM messages m
+         WHERE m.session_id = s.id AND m.role IN ('user','assistant') AND m.content IS NOT NULL
+         ORDER BY id DESC LIMIT 1) AS snippet
+    FROM sessions s
+    WHERE (${whereClause})
+      AND s.parent_session_id IS NULL
+    ORDER BY lastMessageAt DESC NULLS LAST
+    LIMIT ${limit}
+  `;
+  try {
+    return await sqlQuery(HERMES_STATE_DB, sql);
+  } catch (e: any) {
+    console.error('hermes search (sessions) failed:', e.message);
+    return [];
+  }
+}
+
+/** Shared message-search implementation (FTS5). Empty `rawQ` or all-
+ *  sanitized-away → empty hits + no error. SQL failure → empty hits +
+ *  `error: 'search index unavailable'`. */
+async function searchMessagesImpl(rawQ: string, limit: number): Promise<{ hits: any[]; error?: string }> {
   const sanitized = rawQ.replace(/[^a-zA-Z0-9_\s\-*]/g, ' ').trim();
-  if (!sanitized) {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ hits: [] }));
-    return;
-  }
+  if (!sanitized) return { hits: [] };
   const tokens = sanitized.split(/\s+/).filter(Boolean);
-  if (!tokens.length) {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ hits: [] }));
-    return;
-  }
-  // FTS5 default operator is AND. Emit `tok1 tok2 tok3` (space-separated)
-  // — each token already escaped by the sanitizer. Wrap glob `*` only
-  // where it appears at end-of-token (FTS5 prefix matching syntax).
+  if (!tokens.length) return { hits: [] };
   const ftsExpr = tokens.map(t => t.replace(/\*+$/, '*')).join(' ');
-  // Single-quote FTS5 expressions in a SQL string literal — escape any
-  // residual single quotes (sanitizer already drops them, but defense
-  // in depth).
   const escapedExpr = ftsExpr.replace(/'/g, "''");
   const sql = `
     SELECT
@@ -1533,16 +1571,10 @@ async function handleHermesSearch(req, res) {
   `;
   try {
     const rows = await sqlQuery(HERMES_STATE_DB, sql);
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ hits: rows }));
+    return { hits: rows };
   } catch (e: any) {
-    // FTS5 syntax error or messages_fts missing → return empty graceful
-    // 200 so the client can render "no results" without an error toast.
-    // (Brief defended against above by sanitization, but FTS5 also rejects
-    // queries that are entirely operators.)
-    console.error('hermes search failed:', e.message);
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ hits: [], error: 'search index unavailable' }));
+    console.error('hermes search (messages) failed:', e.message);
+    return { hits: [], error: 'search index unavailable' };
   }
 }
 
