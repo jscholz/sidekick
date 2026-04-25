@@ -474,6 +474,14 @@ export function pause() {
   // streaming silently dead until the next full stop / app kill.
   speaking = false;
   sttOnTtsEnd();
+  // Pause the media-sink <audio> element BEFORE setting playbackState.
+  // The element is still in 'playing' state once Web Audio stops feeding
+  // it; iOS interprets that as a stalled stream and enters a buzz loop
+  // trying to auto-restart, blocking the BT pause command from sticking.
+  // Pausing the element synchronizes its UA-tracked state with our
+  // intent. Without this, BT pause "works" once but then loops and the
+  // user can't get pause to stick (verified on Jonathan's iPhone v2.34).
+  session.pauseMediaSink();
   session.setPlaybackState('paused');
   emit('paused', { replyId: activeReply.id });
   log(`TTS paused at chunk=${activeReply.paused.chunk} offset=${offsetNow.toFixed(2)}s`);
@@ -660,6 +668,11 @@ export function resume() {
   // Re-enter the "TTS is sounding" contract symmetric to pause() above.
   speaking = true;
   sttOnTtsStart();
+  // Resume the media-sink <audio> element before the new chunk starts
+  // feeding it. Symmetric to pauseMediaSink() in pause(); without this
+  // the element stays paused even though Web Audio is producing data,
+  // so the user hears nothing on resume.
+  session.playMediaSink();
   session.setPlaybackState('playing');
   emit('resumed', { replyId: activeReply.id });
   log(`TTS resumed at chunk=${chunk} offset=${offset.toFixed(2)}s`);
@@ -1333,6 +1346,14 @@ export function stop(reason = 'user') {
   // (button press, TTS finish, generation bump) gets the echo tail window.
   speakingTailUntil = reason === 'barge-in' ? 0 : Date.now() + TTS_TAIL_MS;
   sttOnTtsEnd();
+  // Pause the media-sink element to stop iOS's buzz loop (same fix as
+  // pause()). On stop we also want playbackState='none' so the lock-
+  // screen now-playing display clears; pauseMediaSink without a state
+  // change would leave 'playing' lingering. setPlaybackState below
+  // handles that via prepareForCapture's downstream call chain — but
+  // safer to clear it explicitly here.
+  session.pauseMediaSink();
+  session.setPlaybackState('none');
   session.prepareForCapture();
   setStatus(getListening() ? 'Listening' : 'Idle', getListening() ? 'live' : 'ok');
   log(`TTS stopped (${reason})`);

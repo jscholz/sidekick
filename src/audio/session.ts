@@ -272,6 +272,28 @@ export function setPlaybackState(state) {
   catch {}
 }
 
+/** Pause the media-sink <audio> element. Must be called whenever TTS
+ *  pauses — without this, the element stays in 'playing' state with
+ *  no audio data flowing in (Web Audio source is stopped), and iOS
+ *  enters a buzz loop trying to recover the stalled stream. After
+ *  this call, mediaSession.playbackState should be set to 'paused'. */
+export function pauseMediaSink() {
+  if (!mediaSinkEl) return;
+  try { mediaSinkEl.pause(); }
+  catch (e) { diag('media-sink pause failed:', (e as Error)?.message); }
+}
+
+/** Resume the media-sink <audio> element. Pairs with pauseMediaSink.
+ *  Idempotent — if the element is already playing, .play() is a no-op
+ *  in browsers that resolve the existing playback promise. */
+export function playMediaSink() {
+  if (!mediaSinkEl) return;
+  const p = mediaSinkEl.play();
+  if (p && typeof p.catch === 'function') {
+    p.catch((e) => diag('media-sink resume failed:', e?.message));
+  }
+}
+
 /** Generate a near-silent 1-second WAV blob at runtime. Samples carry a
  *  tiny non-zero white-noise floor (amplitude ~3 of 32767, ≈ -80 dB) —
  *  inaudible on any speaker but loud enough that iOS treats the element
