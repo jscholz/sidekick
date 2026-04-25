@@ -130,17 +130,22 @@ function renderListFiltered(listEl: HTMLElement, activeId: string) {
     listEl.innerHTML = '<li class="sess-empty">No matches.</li>';
     return;
   }
-  renderList(listEl, filtered, activeId);
+  // Only show the "new conversation" placeholder when the active session
+  // is genuinely missing from the full cached list (= brand-new chat,
+  // not yet persisted server-side). When the active session IS in the
+  // cached list but got filtered out by the filter input, that's just
+  // narrowing — don't surface a misleading "not yet started" row.
+  const isFresh = !!activeId && !cachedSessions.some(s => s.id === activeId);
+  renderList(listEl, filtered, activeId, isFresh);
 }
 
-function renderList(listEl: HTMLElement, sessions: any[], activeId: string) {
+function renderList(listEl: HTMLElement, sessions: any[], activeId: string, isFresh = false) {
   // Optimistic placeholder: if the adapter's current session isn't in the
-  // server-returned list yet (brand-new conversation, no turn persisted),
-  // show a "New conversation" row at the top so the user has immediate
-  // visual feedback that the new-chat click landed. Gets replaced by the
-  // real row on the next refresh after a reply lands.
-  const activeInList = activeId && sessions.some(s => s.id === activeId);
-  const showPlaceholder = activeId && !activeInList;
+  // cached list yet (brand-new conversation, no turn persisted), show a
+  // "New conversation" row at the top so the user has immediate visual
+  // feedback that the new-chat click landed. Gets replaced by the real
+  // row on the next refresh after a reply lands.
+  const showPlaceholder = isFresh;
 
   if (sessions.length === 0 && !showPlaceholder) {
     listEl.innerHTML = '<li class="sess-empty">No past sessions yet.</li>';
