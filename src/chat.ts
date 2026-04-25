@@ -128,13 +128,28 @@ function updateButton() {
 
 /** Unconditional scroll to the live edge. Used by initial loads,
  *  user-initiated jump-to-bottom, and anywhere we deliberately want to
- *  override the "user scrolled up" state. */
-export function forceScrollToBottom() {
+ *  override the "user scrolled up" state.
+ *
+ *  Trailing-debounced on a microtask + a short timer because multiple
+ *  unrelated triggers fire close together on session-resume (renderSession,
+ *  backfillHistory, transcript-snapshot restore, image/code-block layout
+ *  re-flows) and `.transcript` has `scroll-behavior: smooth` — without
+ *  coalescing the user sees two animated jumps. The trailing edge wins so
+ *  the FINAL scrollHeight (after async render passes settle) is captured. */
+let _scrollDebounceTimer: number | null = null;
+function _doForceScroll() {
+  _scrollDebounceTimer = null;
   if (!transcriptEl) return;
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
   pinnedToBottom = true;
   missedWhileScrolled = 0;
   updateButton();
+}
+export function forceScrollToBottom() {
+  if (_scrollDebounceTimer != null) {
+    clearTimeout(_scrollDebounceTimer);
+  }
+  _scrollDebounceTimer = window.setTimeout(_doForceScroll, 50);
 }
 
 /** Scroll to the live edge ONLY if the user is already pinned. If they've
