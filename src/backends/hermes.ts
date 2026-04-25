@@ -67,6 +67,15 @@ let inflightConversation: string | null = null;
  *  subsequent messages to the wrong server-side thread. */
 let conversationToken = 0;
 
+/** One-shot note prepended to the next sendMessage input after a model
+ *  swap. Without this, the new model reads its own prior turns from
+ *  conversation history (where the previous model self-identified) and
+ *  parrots that identity back — making the swap appear not to have
+ *  taken even though the agent IS running on the new model. Mirrors
+ *  hermes-agent's own `_pending_model_notes` mechanism (gateway/run.py
+ *  ~5708) used by the `/model` slash command. Cleared after one use. */
+let pendingModelNote: string | null = null;
+
 function newReplyId(): string {
   return `hm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -327,9 +336,19 @@ export const hermesAdapter = {
     inflight = new AbortController();
     inflightConversation = conversationName;
 
+    // Prepend a one-shot model-swap note if one is armed (see setModel).
+    // Hidden from the user in chat — only the underlying input field
+    // carries it, so the model adjusts its self-id without the user
+    // seeing system noise in their bubble.
+    let inputText = text;
+    if (pendingModelNote) {
+      inputText = `${pendingModelNote}\n\n${text}`;
+      pendingModelNote = null;
+    }
+
     const body: Record<string, any> = {
       // Omit model so server falls back to config.yaml's default.
-      input: text,
+      input: inputText,
       stream: true,
     };
     // Chain via response_id for orphan-resume (non-sidekick session ids
@@ -445,6 +464,15 @@ export const hermesAdapter = {
         return false;
       }
       log(`hermes: model set to ${modelRef} (gateway restarting)`);
+      // Arm a one-shot note for the next user turn. The new model will
+      // otherwise read prior assistant turns (authored by the previous
+      // model) from conversation_history and parrot that self-id —
+      // making the swap look broken. The note tells it to drop that.
+      pendingModelNote =
+        `[System note: the underlying model was just switched to ${modelRef}. ` +
+        `Prior assistant turns in this conversation were authored by a different model — ` +
+        `do NOT inherit their self-identification. If asked what model you are, ` +
+        `answer based on this note, not on prior turns.]`;
       return true;
     } catch (e: any) {
       diag(`hermes.setModel failed: ${e.message}`);
