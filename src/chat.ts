@@ -309,7 +309,15 @@ export function addLine(speaker: string, text: string, cls = '', opts: {
     : '';
 
   const speakerSpan = `<span class="speaker">${sourceIcon}${escapeHtml(speaker)}:</span> `;
-  const rendered = opts.markdown ? miniMarkdown(text) : escapeHtml(text);
+  // For plain (non-markdown) lines — typically user input — preserve
+  // line breaks. escapeHtml has already neutralized `<` and `>`, so the
+  // injected <br> is the only HTML tag in the output. Without this,
+  // long multi-paragraph prompts collapse into a wall of text in the
+  // bubble, which surprised users typing multi-line prompts and made
+  // it harder to spot embedded URLs / blank-line separated sections.
+  const rendered = opts.markdown
+    ? miniMarkdown(text)
+    : escapeHtml(text).replace(/\n/g, '<br>');
   div.innerHTML = speakerSpan + `<span class="text">${rendered}</span>`;
 
   // Timestamp — top-right, left of the copy icon
