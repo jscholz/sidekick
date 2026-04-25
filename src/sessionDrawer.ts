@@ -20,6 +20,7 @@ import * as backend from './backend.ts';
 import * as sessionCache from './sessionCache.ts';
 import { log, diag } from './util/log.ts';
 import { parseQuery, applyFilter } from './sessionFilter.ts';
+import { searchSessions } from './sessionSearch.ts';
 import { getFilter as getStoredFilter, putFilter as putStoredFilter, clearFilter as clearStoredFilter } from './util/filterStore.ts';
 
 let onResumeCb: ((id: string, messages: any[], pagination?: { firstId: number | null; hasMore: boolean }) => void) | null = null;
@@ -48,9 +49,17 @@ let cachedSessions: any[] = [];
  *  page reload restores the same filter. */
 let currentFilter: string = '';
 
-/** Debounce handles for the filter input (re-render: 100ms; persist: 500ms). */
+/** Debounce handles for the filter input. Render: 100ms (instant client-side
+ *  re-render over the cached list). Persist: 500ms (IDB). Server: 250ms
+ *  (round-trip to /api/hermes/search?kind=sessions for authoritative results
+ *  when the cached list might not contain a match). */
 let filterRenderTimer: number | null = null;
 let filterPersistTimer: number | null = null;
+let filterServerTimer: number | null = null;
+/** AbortController for the in-flight server filter query. A new keystroke
+ *  cancels the previous request so we don't paint stale results over fresh
+ *  ones if the older response lands second. */
+let filterServerAbort: AbortController | null = null;
 
 /** Optimistic active-id override for refresh(). The adapter's
  *  `getCurrentSessionId()` doesn't update until `resumeSession()` returns
@@ -151,6 +160,45 @@ export async function refresh() {
  *  falling back to whatever's in IDB cache. */
 export function getCachedSessions(): any[] {
   return cachedSessions.slice();
+}
+
+/** Server-authoritative reconcile of the cached list against the current
+ *  filter. The instant client-side re-render (applyFilter on cachedSessions)
+ *  is the snappy first paint; this is the catch-up that surfaces matches
+ *  the cache didn't contain. Pulls up to 200 rows under a filter (vs 50
+ *  for the unfiltered top-of-list) so deep-history queries return more
+ *  than the most recent slice. Empty filter → no-op (the regular refresh()
+ *  path already covers the unfiltered case). */
+async function runServerFilterReconcile(q: string) {
+  // Only abort the in-flight request when there's a CURRENT filter in
+  // play — abort-then-skip on an empty query would still leak the old
+  // controller. Set up a fresh controller per dispatch.
+  if (filterServerAbort) filterServerAbort.abort();
+  if (!q.trim()) {
+    filterServerAbort = null;
+    return;
+  }
+  const ctl = new AbortController();
+  filterServerAbort = ctl;
+  try {
+    const sessions = await searchSessions(q, 200, ctl.signal);
+    if (ctl.signal.aborted) return;
+    // Race guard: by the time we land, the user may have cleared the
+    // filter or typed something different. Drop stale results — the
+    // current input handler will dispatch its own reconcile.
+    if (q !== currentFilter) return;
+    cachedSessions = sessions;
+    await sessionCache.putListCache(sessions);
+    const listEl = document.getElementById('sessions-list');
+    if (!listEl) return;
+    const active = viewedSessionId || optimisticActiveId || backend.getCurrentSessionId?.() || '';
+    renderListFiltered(listEl, active);
+  } catch (e: any) {
+    if (e?.name === 'AbortError') return;
+    diag(`sessionDrawer: server filter reconcile failed: ${e?.message || e}`);
+  } finally {
+    if (filterServerAbort === ctl) filterServerAbort = null;
+  }
 }
 
 /** Re-render the visible session list with the current filter applied. */
@@ -492,6 +540,10 @@ function ensureFilterInput(): HTMLInputElement | null {
     currentFilter = input!.value;
     if (filterRenderTimer != null) clearTimeout(filterRenderTimer);
     if (filterPersistTimer != null) clearTimeout(filterPersistTimer);
+    if (filterServerTimer != null) clearTimeout(filterServerTimer);
+    // 1. Instant client-side re-render over the cached list — keeps
+    //    typing snappy regardless of network latency. parseQuery +
+    //    applyFilter is in-memory string ops; <1ms for 50 rows.
     filterRenderTimer = setTimeout(() => {
       filterRenderTimer = null;
       const listEl = document.getElementById('sessions-list');
@@ -499,13 +551,20 @@ function ensureFilterInput(): HTMLInputElement | null {
       const active = viewedSessionId || optimisticActiveId || backend.getCurrentSessionId?.() || '';
       renderListFiltered(listEl, active);
     }, 100) as unknown as number;
+    // 2. Debounced server-authoritative reconcile — covers the case
+    //    where the user filters for a term that matches a session NOT
+    //    in the cached top-50 (e.g. an old whatsapp thread). Replaces
+    //    cachedSessions on success so the next render paints from the
+    //    server-truth list. Abort any in-flight earlier query.
     filterPersistTimer = setTimeout(() => {
       filterPersistTimer = null;
-      // Empty filter → drop the persisted record so the next reload
-      // doesn't paint a stale "No matches." until refresh resolves.
       if (currentFilter) putStoredFilter(currentFilter);
       else clearStoredFilter();
     }, 500) as unknown as number;
+    filterServerTimer = setTimeout(() => {
+      filterServerTimer = null;
+      runServerFilterReconcile(currentFilter);
+    }, 250) as unknown as number;
   });
 
   input.addEventListener('keydown', (e) => {
