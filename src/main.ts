@@ -1433,6 +1433,13 @@ function replaySessionMessages(
   // cases where the adapter's conversationName diverges from what the
   // user is reading (superseded tokens, failed resumes, boot paths).
   sessionDrawer.setViewed(id);
+  // Refresh server-side session list — handleReplyFinal also refreshes
+  // when a turn completes, but if the user switches sessions mid-flight
+  // (which aborts the SSE stream client-side), response.completed never
+  // arrives here even though the server keeps computing + persisting.
+  // Refreshing on switch catches that case so a now-persisted-but-not-
+  // yet-shown session appears in the drawer without a page reload.
+  sessionDrawer.refresh();
   // Persist the session id into the chat snapshot so a page reload can
   // re-seed the drawer highlight to this session even though adapter
   // state (conversationName) resets to default on reload.
