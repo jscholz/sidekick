@@ -1327,6 +1327,39 @@ async function handleHermesSessionMessages(req, res, name: string) {
   }
 }
 
+/** Returns the latest response_id for a session, used by the hermes
+ *  adapter to chain follow-up turns via `previous_response_id` when the
+ *  session has no sidekick-prefixed conversation row (orphan-resume
+ *  case — telegram/whatsapp/cli sessions, or api_server replies on
+ *  behalf of another adapter). Without this, `conversation: <UUID>`
+ *  misses `response_store.conversations` and api_server creates a fresh
+ *  session for every turn. */
+async function handleHermesSessionLastResponseId(req, res, name: string) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(name) || name.length > 128) {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid session id' }));
+    return;
+  }
+  try {
+    const uuid = await lookupSessionUuid(name);
+    if (!uuid) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'session not found' }));
+      return;
+    }
+    const rows = await sqlQuery(HERMES_STORE_DB,
+      `SELECT response_id FROM responses
+       WHERE json_extract(data, '$.session_id')='${uuid}'
+       ORDER BY accessed_at DESC LIMIT 1`);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ responseId: rows[0]?.response_id || null }));
+  } catch (e: any) {
+    console.error('hermes session last-response-id failed:', e.message);
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message }));
+  }
+}
+
 function handleHermesProxy(req, res) {
   // Map /api/hermes/<path> → /v1/<path> upstream.
   const suffix = req.url.replace(/^\/api\/hermes/, '') || '/';
@@ -1380,6 +1413,8 @@ const server = http.createServer(async (req, res) => {
   if (req.url) {
     const msgMatch = req.method === 'GET' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)\/messages(?:\?.*)?$/);
     if (msgMatch) return handleHermesSessionMessages(req, res, decodeURIComponent(msgMatch[1]));
+    const lastRespMatch = req.method === 'GET' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)\/last-response-id(?:\?.*)?$/);
+    if (lastRespMatch) return handleHermesSessionLastResponseId(req, res, decodeURIComponent(lastRespMatch[1]));
     const renameMatch = req.method === 'POST' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)\/rename(?:\?.*)?$/);
     if (renameMatch) return handleHermesSessionRename(req, res, decodeURIComponent(renameMatch[1]));
     const deleteMatch = req.method === 'DELETE' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)(?:\?.*)?$/);

@@ -38,6 +38,15 @@ let inflight: AbortController | null = null;
 let currentReplyId: string | null = null;
 let cumulativeText = '';
 
+/** Set by resumeSession when the resumed session id has no sidekick-*
+ *  conversation row in response_store.db. In that case the conversation
+ *  name lookup at api_server side misses, and using `conversation:` would
+ *  spawn a fresh session every send. We fetch the latest response_id for
+ *  the session and chain via `previous_response_id` instead — both fields
+ *  are mutually exclusive at api_server.py:1695. Refreshed on each
+ *  response.completed so the chain advances. Cleared by newSession(). */
+let chainResponseId: string | null = null;
+
 /** Monotonic token for conversation-name changes. Any operation that
  *  intends to set `conversationName` (newSession, resumeSession) claims
  *  a fresh token at start. If the operation is async and its token isn't
@@ -189,6 +198,13 @@ function handleEvent(type: string, d: any): void {
 
     case 'response.completed': {
       const replyId = currentReplyId || newReplyId();
+      // Advance the chain so the next turn picks up via previous_response_id
+      // (only meaningful when chainResponseId was already set by an
+      // orphan-resume — for sidekick-* sessions chainResponseId stays null
+      // and the conversation-name path keeps working).
+      if (chainResponseId && d.response?.id) {
+        chainResponseId = d.response.id;
+      }
       // Hermes's completed event carries the final response; various fields
       // may hold the consolidated text depending on server version.
       const finalText =
@@ -267,16 +283,24 @@ export const hermesAdapter = {
     if (inflight) { try { inflight.abort(); } catch {} }
     inflight = new AbortController();
 
-    const body = {
+    const body: Record<string, any> = {
       // Omit model so server falls back to config.yaml's default.
-      conversation: conversationName,
-      // Hermes doesn't use the "[voice]" in-band hint (that was an openclaw
-      // convention — its agent was trained to be lenient with transcription
-      // errors when it saw the prefix). Hermes models aren't, so the prefix
-      // just leaks into the transcript without helping interpretation.
       input: text,
       stream: true,
     };
+    // Chain via response_id for orphan-resume (non-sidekick session ids
+    // whose conversations table has no row). Otherwise chain via the
+    // conversation name — that's the original sidekick-* path. The two
+    // fields are mutually exclusive at api_server.py.
+    if (chainResponseId) {
+      body.previous_response_id = chainResponseId;
+    } else {
+      body.conversation = conversationName;
+    }
+    // Hermes doesn't use the "[voice]" in-band hint (that was an openclaw
+    // convention — its agent was trained to be lenient with transcription
+    // errors when it saw the prefix). Hermes models aren't, so the prefix
+    // just leaks into the transcript without helping interpretation.
 
     try {
       const res = await fetch(`${apiBase()}/responses`, {
@@ -313,6 +337,9 @@ export const hermesAdapter = {
     conversationToken++;
     currentReplyId = null;
     cumulativeText = '';
+    // Drop any orphan-resume chain — fresh session uses the conversation
+    // name path, not previous_response_id.
+    chainResponseId = null;
     log(`hermes: new session (conversation=${conversationName})`);
   },
 
@@ -439,6 +466,28 @@ export const hermesAdapter = {
     conversationName = id;
     currentReplyId = null;
     cumulativeText = '';
+
+    // Orphan-resume: ids that aren't sidekick-* / sideclaw-* have no row
+    // in response_store.conversations, so chaining via `conversation: <id>`
+    // misses and api_server creates a fresh session every send (Bug A).
+    // For these ids, fetch the latest response_id and chain via
+    // previous_response_id instead.
+    chainResponseId = null;
+    if (!/^(sidekick|sideclaw)-/.test(id)) {
+      try {
+        const r2 = await fetch(`${location.origin}/api/hermes/sessions/${encodeURIComponent(id)}/last-response-id`);
+        if (r2.ok) {
+          const d2 = await r2.json();
+          if (myToken === conversationToken && d2.responseId) {
+            chainResponseId = d2.responseId;
+            log(`hermes: orphan-resume chain via previous_response_id=${d2.responseId}`);
+          }
+        }
+      } catch (e: any) {
+        diag(`hermes: last-response-id lookup failed for ${id}: ${e.message}`);
+      }
+    }
+
     log(`hermes: resumed session (conversation=${id}, ${result.messages.length} messages, hasMore=${result.hasMore})`);
     return result;
   },
