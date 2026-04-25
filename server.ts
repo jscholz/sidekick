@@ -1663,8 +1663,56 @@ function handleHermesProxy(req, res) {
   else upReq.end();
 }
 
+// ── WebRTC voice transport proxy: /api/rtc/* → http://127.0.0.1:8642/v1/rtc/* ─
+// Phase 1 shim for the new full-duplex voice pipeline. Mirrors handleHermesProxy
+// but maps /api/rtc/<path> -> /v1/rtc/<path> upstream. Same auth + error
+// semantics. Body sizes are tiny (an SDP offer is <4KB, ICE candidates <1KB)
+// so no special streaming concerns.
+function handleRtcProxy(req, res) {
+  const suffix = req.url.replace(/^\/api\/rtc/, '') || '/';
+  const upstreamPath = `/v1/rtc${suffix}`;
+  const upstream = new URL(upstreamPath, HERMES_UPSTREAM);
+
+  const headers = {};
+  for (const h of ['content-type', 'content-length', 'accept']) {
+    if (req.headers[h]) headers[h] = req.headers[h];
+  }
+  if (HERMES_TOKEN) headers['authorization'] = `Bearer ${HERMES_TOKEN}`;
+
+  const lib = upstream.protocol === 'https:' ? https : http;
+  const upReq = lib.request({
+    hostname: upstream.hostname,
+    port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
+    path: upstream.pathname + upstream.search,
+    method: req.method,
+    headers,
+  }, (upRes) => {
+    const out = { ...upRes.headers };
+    delete out.connection;
+    delete out['transfer-encoding'];
+    res.writeHead(upRes.statusCode || 502, out);
+    upRes.pipe(res);
+  });
+
+  upReq.on('error', (e) => {
+    console.error('rtc proxy: upstream error:', e.message);
+    if (!res.headersSent) {
+      res.writeHead(502, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: `upstream unreachable: ${e.message}` }));
+    } else {
+      res.end();
+    }
+  });
+
+  if (req.method === 'POST' || req.method === 'PUT') req.pipe(upReq);
+  else upReq.end();
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+  // WebRTC voice signaling proxy → /v1/rtc/* on hermes upstream.
+  // Match before /api/hermes (we only forward the rtc subtree).
+  if (req.url && req.url.startsWith('/api/rtc')) return handleRtcProxy(req, res);
   // Hermes session-browser routes (handled locally via sqlite; must match
   // before the generic /api/hermes pass-through proxy below).
   if (req.url) {
