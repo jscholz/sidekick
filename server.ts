@@ -1574,7 +1574,46 @@ function handleHermesProxy(req, res) {
     delete out['transfer-encoding'];
     // Preserve content-type (text/event-stream for /responses with stream=true).
     res.writeHead(upRes.statusCode || 502, out);
-    upRes.pipe(res);
+
+    // Manual relay (instead of upRes.pipe(res)) so a downstream client
+    // disconnect does NOT propagate up to hermes. With pipe(), Node
+    // closes upRes when res closes, which closes our TCP connection
+    // to hermes — and hermes' SSE handler (api_server.py:1157) reacts
+    // to that close by calling agent.interrupt + agent_task.cancel.
+    // Result before this change: every phone hibernation, network
+    // blip, or tab close mid-run killed the agent task. OpenClaw was
+    // robust on bike rides; hermes regressed because of this proxy.
+    //
+    // New behavior: if downstream goes away, we silently drain upRes
+    // to /dev/null. The agent finishes naturally, hermes writes the
+    // response to response_store.db via its normal completion path,
+    // and the next /v1/responses POST on the same conversation name
+    // picks up the chained reply via previous_response_id.
+    let downstreamLive = true;
+    const detach = () => { downstreamLive = false; };
+    res.on('close', detach);
+    res.on('error', detach);
+
+    upRes.on('data', (chunk) => {
+      if (!downstreamLive) return;
+      try {
+        if (!res.write(chunk)) {
+          // Backpressure: pause upRes until res drains. Don't drop
+          // chunks — clients (sidekick frontend) parse SSE strictly.
+          upRes.pause();
+          res.once('drain', () => upRes.resume());
+        }
+      } catch {
+        downstreamLive = false;
+      }
+    });
+    upRes.on('end', () => {
+      if (downstreamLive) { try { res.end(); } catch {} }
+    });
+    upRes.on('error', (e) => {
+      console.error('hermes proxy: upstream stream error:', e.message);
+      if (downstreamLive) { try { res.end(); } catch {} }
+    });
   });
 
   upReq.on('error', (e) => {
