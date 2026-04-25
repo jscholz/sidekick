@@ -1301,9 +1301,17 @@ async function handleHermesModelsCatalog(req, res) {
     const d: any = await r.json();
     // Project to the sidekick ModelEntry shape + filter out models we can't
     // actually use (hermes enforces a 64K context minimum at startup).
+    // Forward `input`/`output` modality arrays so the composer can gate
+    // image-attach buttons (attachments.ts:updateModelGate). OpenRouter
+    // exposes these as architecture.input_modalities / output_modalities.
     const entries = (d.data || [])
       .filter((m: any) => (m.context_length || 0) >= 64000)
-      .map((m: any) => ({ id: m.id, name: m.name || m.id }));
+      .map((m: any) => ({
+        id: m.id,
+        name: m.name || m.id,
+        input: m.architecture?.input_modalities,
+        output: m.architecture?.output_modalities,
+      }));
     entries.sort((a: any, b: any) => a.name.localeCompare(b.name));
     openrouterCatalogCache = { at: now, entries };
     sendCatalog(entries, false);
