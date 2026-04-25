@@ -709,7 +709,12 @@
      the hint below on its own row instead of trying to fit on the side. */
   #settings .row-wide { flex-wrap: wrap; }
   #settings .row-wide .hint {
-    flex-basis: 100%; margin-left: 162px; margin-top: 4px;
+    /* Align with the row's left edge (= where the label and input start
+       once the row has wrapped). The 162px indent that used to be here
+       only made sense for an UN-wrapped layout where a left label column
+       took 150px + gap; in the actual wrapped layout it left the hint
+       hanging in space. */
+    flex-basis: 100%; margin-left: 0; margin-top: 4px;
     font-family: var(--font-mono); font-size: 11px; color: var(--muted);
   }
   #settings input[type=range] { flex: 1; min-width: 140px; accent-color: var(--primary); }
