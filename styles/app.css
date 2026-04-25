@@ -679,8 +679,23 @@
    * in a phone viewport without sideways scroll. Also soft-cap the label
    * so long labels wrap rather than reserve desktop-sized space. */
   @media (max-width: 699px) {
-    #settings { padding: 20px 12px 12px; }
-    .settings-inner { padding: 18px 14px 14px; }
+    #settings {
+      padding: 20px 12px 12px;
+      /* Centered on mobile too, with a clear backdrop tap-zone on
+       * either side so a wedged X button isn't the only escape route. */
+      align-items: flex-start;
+      justify-content: center;
+    }
+    .settings-inner {
+      padding: 18px 14px 14px;
+      /* Cap the inner width on mobile so it isn't full-screen — gives
+       * the user obvious backdrop area to tap-outside-to-close, mirrors
+       * the .info-panel-inner feel. Without this cap the panel filled
+       * the viewport (minus the 12px #settings padding) and the X
+       * button was the only dismiss path; on iPhone the X was reported
+       * unresponsive (BUG 5 from 2026-04-25 run). */
+      max-width: min(94vw, 420px);
+    }
     #settings label { min-width: 0; flex-shrink: 1; }
     #settings .text-input,
     #settings input[type=text],

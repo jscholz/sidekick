@@ -588,22 +588,51 @@ export function hydrate(handlers: {
     modelHandlers.reloadKeyterms?.();
   };
   const closePanel = () => {
-    // Commit pending sessions-filter edits on close — the text input's
-    // 'change' event only fires on blur/Enter, so tapping Close or the
-    // backdrop directly would otherwise drop the typed value until the
-    // next page load.
-    if (setSessionsFilter) {
-      const typed = setSessionsFilter.value.trim();
-      if (typed !== current.sessionsFilter) {
-        set('sessionsFilter', typed);
-        if (handlers.onSessionsFilterChange) handlers.onSessionsFilterChange();
-      }
+    // ORDER MATTERS: hide the panel FIRST, before any side-effect work.
+    // Previously a throw inside the sessions-filter commit (or any
+    // handler.onSessionsFilterChange chain) could leave the panel
+    // stuck open with the X button visibly registering :active but
+    // failing to dismiss — observed on iPhone 2026-04-25 (BUG 5).
+    // Force-hide via inline style as a belt-and-braces against any
+    // stylesheet override that might survive the class removal.
+    if (panel) {
+      panel.classList.remove('on');
+      panel.style.display = 'none';
+      // Restore stylesheet authority on next open: the .on class adds
+      // display:flex; without clearing the inline style, openPanel's
+      // class-add would race the inline 'none'. Defer the cleanup so
+      // it doesn't fire mid-close-animation.
+      setTimeout(() => { if (panel) panel.style.display = ''; }, 50);
     }
-    if (panel) panel.classList.remove('on');
+    // Commit pending sessions-filter edits AFTER the close — the text
+    // input's 'change' event only fires on blur/Enter, so tapping the X
+    // or backdrop would otherwise drop the typed value until the next
+    // page load. Wrapped in try/catch so a throw can't leave the panel
+    // visible (which is what was happening before the order swap above).
+    try {
+      if (setSessionsFilter) {
+        const typed = setSessionsFilter.value.trim();
+        if (typed !== current.sessionsFilter) {
+          set('sessionsFilter', typed);
+          if (handlers.onSessionsFilterChange) handlers.onSessionsFilterChange();
+        }
+      }
+    } catch (e) {
+      console.error('settings: closePanel filter-commit failed:', e);
+    }
   };
   if (btnSet) btnSet.onclick = openPanel;
   const closeBtn = $any('settings-close');
-  if (closeBtn) closeBtn.onclick = closePanel;
+  if (closeBtn) {
+    // Multiple event paths so iOS Safari's occasional click-event drop
+    // (when the button is positioned absolutely inside an overflow:auto
+    // container) can't strand the user with no exit. pointerup fires
+    // before click and is more robust on iOS PWA. preventDefault stops
+    // the synthetic click from firing afterwards (avoids double-close).
+    const handle = (e: Event) => { e.preventDefault(); e.stopPropagation(); closePanel(); };
+    closeBtn.addEventListener('pointerup', handle);
+    closeBtn.addEventListener('click', handle);
+  }
   if (panel) {
     // Clicking the backdrop (outside .settings-inner) closes.
     panel.addEventListener('click', (e: MouseEvent) => {

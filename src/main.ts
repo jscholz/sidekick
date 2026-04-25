@@ -435,9 +435,20 @@ async function boot() {
   const infoClose = document.getElementById('info-close');
   if (btnInfo && infoPanel) {
     btnInfo.onclick = () => { infoPanel.classList.remove('hidden'); infoPanel.setAttribute('aria-hidden', 'false'); };
-    if (infoClose) infoClose.onclick = () => { infoPanel.classList.add('hidden'); infoPanel.setAttribute('aria-hidden', 'true'); };
+    const closeInfo = (e?: Event) => {
+      if (e) { e.preventDefault(); e.stopPropagation(); }
+      infoPanel.classList.add('hidden');
+      infoPanel.setAttribute('aria-hidden', 'true');
+    };
+    if (infoClose) {
+      // pointerup + click for iOS-quirky cases — same pattern as
+      // settings-close. Without pointerup, the close on iPhone could
+      // register :active but fail to fire click (observed in BUG 5).
+      infoClose.addEventListener('pointerup', closeInfo);
+      infoClose.addEventListener('click', closeInfo);
+    }
     infoPanel.addEventListener('click', (e) => {
-      if (e.target === infoPanel) { infoPanel.classList.add('hidden'); infoPanel.setAttribute('aria-hidden', 'true'); }
+      if (e.target === infoPanel) closeInfo();
     });
   }
 
