@@ -19,8 +19,24 @@
 import * as backend from './backend.ts';
 import * as sessionCache from './sessionCache.ts';
 import { log, diag } from './util/log.ts';
+import { parseQuery, applyFilter } from './sessionFilter.ts';
+import { getFilter as getStoredFilter, putFilter as putStoredFilter, clearFilter as clearStoredFilter } from './util/filterStore.ts';
 
 let onResumeCb: ((id: string, messages: any[], pagination?: { firstId: number | null; hasMore: boolean }) => void) | null = null;
+
+/** Last-known full session list from the server (or cache fallback). The
+ *  inline filter operates on THIS — re-rendering re-applies the current
+ *  filter without re-fetching from the server. Updated whenever refresh()
+ *  successfully resolves the server list. */
+let cachedSessions: any[] = [];
+
+/** Current filter input value. Empty = no filter. Persisted to IDB so a
+ *  page reload restores the same filter. */
+let currentFilter: string = '';
+
+/** Debounce handles for the filter input (re-render: 100ms; persist: 500ms). */
+let filterRenderTimer: number | null = null;
+let filterPersistTimer: number | null = null;
 
 /** Optimistic active-id override for refresh(). The adapter's
  *  `getCurrentSessionId()` doesn't update until `resumeSession()` returns
@@ -62,6 +78,10 @@ export async function refresh() {
   const listEl = document.getElementById('sessions-list');
   if (!listEl) return;
   if (!backend.capabilities().sessionBrowsing) { listEl.innerHTML = ''; return; }
+  // Make sure the filter input exists above the list. Idempotent — once
+  // mounted it stays put. Also re-syncs `currentFilter` from the live
+  // input value in case the user typed before refresh ever ran.
+  ensureFilterInput();
   // Priority: viewed (what's on screen) → optimistic (click in flight) →
   // adapter's conversationName (fallback for fresh state / new chats).
   const active = viewedSessionId || optimisticActiveId || backend.getCurrentSessionId?.() || '';
@@ -69,7 +89,8 @@ export async function refresh() {
   // 1. Render from cache if available.
   const cached = await sessionCache.getListCache();
   if (cached?.sessions?.length) {
-    renderList(listEl, cached.sessions, active);
+    cachedSessions = cached.sessions;
+    renderListFiltered(listEl, active);
   } else {
     listEl.innerHTML = '<li class="sess-empty">Loading…</li>';
   }
@@ -78,7 +99,8 @@ export async function refresh() {
   try {
     const sessions = await backend.listSessions(50);
     await sessionCache.putListCache(sessions);
-    renderList(listEl, sessions, active);
+    cachedSessions = sessions;
+    renderListFiltered(listEl, active);
   } catch (e: any) {
     diag(`sessionDrawer: list failed: ${e.message}`);
     if (!cached?.sessions?.length) {
@@ -86,6 +108,29 @@ export async function refresh() {
     }
     // Else: keep the cached view — user can still tap + resume from cache.
   }
+}
+
+/** Snapshot of the most recently rendered session list. Exposed for the
+ *  cmd+K palette so it can applyFilter() over the same data without
+ *  re-fetching. Returns the canonical post-server list when available,
+ *  falling back to whatever's in IDB cache. */
+export function getCachedSessions(): any[] {
+  return cachedSessions.slice();
+}
+
+/** Re-render the visible session list with the current filter applied. */
+function renderListFiltered(listEl: HTMLElement, activeId: string) {
+  const filtered = currentFilter
+    ? applyFilter(cachedSessions, parseQuery(currentFilter))
+    : cachedSessions;
+  // Empty list under a non-empty filter shows "No matches." instead of
+  // the generic "No past sessions yet." so the user knows it's the filter
+  // (not an empty server) hiding everything.
+  if (filtered.length === 0 && currentFilter && cachedSessions.length > 0) {
+    listEl.innerHTML = '<li class="sess-empty">No matches.</li>';
+    return;
+  }
+  renderList(listEl, filtered, activeId);
 }
 
 function renderList(listEl: HTMLElement, sessions: any[], activeId: string) {
@@ -374,8 +419,98 @@ async function resume(id: string) {
   }
 }
 
+/** Lazy-build the inline filter input above the sessions list, idempotent.
+ *  Lives inside #sb-sessions-section so it inherits the existing sidebar
+ *  collapse/expand behavior on mobile. Wires the debounced re-render +
+ *  IDB-persist on input, and Esc to clear (drops the filter + IDB entry). */
+function ensureFilterInput(): HTMLInputElement | null {
+  let input = document.getElementById('sess-filter-input') as HTMLInputElement | null;
+  if (input) return input;
+  const section = document.getElementById('sb-sessions-section');
+  const list = document.getElementById('sessions-list');
+  if (!section || !list) return null;
+  input = document.createElement('input');
+  input.id = 'sess-filter-input';
+  input.type = 'text';
+  input.className = 'sess-filter';
+  input.placeholder = 'Filter sessions… (use * for wildcards)';
+  input.spellcheck = false;
+  input.autocomplete = 'off';
+  input.setAttribute('aria-label', 'Filter sessions');
+  input.value = currentFilter;
+  // Insert just above the <ul>. Section markup is:
+  //   <div id="sb-sessions-section">
+  //     <div class="sb-section-title">Sessions</div>
+  //     <ul id="sessions-list">…</ul>
+  //   </div>
+  section.insertBefore(input, list);
+
+  input.addEventListener('input', () => {
+    currentFilter = input!.value;
+    if (filterRenderTimer != null) clearTimeout(filterRenderTimer);
+    if (filterPersistTimer != null) clearTimeout(filterPersistTimer);
+    filterRenderTimer = setTimeout(() => {
+      filterRenderTimer = null;
+      const listEl = document.getElementById('sessions-list');
+      if (!listEl) return;
+      const active = viewedSessionId || optimisticActiveId || backend.getCurrentSessionId?.() || '';
+      renderListFiltered(listEl, active);
+    }, 100) as unknown as number;
+    filterPersistTimer = setTimeout(() => {
+      filterPersistTimer = null;
+      // Empty filter → drop the persisted record so the next reload
+      // doesn't paint a stale "No matches." until refresh resolves.
+      if (currentFilter) putStoredFilter(currentFilter);
+      else clearStoredFilter();
+    }, 500) as unknown as number;
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      // Clear value + filter + persistence; re-render unfiltered.
+      input!.value = '';
+      currentFilter = '';
+      if (filterRenderTimer != null) { clearTimeout(filterRenderTimer); filterRenderTimer = null; }
+      if (filterPersistTimer != null) { clearTimeout(filterPersistTimer); filterPersistTimer = null; }
+      clearStoredFilter();
+      const listEl = document.getElementById('sessions-list');
+      if (listEl) {
+        const active = viewedSessionId || optimisticActiveId || backend.getCurrentSessionId?.() || '';
+        renderListFiltered(listEl, active);
+      }
+      // Drop focus so a follow-up Esc can hit other Esc handlers (close
+      // settings, close info panel) rather than getting eaten here.
+      input!.blur();
+    }
+  });
+  return input;
+}
+
+/** Public hook for the global `/` shortcut — focuses the inline filter. */
+export function focusFilter() {
+  const input = ensureFilterInput();
+  if (input) {
+    input.focus();
+    input.select();
+  }
+}
+
 export function init(opts: { onResume: (id: string, messages: any[]) => void }) {
   onResumeCb = opts.onResume;
+  // Restore persisted filter (don't await — boot order shouldn't block
+  // on IDB; refresh() will pick it up on the next render once resolved).
+  getStoredFilter().then((saved) => {
+    if (!saved) return;
+    currentFilter = saved;
+    const input = ensureFilterInput();
+    if (input) input.value = saved;
+    const listEl = document.getElementById('sessions-list');
+    if (listEl && cachedSessions.length) {
+      const active = viewedSessionId || optimisticActiveId || backend.getCurrentSessionId?.() || '';
+      renderListFiltered(listEl, active);
+    }
+  });
 }
 
 /** Called after the user changes the sessions-filter setting. Drops the

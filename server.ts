@@ -1478,6 +1478,74 @@ async function handleHermesSessionLastResponseId(req, res, name: string) {
   }
 }
 
+/** Cmd+K palette message search — FTS5 against state.db/messages_fts.
+ *  Joins to messages + sessions so each hit carries the session_id (so
+ *  the client can resume into it), source, and a 160-char snippet.
+ *
+ *  Sanitization: input is restricted to [a-zA-Z0-9_\s\-*] — strips
+ *  punctuation FTS5 would otherwise interpret as syntax (parens, NEAR,
+ *  quotes, colons, etc.) so users can't accidentally hit a syntax error
+ *  by typing a question mark or apostrophe. Tokens are joined with spaces
+ *  for FTS5's default AND semantics. */
+async function handleHermesSearch(req, res) {
+  const url = new URL(req.url, 'http://x');
+  const rawQ = url.searchParams.get('q') || '';
+  const limit = Math.max(1, Math.min(50, parseInt(url.searchParams.get('limit') || '20', 10)));
+  // Strip anything FTS5 might choke on. Empty result → 200 with empty hits.
+  const sanitized = rawQ.replace(/[^a-zA-Z0-9_\s\-*]/g, ' ').trim();
+  if (!sanitized) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ hits: [] }));
+    return;
+  }
+  const tokens = sanitized.split(/\s+/).filter(Boolean);
+  if (!tokens.length) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ hits: [] }));
+    return;
+  }
+  // FTS5 default operator is AND. Emit `tok1 tok2 tok3` (space-separated)
+  // — each token already escaped by the sanitizer. Wrap glob `*` only
+  // where it appears at end-of-token (FTS5 prefix matching syntax).
+  const ftsExpr = tokens.map(t => t.replace(/\*+$/, '*')).join(' ');
+  // Single-quote FTS5 expressions in a SQL string literal — escape any
+  // residual single quotes (sanitizer already drops them, but defense
+  // in depth).
+  const escapedExpr = ftsExpr.replace(/'/g, "''");
+  const sql = `
+    SELECT
+      m.session_id AS session_id,
+      m.id AS message_id,
+      m.role AS role,
+      substr(m.content, 1, 160) AS snippet,
+      m.timestamp AS timestamp,
+      s.title AS session_title,
+      s.source AS session_source
+    FROM messages_fts f
+    JOIN messages m ON m.id = f.rowid
+    JOIN sessions s ON s.id = m.session_id
+    WHERE messages_fts MATCH '${escapedExpr}'
+      AND s.parent_session_id IS NULL
+      AND s.source != 'tool'
+      AND m.role IN ('user', 'assistant')
+    ORDER BY m.timestamp DESC
+    LIMIT ${limit}
+  `;
+  try {
+    const rows = await sqlQuery(HERMES_STATE_DB, sql);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ hits: rows }));
+  } catch (e: any) {
+    // FTS5 syntax error or messages_fts missing → return empty graceful
+    // 200 so the client can render "no results" without an error toast.
+    // (Brief defended against above by sanitization, but FTS5 also rejects
+    // queries that are entirely operators.)
+    console.error('hermes search failed:', e.message);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ hits: [], error: 'search index unavailable' }));
+  }
+}
+
 function handleHermesProxy(req, res) {
   // Map /api/hermes/<path> → /v1/<path> upstream.
   const suffix = req.url.replace(/^\/api\/hermes/, '') || '/';
@@ -1538,6 +1606,7 @@ const server = http.createServer(async (req, res) => {
     const deleteMatch = req.method === 'DELETE' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)(?:\?.*)?$/);
     if (deleteMatch) return handleHermesSessionDelete(req, res, decodeURIComponent(deleteMatch[1]));
     if (req.method === 'GET' && /^\/api\/hermes\/sessions(?:\?.*)?$/.test(req.url)) return handleHermesSessionsList(req, res);
+    if (req.method === 'GET' && /^\/api\/hermes\/search(?:\?.*)?$/.test(req.url)) return handleHermesSearch(req, res);
     if (req.method === 'GET' && /^\/api\/hermes\/models-catalog(?:\?.*)?$/.test(req.url)) return handleHermesModelsCatalog(req, res);
     if (req.method === 'GET' && /^\/api\/hermes\/model(?:\?.*)?$/.test(req.url)) return handleHermesModelGet(req, res);
     if (req.method === 'POST' && /^\/api\/hermes\/model(?:\?.*)?$/.test(req.url)) return handleHermesModelSet(req, res);

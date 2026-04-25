@@ -373,6 +373,94 @@
   .sess-menu button.danger { color: #e66; }
   .sess-menu button.danger:hover { background: rgba(230, 102, 102, 0.12); }
 
+  /* ── Inline session filter (above #sessions-list) ── */
+  .sess-filter {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 6px 0 4px;
+    padding: 7px 10px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: inherit; font-size: 13px;
+    line-height: 1.3;
+    outline: none;
+  }
+  .sess-filter::placeholder { color: var(--muted); }
+  .sess-filter:focus { border-color: var(--primary); }
+  /* Hide the input when the sidebar is collapsed (mirrors .sessions-list
+     hide rule above) so the rail stays clean. */
+  #sidebar.collapsed .sess-filter { display: none; }
+
+  /* ── Cmd+K palette ── */
+  .cmdk-dialog {
+    background: var(--surface); color: var(--fg);
+    border: 1px solid var(--border-strong); border-radius: 10px;
+    padding: 0; max-width: min(92vw, 640px); width: min(92vw, 640px);
+    /* Position toward the upper third — matches Slack/Linear/ChatGPT
+       palettes; centered vertically pushes the input under the user's
+       typing line in a way that feels off. */
+    position: fixed; top: 18%; left: 50%; transform: translateX(-50%);
+    margin: 0;
+    font: inherit;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+    overflow: hidden;
+  }
+  .cmdk-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+  .cmdk-input-row {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .cmdk-input {
+    width: 100%; box-sizing: border-box;
+    background: transparent; color: var(--fg);
+    border: none; outline: none;
+    font: inherit; font-size: 16px;
+    padding: 4px 0;
+  }
+  .cmdk-input::placeholder { color: var(--muted); }
+  .cmdk-results {
+    max-height: 60vh; overflow-y: auto;
+    padding: 4px 0 8px;
+  }
+  .cmdk-section-title {
+    padding: 8px 14px 4px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+  .cmdk-status { margin-left: 8px; opacity: 0.7; text-transform: none; letter-spacing: 0; font-style: italic; }
+  .cmdk-list { list-style: none; margin: 0; padding: 0; }
+  .cmdk-row {
+    padding: 8px 14px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .cmdk-row:hover, .cmdk-row.active {
+    background: var(--surface-2, var(--surface));
+    border-left-color: var(--primary);
+  }
+  .cmdk-row-title {
+    font-size: 14px;
+    color: var(--fg);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .cmdk-row-meta {
+    margin-top: 2px;
+    font-size: 11px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .cmdk-empty {
+    padding: 8px 14px; color: var(--muted); font-style: italic; font-size: 13px;
+  }
+  .cmdk-close-row { margin: 0; padding: 8px 14px; text-align: right; border-top: 1px solid var(--border); }
+  .cmdk-close-row button {
+    background: var(--surface-2); color: var(--fg);
+    border: 1px solid var(--border-strong); border-radius: 4px;
+    padding: 4px 12px; cursor: pointer; font: inherit; font-size: 12px;
+  }
+  .cmdk-close-row button:hover { background: var(--border-strong); }
+
   /* ── Fast tooltips (replace slow native HTML title=) ──
      Native browser tooltips fire after ~1.5-3s. We want Claude.ai-ish ~600ms.
      The JS in main.ts moves `title` → `data-tip` on hover (suppresses native)

@@ -13,6 +13,7 @@ import * as wakeLock from './wakeLock.ts';
 import * as chat from './chat.ts';
 import * as backend from './backend.ts';
 import * as sessionDrawer from './sessionDrawer.ts';
+import * as cmdkPalette from './cmdkPalette.ts';
 import * as gateway from './gateway.ts';
 import * as tts from './pipelines/classic/tts.ts';
 import { unlock, getAudioCtx, reset as resetAudio } from './audio/unlock.ts';
@@ -406,6 +407,10 @@ async function boot() {
 
   // Session list inside the sidebar — renders when backend supports browsing.
   sessionDrawer.init({ onResume: replaySessionMessages });
+  // Cmd+K palette — instant session filter + debounced messages_fts
+  // search. Resume hits funnel through replaySessionMessages so behavior
+  // matches a normal drawer tap.
+  cmdkPalette.init({ onResume: replaySessionMessages });
 
   // Info popup — triggered from the sidebar-bottom button.
   const btnInfo = document.getElementById('sb-info');
@@ -598,6 +603,21 @@ async function boot() {
         e.preventDefault();
         return;
       }
+    }
+
+    // `/`: focus the inline session filter. Skip when an input/textarea
+    // is already focused so it doesn't hijack a literal slash typed into
+    // the composer or the cmd+K palette. (cmdkPalette.init wires its
+    // own cmd+K handler at document level.)
+    if (e.key === '/' && !inText) {
+      const sidebar = document.getElementById('sidebar');
+      if (sidebar && !sidebar.classList.contains('expanded')) {
+        // Make sure the sidebar is open so the input is visible/clickable.
+        sidebar.classList.add('expanded');
+      }
+      sessionDrawer.focusFilter();
+      e.preventDefault();
+      return;
     }
 
     // Alt+M: toggle mic. `e.code` survives Mac's Alt+key → µ remapping.
