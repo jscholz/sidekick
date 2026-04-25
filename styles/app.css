@@ -373,6 +373,33 @@
   .sess-menu button.danger { color: #e66; }
   .sess-menu button.danger:hover { background: rgba(230, 102, 102, 0.12); }
 
+  /* ── Fast tooltips (replace slow native HTML title=) ──
+     Native browser tooltips fire after ~1.5-3s. We want Claude.ai-ish ~600ms.
+     The JS in main.ts moves `title` → `data-tip` on hover (suppresses native)
+     and restores on leave (preserves a11y when keyboard-focused, etc). */
+  [data-tip] { position: relative; }
+  [data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: 100%; left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 6px;
+    padding: 4px 8px;
+    background: var(--surface-2);
+    color: var(--fg);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    z-index: 9999;
+    pointer-events: none;
+    animation: tip-fadein 120ms ease-out 600ms both;
+  }
+  @keyframes tip-fadein {
+    from { opacity: 0; transform: translateX(-50%) translateY(2px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+
   /* ── Session info dialog (replaces alert() so text stays selectable) ── */
   .session-info-dialog {
     background: var(--surface); color: var(--fg);

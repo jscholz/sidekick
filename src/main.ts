@@ -675,6 +675,24 @@ async function boot() {
   // hidden via CSS on mobile (single media query).
   ambient.init();
 
+  // Fast tooltips: native HTML `title` triggers a slow ~1.5-3s browser
+  // tooltip. We swap `title` → `data-tip` on hover so the CSS-driven
+  // fade-in (600ms delay) shows first, and the native tooltip is
+  // suppressed because the title attribute is briefly absent. Restored
+  // on mouseleave so screen readers + keyboard focus still find it.
+  document.body.addEventListener('mouseover', (e) => {
+    const t = e.target as HTMLElement;
+    if (!t || !t.hasAttribute || !t.hasAttribute('title')) return;
+    const v = t.getAttribute('title');
+    if (v) { t.setAttribute('data-tip', v); t.removeAttribute('title'); }
+  }, true);
+  document.body.addEventListener('mouseout', (e) => {
+    const t = e.target as HTMLElement;
+    if (!t || !t.hasAttribute || !t.hasAttribute('data-tip')) return;
+    const v = t.getAttribute('data-tip');
+    if (v) { t.setAttribute('title', v); t.removeAttribute('data-tip'); }
+  }, true);
+
   // Drive the mic-button peak indicator. Smooth the raw worklet peaks
   // with a light exponential filter so the CSS var eases between frames.
   const btnMicForPulse = document.getElementById('btn-mic');
