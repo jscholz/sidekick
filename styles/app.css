@@ -136,7 +136,11 @@
       transition: transform 0.18s ease, width 0.18s ease;
     }
     #sidebar.expanded {
-      width: min(85vw, 300px);
+      /* Cap at 280px on mobile so the sidebar doesn't take 85% of a
+       * narrow phone viewport — 300px on iOS Safari was reported as
+       * uncomfortably wide. Desktop keeps the wider 300px (room for
+       * inline filter + 'Sessions' label without crowding). */
+      width: min(85vw, 280px);
       transform: translateX(0);
       /* Overlay-style shadow — only on mobile, where the panel sits on top
        * of content instead of pushing it. */
@@ -307,12 +311,21 @@
   .info-tagline { color: var(--muted); font-style: italic; }
   .info-caveat { font-size: 12px; color: var(--muted); }
   .info-close {
-    position: absolute; top: 10px; right: 12px;
-    width: 30px; height: 30px; border: none; border-radius: 50%;
-    background: transparent; color: var(--muted); font-size: 20px;
-    cursor: pointer;
+    position: absolute; top: 8px; right: 8px;
+    /* Apple HIG minimum touch target is 44x44; previous 30x30 was
+     * passing iOS's hit-testing fine on most pages but failing on the
+     * settings pane (reported on iPhone). Bump to 44x44 + add explicit
+     * z-index above sibling content so a sticky-positioned form row or
+     * select dropdown can't steal the touch. */
+    width: 44px; height: 44px; border: none; border-radius: 50%;
+    background: transparent; color: var(--muted); font-size: 22px;
+    cursor: pointer; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+    /* iOS Safari sometimes ignores click events on transparent buttons
+     * that overlap scrollable content unless touch-action is explicit. */
+    touch-action: manipulation;
   }
-  .info-close:hover { background: var(--bg); color: var(--fg); }
+  .info-close:hover, .info-close:active { background: var(--bg); color: var(--fg); }
   .info-icon-list { list-style: none; padding: 0; margin: 0 0 8px; }
   .info-icon-list li {
     display: flex; align-items: flex-start; gap: 10px;

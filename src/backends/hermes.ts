@@ -458,17 +458,16 @@ export const hermesAdapter = {
 
   async listSessions(limit = 50) {
     try {
-      // Read the user's session filter from settings (glob pattern like
-      // 'sidekick-*'). Server accepts `?prefix=` and converts '*' → SQL
-      // LIKE '%'. Imported lazily to avoid a circular init between
-      // settings ↔ backend.
-      let prefix = '';
-      try {
-        const settings = await import('../settings.ts');
-        prefix = settings.get?.().sessionsFilter || '';
-      } catch {}
+      // Always fetch the full list from the server; the inline drawer
+      // filter applies client-side over the cached list (single source
+      // of truth). Previously this also passed the settings.sessionsFilter
+      // glob as a `prefix=` param, but that produced two competing
+      // filters with confusing semantics — a stale "whatsapp*" in
+      // settings would silently hide all api_server (sidekick) sessions
+      // even when the inline filter was cleared, leaving the user with
+      // no obvious way to recover. The settings field is now decorative
+      // (kept to avoid breaking persisted state); use the drawer input.
       const q = new URLSearchParams({ limit: String(limit) });
-      if (prefix) q.set('prefix', prefix);
       const r = await fetch(`${location.origin}/api/hermes/sessions?${q}`);
       if (!r.ok) return [];
       const d = await r.json();
