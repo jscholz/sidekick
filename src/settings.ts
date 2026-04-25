@@ -29,6 +29,21 @@ export function getCurrentModelEntry() {
 /** Force a model-state refresh (e.g. after gateway reconnect). */
 export function refreshModels() { return refreshModelState(); }
 
+/** Stable fingerprint of a catalog so we can skip the full DOM rebuild
+ *  when polling returns the same data. The dropdown gets re-rendered
+ *  from scratch otherwise — `sel.innerHTML = ''` collapses the element
+ *  height, then the re-population grows it back. With the catalog
+ *  endpoint polling every 30s plus the post-set-model verify storm
+ *  during a gateway restart, the user sees a high-frequency vertical
+ *  jitter as the panel re-flows. Fingerprinting kills that. */
+function catalogFingerprint(entries: any[]): string {
+  // id list is enough — names, modalities, group tags don't drive the
+  // <option> set's STRUCTURE, only its content (and we re-set sel.value
+  // anyway). Sort to absorb backend ordering instability.
+  return entries.map(e => e.id).sort().join('|');
+}
+let lastRenderedFingerprint = '';
+
 async function refreshModelState() {
   const [catalog, current] = await Promise.all([
     backend.listModels(),
@@ -46,6 +61,19 @@ async function refreshModelState() {
 
   const sel = document.getElementById('set-model') as HTMLSelectElement | null;
   if (sel) {
+    // Catalog unchanged from the last render? Just update the selection
+    // and bail — avoids the wipe-and-rebuild flicker on rapid polls.
+    const fp = catalogFingerprint(catalog) + '|' + (current || '');
+    if (fp === lastRenderedFingerprint) {
+      sel.value = modelState.current || '';
+      // Still fire onModelChange below if `current` flipped (e.g. the
+      // post-set-model verify came back with a different model).
+      if (changed && modelHandlers.onModelChange) {
+        modelHandlers.onModelChange(modelState.current, catalog, { silent: wasInitial });
+      }
+      return;
+    }
+    lastRenderedFingerprint = fp;
     sel.innerHTML = '';
     // Placeholder for when the effective model can't be determined — better
     // to show blank than to lie. Kept at the top so the assignment below has
