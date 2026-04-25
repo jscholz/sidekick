@@ -1285,7 +1285,31 @@ async function boot() {
           throw e;  // re-throw so queue.flush keeps the item
         }
         const data = await res.json();
-        if (!data.ok) throw new Error(data.error || 'transcription failed');
+        if (!data.ok) {
+          // Distinguish PERMANENT failures (corrupt blob, unsupported
+          // format, Deepgram 400) from TRANSIENT (network, 5xx, timeout).
+          // Permanent: drop from queue so we don't retry forever.
+          // Transient: throw, queue.flush keeps the item for next round.
+          //
+          // Symptom 2026-04-25 PM: 9 audio memos queued, /transcribe
+          // returning "deepgram 400 corrupt or unsupported data" on
+          // each retry. Likely blobs recorded while the iOS mic-perm
+          // dialog was up (silent / partial). Without this fix the
+          // outbox just keeps growing.
+          const err = String(data.error || 'transcription failed');
+          const isPermanent = /\b4\d\d\b|corrupt|unsupported|empty body/i.test(err);
+          if (isPermanent) {
+            log('transcribe: permanent failure, dropping blob:', err);
+            const transcriptEl = document.getElementById('transcript');
+            const card = id && transcriptEl ? memoCard.find(transcriptEl, id) : null;
+            const note = '(audio unprocessable)';
+            if (card) memoCard.update(card, { transcript: note, status: 'failed' });
+            try { await voiceMemos.update(id, { transcript: note, status: 'failed' }); } catch {}
+            playFeedback('error');
+            return;  // don't throw — queue.flush will drop the item
+          }
+          throw new Error(err);  // transient → keep in queue
+        }
         const text = (data.transcript || '').trim();
         const transcriptEl = document.getElementById('transcript');
         const card = id && transcriptEl ? memoCard.find(transcriptEl, id) : null;
