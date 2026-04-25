@@ -1308,6 +1308,19 @@
     min-width: 0; overflow: hidden;
     animation: memo-fade-in 0.2s ease;
   }
+  /* Push-to-talk variant: subtle primary-coloured outline + the
+   * "release to send" hint visible, so the user knows lifting their
+   * finger will fire the send (no need to hit composerSend after). */
+  .memo-bar.memo-bar-ptt {
+    box-shadow: 0 0 0 2px var(--primary) inset;
+  }
+  .memo-bar.memo-bar-ptt::before {
+    content: 'release to send';
+    position: absolute; right: 56px; top: 50%; transform: translateY(-50%);
+    font-size: 11px; color: var(--primary); opacity: 0.85;
+    letter-spacing: 0.04em; text-transform: uppercase;
+    pointer-events: none;
+  }
   @keyframes memo-fade-in { from { opacity: 0; transform: scaleX(0.95); } to { opacity: 1; transform: scaleX(1); } }
   .memo-btn {
     background: none; border: none; color: var(--muted); cursor: pointer;

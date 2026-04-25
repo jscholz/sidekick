@@ -1426,6 +1426,68 @@ async function boot() {
         composerSend.click();
       }
     });
+
+    // Push-to-talk on the memo button. Press-and-hold past the threshold
+    // → enter memo mode (start recording). Release at any point after
+    // → auto-send (per the existing dictationAutoSend setting, which
+    // routes the transcript to composer or chat). Lets the user record
+    // a quick message without two distinct taps; lifting the finger is
+    // the send signal. A short tap (release before threshold) falls
+    // through to the existing click-to-toggle behavior.
+    const PTT_HOLD_MS = 250;
+    let pttHoldTimer: ReturnType<typeof setTimeout> | null = null;
+    let pttArmed = false;          // hold passed threshold → memo started by us
+    let pttSuppressClick = false;  // swallow the click that pointerup would synthesize
+    const pttRelease = (e: Event) => {
+      if (pttHoldTimer) { clearTimeout(pttHoldTimer); pttHoldTimer = null; }
+      if (!pttArmed) return;
+      pttArmed = false;
+      pttSuppressClick = true;
+      // Defer the send by one tick so any async memo.start() initialization
+      // queued from the threshold-fire has a chance to wire composerSend.onclick.
+      // composerSend.click() invokes whatever onclick btnMemo's async handler
+      // assigned (which awaits memo.stop() → handleMemoResult). If onclick
+      // isn't set yet (rare — memo.start barely begun), the click is a no-op
+      // and the user has to tap composerSend manually; not great but not lost.
+      e.preventDefault();
+      e.stopPropagation();
+      setTimeout(() => composerSend.click(), 0);
+    };
+    btnMemo.addEventListener('pointerdown', (e) => {
+      // Only arm PTT if memo isn't already active (avoids double-start
+      // if the user is mid tap-to-record session and presses again).
+      if (memoActive) return;
+      pttArmed = false;
+      pttSuppressClick = false;
+      pttHoldTimer = setTimeout(() => {
+        pttHoldTimer = null;
+        // Threshold passed and finger still down → start the memo by
+        // synthesizing a click. The existing onclick handler kicks off
+        // memo.start() and wires composerSend.onclick for the eventual
+        // stop-and-send. The flag tells pointerup to auto-send instead
+        // of treating the release as a tap.
+        pttArmed = true;
+        btnMemo.click();
+        // Add a class so we can style "PTT recording in progress"
+        // distinctly from a tap-started recording — useful so the
+        // user knows lifting the finger will send.
+        const bar = document.querySelector('.memo-bar');
+        if (bar) bar.classList.add('memo-bar-ptt');
+      }, PTT_HOLD_MS);
+    });
+    btnMemo.addEventListener('pointerup', pttRelease);
+    btnMemo.addEventListener('pointercancel', pttRelease);
+    btnMemo.addEventListener('pointerleave', pttRelease);
+    // The pointerup synthesizes a click. If we already triggered a click
+    // at threshold (PTT path), the second click would re-fire the memo
+    // toggle handler. Eat it once.
+    btnMemo.addEventListener('click', (e) => {
+      if (pttSuppressClick) {
+        pttSuppressClick = false;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    }, true);  // capture phase to beat the existing onclick
   }
 
   // ── Refresh/reconnect button (for standalone PWA — no browser refresh) ──
