@@ -17,7 +17,7 @@ function getCtx() {
 
 /**
  * Play a short click/pop sound.
- * @param {'send'|'receive'|'error'|'start'|'commit'} type
+ * @param {'send'|'receive'|'error'|'start'|'commit'|'connect'} type
  *   - send:    short rising click, confirms outbound
  *   - receive: soft descending pop, confirms inbound
  *   - error:   two low descending tones — distinct from send/receive so
@@ -36,6 +36,13 @@ function getCtx() {
  *              can distinguish "I heard the send-word" from "message
  *              shipped": a shorter commit-send gap is reassuring, a
  *              missing second chime means the send didn't land.
+ *   - connect: ascending two-tone chime (C5 → E5) over ~200ms — fires
+ *              when a WebRTC peer connection establishes. Distinct from
+ *              'commit' (single tick) and 'send' (rising click): the
+ *              two-note arc reads unmistakably as "circuit closed,
+ *              channel open". Played slightly louder than send/receive
+ *              because it's a once-per-call event — being noticed
+ *              matters more than fading into background.
  */
 export function playFeedback(type) {
   // Volume is 0..1; 0.25 now matches the legacy "subtle" level after
@@ -99,6 +106,30 @@ export function playFeedback(type) {
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
       osc.start(now);
       osc.stop(now + 0.05);
+    } else if (type === 'connect') {
+      // Ascending two-tone chime — C5 (~523 Hz) then E5 (~659 Hz),
+      // ~100ms each with a short gap. Reads as "channel established"
+      // — a major-third interval is universally heard as positive /
+      // resolved. Triangle wave for body over wind.
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(523, now);
+      gain.gain.setValueAtTime(0.09 * scale, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+      osc.start(now);
+      osc.stop(now + 0.1);
+      // Second tone — E5, starts at +110ms so the gap reads as a
+      // deliberate two-step rather than a slur.
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+      osc2.type = 'triangle';
+      const t2 = now + 0.11;
+      osc2.frequency.setValueAtTime(659, t2);
+      gain2.gain.setValueAtTime(0.09 * scale, t2);
+      gain2.gain.exponentialRampToValueAtTime(0.001, t2 + 0.12);
+      osc2.start(t2);
+      osc2.stop(t2 + 0.12);
     } else if (type === 'error') {
       // Two short low-pitched descending tones — alert, not alarming.
       // Uses triangle wave for a fuller sound that carries over wind
