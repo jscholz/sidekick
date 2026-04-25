@@ -385,6 +385,17 @@ export function flush() {
   const text = textEl.textContent.trim();
   if (!text) { dismiss(); return; }
 
+  // Tear down any orphaned interim span BEFORE we drop our textEl ref
+  // — without this, a stale `interimEl` pointing at a node still inside
+  // the about-to-fade blockEl could be reused by the next setInterim()
+  // (which checks `if (!interimEl)`), wedging the new draft because
+  // its writes go to a soon-to-be-removed DOM subtree. BUG 2 from
+  // 2026-04-25 run: app went inert after auto-send mid-sentence.
+  if (interimEl) {
+    try { interimEl.remove(); } catch {}
+  }
+  interimEl = null;
+
   if (blockEl) {
     blockEl.classList.add('flushing');
     const el = blockEl;
@@ -395,7 +406,6 @@ export function flush() {
   hasText = false;
   editing = false;
   lastSpeaker = null;
-  interimEl = null;
   segments = [];
 
   onFlush(text);

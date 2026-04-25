@@ -234,6 +234,17 @@ export function handleResult(data) {
       diag(`voice: interim="${interimText.slice(0,80)}"`);
       lastInterim = { text: interimText, label };
       draft.setInterim(interimText, label);
+      // CANCEL any pending silence-timer flush while interim is arriving
+      // — DG is actively recognizing speech, so the user is mid-sentence
+      // even if the prior pause exceeded silenceSec. Without this guard,
+      // a >silenceSec breath between words ("interaction" → "video" was
+      // a hard repro on Jonathan's run) would send the partial draft
+      // even though DG can clearly hear the next word coming. The next
+      // final or UtteranceEnd will reschedule normally.
+      if (silenceTimer) {
+        cancelPendingFlush();
+        diag('voice: interim cancelled pending silence-flush');
+      }
     }
   }
 
