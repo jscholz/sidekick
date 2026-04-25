@@ -24,6 +24,20 @@ import { getFilter as getStoredFilter, putFilter as putStoredFilter, clearFilter
 
 let onResumeCb: ((id: string, messages: any[], pagination?: { firstId: number | null; hasMore: boolean }) => void) | null = null;
 
+/** Fired when the foregrounded session disappears from the server list
+ *  (deleted by menu, by a bulk wipe, or by a concurrent process). main.ts
+ *  uses it to clear the chat pane and start a fresh conversation so the
+ *  user isn't left staring at soft-deleted bubbles. */
+let onSessionGoneCb: (() => void) | null = null;
+
+/** Set of session ids ever observed in a server response during this
+ *  page's lifetime. Used to distinguish a JUST-CREATED session (never
+ *  in the list yet) from a DELETED session (was here, gone now) — only
+ *  the latter triggers the stale-foreground clear. Survives across
+ *  refresh() calls, reset on full reload (which is fine: the boot
+ *  refresh repopulates from the server before any delete can race). */
+const lastSeenIds = new Set<string>();
+
 /** Last-known full session list from the server (or cache fallback). The
  *  inline filter operates on THIS — re-rendering re-applies the current
  *  filter without re-fetching from the server. Updated whenever refresh()
@@ -101,6 +115,27 @@ export async function refresh() {
     await sessionCache.putListCache(sessions);
     cachedSessions = sessions;
     renderListFiltered(listEl, active);
+
+    // Stale-foreground guard: if the chat pane is showing a session
+    // that the server no longer knows about (it was deleted by the
+    // menu, by a bulk wipe, or by a concurrent process), the chat
+    // pane is rendering a ghost. Clear it via onSessionGone so the
+    // user lands on a fresh-chat surface instead of staring at
+    // soft-deleted bubbles. Skip when the viewed session is just
+    // newly-created and not-yet-persisted (covered by isFresh in
+    // renderList — if the active id never appears in the cached list
+    // either, it's a transient new chat, not a deleted one). The
+    // distinguishing signal: was it EVER in cachedSessions during
+    // this session of the app? Tracked below via lastSeenIds.
+    if (viewedSessionId && !sessions.some(s => s.id === viewedSessionId)) {
+      if (lastSeenIds.has(viewedSessionId)) {
+        // Was here, isn't here anymore → genuinely deleted.
+        diag(`sessionDrawer: viewed session ${viewedSessionId} no longer on server, clearing chat`);
+        viewedSessionId = null;
+        onSessionGoneCb?.();
+      }
+    }
+    for (const s of sessions) lastSeenIds.add(s.id);
   } catch (e: any) {
     diag(`sessionDrawer: list failed: ${e.message}`);
     if (!cached?.sessions?.length) {
@@ -504,8 +539,12 @@ export function focusFilter() {
   }
 }
 
-export function init(opts: { onResume: (id: string, messages: any[]) => void }) {
+export function init(opts: {
+  onResume: (id: string, messages: any[]) => void;
+  onSessionGone?: () => void;
+}) {
   onResumeCb = opts.onResume;
+  onSessionGoneCb = opts.onSessionGone || null;
   // Restore persisted filter (don't await — boot order shouldn't block
   // on IDB; refresh() will pick it up on the next render once resolved).
   getStoredFilter().then((saved) => {

@@ -406,7 +406,24 @@ async function boot() {
   }
 
   // Session list inside the sidebar — renders when backend supports browsing.
-  sessionDrawer.init({ onResume: replaySessionMessages });
+  sessionDrawer.init({
+    onResume: replaySessionMessages,
+    // Stale-foreground recovery: if the session the user is currently
+    // viewing gets deleted out from under them (menu delete, bulk wipe,
+    // backend nuke), drop the ghost transcript and rotate to a fresh
+    // chat surface so they can keep going.
+    onSessionGone: () => {
+      diag('reset history: viewed session disappeared from server');
+      chat.clear();
+      draft.dismiss();
+      voice.cancelPendingFlush();
+      replyCache.clear();
+      voiceMemos.clearAll().catch(() => {});
+      historyLoaded = false;
+      backend.newSession?.();
+      chat.addSystemLine('The session you were viewing was deleted. Started a fresh chat.');
+    },
+  });
   // Cmd+K palette — instant session filter + debounced messages_fts
   // search. Resume hits funnel through replaySessionMessages so behavior
   // matches a normal drawer tap.
