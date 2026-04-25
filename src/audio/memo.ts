@@ -194,6 +194,12 @@ function renderBar(container, onCancel, insertBefore) {
   canvasEl = document.createElement('canvas');
   canvasEl.className = 'memo-wave';
   canvasEl.height = 32;
+  // Prevent the HTML default width=300 from being the initial drawing
+  // surface — on iOS Safari, that 300px was leaking through flex-shrink
+  // and overflowing the bar past the composer's right edge. Start tiny;
+  // drawWaveform's resize-on-frame loop expands it to the real CSS
+  // width once layout settles.
+  canvasEl.width = 1;
 
   barEl.appendChild(btnTrash);
   barEl.appendChild(dot);
