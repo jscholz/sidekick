@@ -16,6 +16,7 @@
 import * as backend from './backend.ts';
 import * as sessionDrawer from './sessionDrawer.ts';
 import { parseQuery, applyFilter } from './sessionFilter.ts';
+import { searchBoth, type MessageHit as ServerMessageHit } from './sessionSearch.ts';
 import { diag } from './util/log.ts';
 
 type SessionHit = {
@@ -148,12 +149,14 @@ function ensureDialog() {
 
   inputEl.addEventListener('input', () => {
     const q = inputEl!.value;
+    // Instant client-side paint of the sessions section over the
+    // cached list — keeps the modal feeling immediate while the
+    // server round-trip is in flight.
     rerenderSessions(q);
-    // Debounce backend search — don't pummel server with one query per
-    // keystroke. 300ms hits the sweet spot for a chunky type-and-pause.
     if (messagesDebounceTimer != null) clearTimeout(messagesDebounceTimer);
     if (!q.trim()) {
-      // Clear messages section + cancel anything in flight.
+      // Clear messages section + cancel anything in flight. Sessions
+      // already rerendered above (full cached list, top 10).
       if (messagesAbortCtl) { messagesAbortCtl.abort(); messagesAbortCtl = null; }
       if (messagesListEl) messagesListEl.innerHTML = '';
       if (messagesStatusEl) messagesStatusEl.textContent = '';
@@ -161,9 +164,14 @@ function ensureDialog() {
       return;
     }
     if (messagesStatusEl) messagesStatusEl.textContent = '…';
+    // Debounce backend search — don't pummel server with one query per
+    // keystroke. 300ms hits the sweet spot for a chunky type-and-pause.
+    // searchBoth returns sessions + messages in one round trip, so the
+    // server-authoritative sessions list reconciles into the panel as
+    // well (covers matches outside the cached top-50).
     messagesDebounceTimer = setTimeout(() => {
       messagesDebounceTimer = null;
-      runMessageSearch(q);
+      runUnifiedSearch(q);
     }, 300) as unknown as number;
   });
 
@@ -234,38 +242,49 @@ function renderSessionRow(s: any): HTMLLIElement {
   return li;
 }
 
-async function runMessageSearch(q: string) {
+/** Run a single round-trip via searchBoth — pulls sessions (server-
+ *  authoritative, may include rows outside the cached top-50) and
+ *  message FTS hits in one request. The sessions section is repainted
+ *  with the server-truth result so deep-history matches surface.
+ *  AbortController is shared with the legacy `messagesAbortCtl` slot
+ *  so an in-flight earlier query gets cancelled correctly. */
+async function runUnifiedSearch(q: string) {
   if (messagesAbortCtl) messagesAbortCtl.abort();
   messagesAbortCtl = new AbortController();
   try {
-    const url = `/api/hermes/search?q=${encodeURIComponent(q)}&limit=20`;
-    const res = await fetch(url, { signal: messagesAbortCtl.signal });
-    if (!res.ok) {
-      if (messagesStatusEl) messagesStatusEl.textContent = 'error';
-      return;
+    const result = await searchBoth(q, 20, messagesAbortCtl.signal);
+    if (!messagesListEl || !messagesStatusEl || !sessionsListEl) return;
+    // Repaint sessions section from the server result (top 10).
+    const topSessions = result.sessions.slice(0, 10);
+    sessionsListEl.innerHTML = '';
+    if (topSessions.length === 0 && q.trim()) {
+      const empty = document.createElement('li');
+      empty.className = 'cmdk-empty';
+      empty.textContent = 'No matching sessions.';
+      sessionsListEl.appendChild(empty);
+    } else {
+      for (const s of topSessions) sessionsListEl.appendChild(renderSessionRow(s));
     }
-    const body = await res.json();
-    const hits = (body.hits || []) as MessageHit[];
-    if (!messagesListEl || !messagesStatusEl) return;
+    // Repaint messages section.
     messagesListEl.innerHTML = '';
-    if (body.error) {
-      messagesStatusEl.textContent = body.error;
+    if (result.error) {
+      messagesStatusEl.textContent = result.error;
       rebuildVisibleHits();
       return;
     }
-    messagesStatusEl.textContent = hits.length ? '' : 'no matches';
-    for (const h of hits) {
+    messagesStatusEl.textContent = result.hits.length ? '' : 'no matches';
+    for (const h of result.hits) {
       messagesListEl.appendChild(renderMessageRow(h));
     }
     rebuildVisibleHits();
   } catch (e: any) {
     if (e?.name === 'AbortError') return;
-    diag(`cmdk: messages search failed: ${e?.message || e}`);
+    diag(`cmdk: unified search failed: ${e?.message || e}`);
     if (messagesStatusEl) messagesStatusEl.textContent = 'error';
   }
 }
 
-function renderMessageRow(h: MessageHit): HTMLLIElement {
+function renderMessageRow(h: ServerMessageHit): HTMLLIElement {
   const li = document.createElement('li');
   li.className = 'cmdk-row';
   li.dataset.kind = 'message';
