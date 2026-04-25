@@ -67,7 +67,7 @@
     transition: padding-left 0.18s ease;
     /* --content-size: 15px; comes from :root, controlled by settings slider */
   }
-  body.sidebar-expanded { padding-left: 260px; }
+  body.sidebar-expanded { padding-left: 300px; }
 
   /* ── Sidebar (Gemini-style): persistent collapsed rail, expands on hamburger ── */
   #sidebar {
@@ -81,7 +81,7 @@
   }
   /* Desktop expand: no shadow — content shifts right so the panel isn't
    * overlaying anything. Mobile re-adds the shadow below since it overlays. */
-  #sidebar.expanded { width: 260px; }
+  #sidebar.expanded { width: 300px; }
   .sidebar-top { display: flex; flex-direction: column; padding: 10px 8px 6px; gap: 4px; }
   .sidebar-content {
     flex: 1; overflow-y: auto; padding: 8px;
@@ -373,17 +373,23 @@
   .sess-menu button.danger { color: #e66; }
   .sess-menu button.danger:hover { background: rgba(230, 102, 102, 0.12); }
 
-  /* ── Inline session filter (above #sessions-list) ── */
+  /* ── Sessions section header (title + inline filter input on the right) ── */
+  .sb-sessions-header {
+    display: flex; align-items: center; gap: 8px;
+    margin: 6px 0 2px;
+  }
+  .sb-sessions-header .sb-section-title { flex-shrink: 0; margin: 0; }
+
+  /* ── Inline session filter (lives inside .sb-sessions-header) ── */
   .sess-filter {
-    width: 100%;
+    flex: 1; min-width: 0;
     box-sizing: border-box;
-    margin: 6px 0 4px;
-    padding: 7px 10px;
+    padding: 4px 8px;
     background: var(--bg);
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: 6px;
-    font: inherit; font-size: 13px;
+    font: inherit; font-size: 12px;
     line-height: 1.3;
     outline: none;
   }

@@ -431,24 +431,27 @@ async function resume(id: string) {
 function ensureFilterInput(): HTMLInputElement | null {
   let input = document.getElementById('sess-filter-input') as HTMLInputElement | null;
   if (input) return input;
-  const section = document.getElementById('sb-sessions-section');
-  const list = document.getElementById('sessions-list');
-  if (!section || !list) return null;
+  const header = document.querySelector('.sb-sessions-header');
+  if (!header) return null;
   input = document.createElement('input');
   input.id = 'sess-filter-input';
   input.type = 'text';
   input.className = 'sess-filter';
-  input.placeholder = 'Filter sessions… (use * for wildcards)';
+  input.placeholder = 'Filter (* wildcard)';
   input.spellcheck = false;
   input.autocomplete = 'off';
   input.setAttribute('aria-label', 'Filter sessions');
   input.value = currentFilter;
-  // Insert just above the <ul>. Section markup is:
+  // Insert inline alongside the "Sessions" label in the header. Section
+  // markup is:
   //   <div id="sb-sessions-section">
-  //     <div class="sb-section-title">Sessions</div>
+  //     <div class="sb-sessions-header">
+  //       <span class="sb-section-title">Sessions</span>
+  //       <input class="sess-filter">  ← injected here
+  //     </div>
   //     <ul id="sessions-list">…</ul>
   //   </div>
-  section.insertBefore(input, list);
+  header.appendChild(input);
 
   input.addEventListener('input', () => {
     currentFilter = input!.value;
