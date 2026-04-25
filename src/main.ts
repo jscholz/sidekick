@@ -55,6 +55,57 @@ import loadingCard from './canvas/cards/loading.ts';
 /** Matches NO_REPLY and variants the agent sometimes emits when deciding not to reply. */
 const NO_REPLY_RE = /^\s*NO[-_]?(?:REPL(?:Y)?)?\.?\s*$/i;
 
+/** Track pointer — which agent reply BT next/prev navigates relative to.
+ *  Distinct from `tts.getReplyId()` which is "what's currently playing":
+ *  the pointer persists when nothing is playing (e.g., user tapped pause
+ *  or hasn't started yet), so BT prev/next has a deterministic anchor.
+ *  Defaults to the latest agent reply on session load + advances every
+ *  time a new agent reply lands. setTrackPointer() also updates the DOM
+ *  class so the bubble-edge indicator follows. */
+let trackPointerId: string | null = null;
+function setTrackPointer(id: string | null) {
+  trackPointerId = id;
+  const el = document.getElementById('transcript');
+  if (!el) return;
+  el.querySelectorAll('.line.agent.track-pointer').forEach(b => b.classList.remove('track-pointer'));
+  if (!id) return;
+  const target = el.querySelector(`.line.agent[data-reply-id="${CSS.escape(id)}"]`);
+  if (target) {
+    target.classList.add('track-pointer');
+    // Cached / not-cached → primary vs muted edge color.
+    if (replyCache.has(id)) target.classList.add('track-cached');
+    else target.classList.remove('track-cached');
+  }
+}
+function getTrackPointer(): string | null {
+  // Lazy default: if no explicit pointer, fall back to whatever's playing,
+  // else to the latest agent reply in DOM order. Lets a fresh session
+  // have a sane "current track" without an explicit init step.
+  if (trackPointerId) return trackPointerId;
+  const playing = tts.getReplyId();
+  if (playing) return playing;
+  const el = document.getElementById('transcript');
+  if (!el) return null;
+  const bubbles = el.querySelectorAll('.line.agent[data-reply-id]:not(.streaming)');
+  if (!bubbles.length) return null;
+  return (bubbles[bubbles.length - 1] as HTMLElement).dataset.replyId || null;
+}
+
+// When TTS chunks land in replyCache, flip the pointer's edge color from
+// gray (uncached) → primary (cached). Subscribe once at module load.
+replyCache.on('cached', ({ replyId }: { replyId: string }) => {
+  if (trackPointerId === replyId) {
+    const el = document.querySelector(`.line.agent[data-reply-id="${CSS.escape(replyId)}"]`);
+    if (el) el.classList.add('track-cached');
+  }
+});
+replyCache.on('evicted', ({ replyId }: { replyId: string }) => {
+  if (trackPointerId === replyId) {
+    const el = document.querySelector(`.line.agent[data-reply-id="${CSS.escape(replyId)}"]`);
+    if (el) el.classList.remove('track-cached');
+  }
+});
+
 /** Find the agent reply bubble AFTER the one identified by `currentReplyId`
  *  in DOM order. Skips the .streaming bubble (mid-flight, not a "track").
  *  Returns { replyId, text } or null. */
@@ -105,19 +156,34 @@ function findAgentReplyBefore(currentReplyId) {
  *  @param {'prev' | 'next'} direction
  */
 function skipTo(direction) {
-  const active = tts.getReplyId();
+  // Pointer drives BT prev/next, NOT the currently-playing reply id.
+  // Persistent across pause/idle so the user has a deterministic anchor
+  // for "skip from here" even when nothing is playing right now.
+  const anchor = getTrackPointer();
   const target = direction === 'prev'
-    ? findAgentReplyBefore(active)
-    : findAgentReplyAfter(active);
+    ? findAgentReplyBefore(anchor)
+    : findAgentReplyAfter(anchor);
   if (!target) {
-    if (direction === 'next' && tts.isSpeaking()) tts.stop('barge-in');
+    // Past-latest "next": pointer stays put, seek the current TTS to its
+    // end so playback finishes naturally rather than barging in. (Pause
+    // / barge-in is the single-tap behavior; skip-next-past-end is "let
+    // this finish, I'm done"). If nothing is playing at all, no-op.
+    if (direction === 'next') {
+      if (tts.isSpeaking()) {
+        try { tts.seekTo(1.0); } catch {}
+      }
+    }
     return;
   }
   const reason = direction === 'prev' ? 'previous-track' : 'next-track';
   tts.stop(reason);  // saves position of outgoing reply into replyCache
+  setTrackPointer(target.replyId);
   if (replyCache.has(target.replyId)) {
     if (tts.playCached(target.replyId, { resume: true })) return;
   }
+  // Uncached: re-synthesize. tts.speak takes care of marking the cache
+  // entry once chunks arrive; a separate hook below toggles .track-cached
+  // when replyCache fills so the edge color flips from gray to primary.
   tts.speak(target.text, { replyId: target.replyId });
 }
 
@@ -261,11 +327,29 @@ async function boot() {
   // tap stops TTS or toggles listening without needing to touch the phone.
   audioSession.init({
     onPlay: () => {
-      // If TTS is paused, resume playback. Otherwise, toggle listening
-      // (mic start). This lets BT play mean "continue what I was doing"
-      // in both directions: if audio is paused → resume audio; if
-      // neither audio nor listening → start listening.
+      // BT play priority:
+      // 1. If TTS paused → resume from where we paused.
+      // 2. Else if TTS already speaking → no-op (don't restart).
+      // 3. Else play whatever the track pointer is on (generate audio
+      //    on demand if the bubble isn't cached). User-confirmed
+      //    behavior: "start talking now, wherever the pointer is" —
+      //    even if nothing was playing before.
+      // 4. Else (no reply to play, no pointer) → fall through to mic
+      //    listening (existing keep-doing-what-you-were-doing default).
       if (tts.getState() === 'paused') { tts.resume(); return; }
+      if (tts.isSpeaking()) return;
+      const ptr = getTrackPointer();
+      if (ptr) {
+        const bubble = document.querySelector(`.line.agent[data-reply-id="${CSS.escape(ptr)}"]`) as HTMLElement | null;
+        const text = bubble?.dataset.text || '';
+        if (text) {
+          if (replyCache.has(ptr)) {
+            if (tts.playCached(ptr, { resume: true })) return;
+          }
+          tts.speak(text, { replyId: ptr });
+          return;
+        }
+      }
       if (listening) return;
       const btnMicEl = document.getElementById('btn-mic');
       if (btnMicEl) btnMicEl.click();
@@ -2040,6 +2124,11 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
       pendingReply.text = text;
       pendingReply.done = true;
       drainPendingReply();
+      // New reply landed → advance the BT track pointer to it. Mirrors
+      // "default to latest" UX: a fresh user interaction puts BT next/prev
+      // in the most-recent context. User-driven prev navigation later
+      // explicitly setTrackPointer to where they want it.
+      setTrackPointer(replyId);
     } else {
       pendingReply = null;
     }
@@ -2052,6 +2141,10 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
       const fallbackId = streamingTtsReplyId || replyId;
       bubble = chat.addLine(getAgentLabel(), text, 'agent', { markdown: true, replyId: fallbackId });
     }
+    // Advance BT track pointer to the new reply (this is the non-pending
+    // path — matches the same behavior as the pending-drain block above).
+    const finalizedId = bubble?.dataset.replyId || streamingTtsReplyId || replyId;
+    if (finalizedId) setTrackPointer(finalizedId);
     playFeedback('receive');
 
     try {

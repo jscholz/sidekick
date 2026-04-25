@@ -164,6 +164,10 @@ export function show() {
   overlayEl.classList.remove('hidden');
   overlayEl.classList.remove('dim');
   overlayEl.setAttribute('aria-hidden', 'false');
+  // Body class lets CSS disable text-selection app-wide while locked
+  // (the loupe + "Undo Typing" alerts that fire from accidental
+  // long-presses through pocket / on-bike). Behavior cleared in hide().
+  document.body.classList.add('fake-lock-engaged');
   updateTime();
   tickStatus();
   statusTimer = setInterval(() => { updateTime(); tickStatus(); }, 1000);
@@ -178,6 +182,7 @@ export function hide() {
   overlayEl.classList.add('hidden');
   overlayEl.classList.remove('dim');
   overlayEl.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('fake-lock-engaged');
   if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
   if (dimTimer) { clearTimeout(dimTimer); dimTimer = null; }
   stopMeter();

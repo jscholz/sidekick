@@ -863,8 +863,18 @@
      (play + copy + timestamp) so text doesn't wrap against them. */
   .line.agent {
     padding: 12px 56px 10px 14px;
+    /* Reserve the leftmost 2px column so the track-pointer indicator
+     * doesn't shift text when it appears/disappears. Transparent border
+     * by default; .track-pointer + .track-cached fill it in. */
+    border-left: 2px solid transparent;
   }
   .line.agent .speaker { color: var(--primary); }
+  /* Track pointer — which reply BT prev/next operate relative to.
+   * Two states: 'pointer-without-audio' (gray edge) and 'pointer-with-
+   * cached-audio' (primary-coloured edge). Subtle by design — a vertical
+   * bar that doesn't compete with the bubble's own play button. */
+  .line.agent.track-pointer { border-left-color: var(--muted); }
+  .line.agent.track-pointer.track-cached { border-left-color: var(--primary); }
 
   /* Per-reply playback bar — 24px-tall hit target with a 2px visible
      bar painted inside via the child layers. Background is a nearly-
@@ -1315,8 +1325,21 @@
     flex: 1; display: flex; align-items: center; gap: 8px;
     background: var(--bg); border: none;
     border-radius: var(--radius); padding: 6px 10px; min-height: 48px;
-    min-width: 0; overflow: hidden;
+    /* min-width:0 + max-width:100% so the row never overflows the
+     * composer container on narrow viewports — iOS Safari was letting
+     * the flex:1 canvas take its intrinsic 300px and overflow on the
+     * regression. box-sizing belt-and-braces against the padding
+     * adding to the implicit auto width. */
+    min-width: 0; max-width: 100%;
+    box-sizing: border-box; overflow: hidden;
     animation: memo-fade-in 0.2s ease;
+    /* Long-press on the recording bar (especially the canvas) was
+     * triggering iOS text-selection/loupe — visible blue highlight
+     * extending into the chat. Disable selection + the long-press
+     * callout menu so the press-and-hold gesture is consumed by our
+     * PTT pointer handlers, not the OS. */
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
   }
   /* Push-to-talk variant: subtle primary-coloured outline + the
    * "release to send" hint visible, so the user knows lifting their
@@ -1336,6 +1359,29 @@
     background: none; border: none; color: var(--muted); cursor: pointer;
     padding: 4px; border-radius: 6px; display: flex; align-items: center;
     transition: color 0.15s;
+    /* PTT-relevant: same disables as .memo-bar so the press-and-hold
+     * doesn't get hijacked by iOS text-selection. touch-action:manipulation
+     * also kills the 300ms tap-delay on iOS PWA. */
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; touch-action: manipulation;
+  }
+  /* Same disables on the toolbar mic button (btn-memo lives there too —
+   * the PTT entry-point). Without this, holding the mic to PTT can
+   * select text from the chat above, exactly the symptom Jonathan
+   * reported in the screenshot. */
+  #btn-memo, .toolbar-btn {
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; touch-action: manipulation;
+  }
+  /* Pocket-lock mode: disable text selection across the whole document
+   * while the lock overlay is up, so finger-on-glass during a bike ride
+   * can't accidentally select transcript text and trigger iOS's
+   * "Undo Typing" / loupe affordances. The overlay itself already had
+   * user-select:none — this extends to anything visible behind it. */
+  body.fake-lock-engaged,
+  body.fake-lock-engaged * {
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
   }
   .memo-btn:hover { color: var(--fg); }
   .memo-btn svg { width: 18px; height: 18px; }
