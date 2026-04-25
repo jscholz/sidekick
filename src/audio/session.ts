@@ -19,7 +19,7 @@
  */
 
 import { log, diag } from '../util/log.ts';
-import { getAudioCtx } from './unlock.ts';
+import { getAudioCtx, onRouteChange } from './unlock.ts';
 
 /** <audio> element playing a silent loop — iOS Safari's lockscreen /
  *  Apple Watch / background-audio heuristics look for `<audio>` playback,
@@ -28,6 +28,25 @@ import { getAudioCtx } from './unlock.ts';
 let keepaliveEl = null;
 let keepaliveUrl = null;
 let mediaSessionInit = false;
+
+/** Hidden <audio> element fed by a MediaStreamAudioDestinationNode. iOS
+ *  registers the page as a "media source" only when there's a playing
+ *  HTMLAudioElement — Web Audio (AudioBufferSourceNode → ctx.destination)
+ *  alone is invisible to AVFoundation, so BT play/pause/skip buttons never
+ *  reach our mediaSession.setActionHandler callbacks. Routing TTS through a
+ *  MediaStream → <audio> in parallel with ctx.destination opts the page in
+ *  to BT media-control routing without disturbing A2DP audio output (which
+ *  still flows through ctx.destination unchanged).
+ *
+ *  Element is muted: actual user-audible playback stays on ctx.destination,
+ *  the element just exists to satisfy iOS's media-source heuristic. */
+let mediaSinkEl: HTMLAudioElement | null = null;
+let mediaSinkNode: MediaStreamAudioDestinationNode | null = null;
+/** Tracks which AudioContext the current sink node belongs to. When unlock()
+ *  rebuilds the context (route change), this reference goes stale and the
+ *  next getMediaSink() call must recreate the node from the new context. */
+let mediaSinkCtx: AudioContext | null = null;
+let mediaSinkPrimed = false;
 
 // State tracked so the visibilitychange handler knows when to engage the
 // silent-audio keepalive. Foreground listening runs without keepalive so
@@ -147,6 +166,97 @@ export function setPositionState(duration, position, rate = 1.0) {
 export function getKeepaliveEl(): HTMLMediaElement | null {
   return keepaliveEl;
 }
+
+/** Lazy-create the hidden <audio> element used as iOS's media-source anchor.
+ *  Muted, autoplay, playsinline. Doesn't get a src yet — getMediaSink()
+ *  binds a MediaStream once the AudioContext is available. */
+function ensureMediaSinkEl(): HTMLAudioElement {
+  if (mediaSinkEl) return mediaSinkEl;
+  const el = document.createElement('audio');
+  el.id = 'audio-mediasink';
+  el.setAttribute('playsinline', '');
+  el.muted = true;
+  el.autoplay = true;
+  // Volume stays 1.0 even though .muted is true — mirrors the keepalive's
+  // "iOS silences suspiciously quiet elements" heuristic. .muted is the
+  // safer signal that the user hears nothing from this element.
+  el.volume = 1.0;
+  document.body.appendChild(el);
+  mediaSinkEl = el;
+  return el;
+}
+
+/** Return a MediaStreamAudioDestinationNode bound to the current AudioContext,
+ *  with its stream wired into the hidden <audio> element. TTS playback
+ *  connects its output gain to BOTH ctx.destination (audible path, A2DP
+ *  routing) AND this node (media-source registration for iOS BT controls).
+ *
+ *  Returns null only if the AudioContext doesn't exist yet — caller falls
+ *  through to the audible-only path, no harm done.
+ *
+ *  Rebuild semantics: when unlock() recycles the AudioContext after a route
+ *  change, the cached destination node belongs to the old context. The
+ *  onRouteChange listener below clears the cache eagerly so the next call
+ *  builds a fresh node + rebinds srcObject on the surviving <audio> element. */
+export function getMediaSink(): MediaStreamAudioDestinationNode | null {
+  const ctx = getAudioCtx();
+  if (!ctx) return null;
+  if (mediaSinkNode && mediaSinkCtx === ctx) return mediaSinkNode;
+  try {
+    const dest = ctx.createMediaStreamDestination();
+    const el = ensureMediaSinkEl();
+    el.srcObject = dest.stream;
+    mediaSinkNode = dest;
+    mediaSinkCtx = ctx;
+    diag('audio: media-sink node created (ctx.rate=', ctx.sampleRate, ')');
+    // Try to play — if not yet inside a user gesture, this rejects on iOS
+    // but the bound stream stays valid; primeMediaSink() will retry under
+    // the next gesture.
+    const p = el.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch((e) => diag('media-sink play deferred:', e?.message || 'gesture-required'));
+    }
+    return dest;
+  } catch (e) {
+    log('media-sink create failed:', (e as Error)?.message);
+    return null;
+  }
+}
+
+/** Inside a user gesture, force the media-sink <audio> element to start
+ *  playing. iOS only registers the page as a media source after a gesture-
+ *  initiated play() succeeds; once registered, BT play/pause/skip events
+ *  route to navigator.mediaSession handlers. Idempotent — safe to call
+ *  from every gesture entry point (mic press, speak toggle, replay click). */
+export function primeMediaSink() {
+  // Make sure both the element and the destination node exist. getMediaSink
+  // is a no-op if AudioContext isn't available yet (caller hasn't unlocked).
+  ensureMediaSinkEl();
+  getMediaSink();
+  if (!mediaSinkEl) return;
+  const p = mediaSinkEl.play();
+  if (p && typeof p.then === 'function') {
+    p.then(() => {
+      if (!mediaSinkPrimed) {
+        mediaSinkPrimed = true;
+        log('audio: media-sink primed (iOS BT media-source registered)');
+      }
+    }).catch((e) => diag('media-sink prime failed:', e?.message));
+  }
+}
+
+/** When unlock() rebuilds the AudioContext after a BT route change, the old
+ *  MediaStreamAudioDestinationNode is about to dangle on a closed context.
+ *  Drop the cache eagerly so the next getMediaSink() rebuilds from the
+ *  fresh context and rebinds srcObject. The <audio> element survives the
+ *  rebuild — its "previously played by gesture" status is preserved by iOS. */
+onRouteChange(() => {
+  if (mediaSinkNode) {
+    try { mediaSinkNode.disconnect(); } catch {}
+  }
+  mediaSinkNode = null;
+  mediaSinkCtx = null;
+});
 
 /** Set Media Session playback state — drives lock-screen UI + suspension
  *  heuristics. 'playing' while streaming or TTS is active; 'paused' when

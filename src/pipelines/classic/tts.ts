@@ -115,10 +115,16 @@ export function getReplyId() { return activeReply?.id ?? null; }
 /** Ensure the AudioContext exists + is unlocked. Call from any user-gesture
  *  handler that might trigger TTS on iOS — the play button especially.
  *  Safe to call multiple times; no-op once unlocked unless the route has
- *  been flagged stale by a BT connect/disconnect. */
+ *  been flagged stale by a BT connect/disconnect.
+ *
+ *  Also primes the media-sink <audio> element while we're inside a user
+ *  gesture — iOS only registers the page as a BT media source after a
+ *  gesture-initiated play(). Without this prime, BT play/pause taps reach
+ *  iOS but never get routed into navigator.mediaSession.setActionHandler. */
 export function ensureAudioCtx() {
   if (!player) return;
   unlock(player);
+  session.primeMediaSink();
 }
 
 /** More precise than isSpeaking: returns the exact state of the active reply,
@@ -376,6 +382,17 @@ function playChunkSegment(reply, idx, offset) {
     source.buffer = buffer;
     source.connect(gain);
     gain.connect(audioCtx.destination);
+    // ALSO connect to the media-sink destination node so iOS sees an
+    // <audio> element actively playing. Without this fan-out, BT
+    // play/pause/skip never reach navigator.mediaSession handlers
+    // (Web Audio alone is invisible to AVFoundation as a media source).
+    // The mediaSink path is muted at the <audio> element — actual audible
+    // output still flows through audioCtx.destination, A2DP routing
+    // unchanged. No-op if the sink isn't available yet.
+    const mediaSink = session.getMediaSink();
+    if (mediaSink) {
+      try { gain.connect(mediaSink); } catch (e) { diag('media-sink connect failed:', (e as Error)?.message); }
+    }
     source.onended = () => {
       // Only advance state if this source is still the active one. If pause
       // or seek already stopped it, the outer state machine handles cleanup.

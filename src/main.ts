@@ -843,6 +843,11 @@ async function boot() {
   async function startStreaming() {
     if (listening) return;
     unlock(player);
+    // Register the page as a BT media source while we're inside this user
+    // gesture — iOS gates play() on the hidden audio-mediasink element
+    // behind a gesture, and only opts the page in to BT play/pause/skip
+    // routing once that play() succeeds.
+    audioSession.primeMediaSink();
 
     // Kick off resume SYNCHRONOUSLY inside the user gesture — iOS loses
     // the "user activated" state after any await, so a resume() called
@@ -954,6 +959,11 @@ async function boot() {
     if (!on) {
       voice.cancelPendingFlush();
       tts.stop('button');
+    } else {
+      // Turning TTS on inside a user gesture — opportunistic prime so the
+      // next agent reply triggers BT-routable mediaSession events. Safe
+      // even if AudioContext isn't unlocked yet (no-op until then).
+      audioSession.primeMediaSink();
     }
   };
   syncSpeakingButton();
@@ -1361,6 +1371,7 @@ async function boot() {
       // after leaving the phone on the counter while brushing teeth.
       // MUST run synchronously inside this click gesture.
       unlock(player);
+      audioSession.primeMediaSink();
       memoActive = true;
       composerInput.style.display = 'none';
       btnMemo.style.display = 'none';
