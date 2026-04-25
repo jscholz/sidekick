@@ -584,10 +584,27 @@ export function hydrate(handlers: {
   const openPanel = () => {
     if (!panel) return;
     panel.classList.add('on');
+    // Suppress accidental clicks on the toolbar buttons (mic / speak /
+    // lock) while settings is open. The settings backdrop already
+    // intercepts taps on the toolbar position because it's a fullscreen
+    // overlay, BUT the X button at the top of the bottom-sheet is
+    // vertically aligned with the toolbar's lock button on a typical
+    // phone — finger motion after the X tap-up was landing on lock and
+    // triggering pocket-lock unexpectedly. Disabling pointer-events on
+    // .toolbar while .settings.on is active makes the toolbar unable to
+    // receive the synthetic-click that iOS fires post-touchend.
+    document.body.classList.add('settings-modal-open');
     refreshModelState();
     modelHandlers.reloadKeyterms?.();
   };
   const closePanel = () => {
+    // Suppress toolbar clicks for a brief delay AFTER close to cover the
+    // remainder of the iOS touch sequence (touchend → click). 350ms is
+    // long enough for the synthetic click to fire and be ignored, short
+    // enough that the user doesn't notice the toolbar is dead.
+    document.body.classList.add('settings-just-closed');
+    setTimeout(() => document.body.classList.remove('settings-just-closed'), 350);
+    document.body.classList.remove('settings-modal-open');
     // ORDER MATTERS: hide the panel FIRST, before any side-effect work.
     // Previously a throw inside the sessions-filter commit (or any
     // handler.onSessionsFilterChange chain) could leave the panel

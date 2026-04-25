@@ -257,6 +257,16 @@
     background: var(--bg); border-bottom: 1px solid var(--border);
     align-items: center;
   }
+  /* Click-suppression on the toolbar while the settings modal is open
+   * (or in the brief tail-window after close). On the phone bottom-sheet,
+   * the X button sits roughly under the lock button — Jonathan's tap-up
+   * on X kept synthesizing a click on lock, triggering pocket-lock by
+   * accident. The 350ms tail in `.settings-just-closed` covers iOS's
+   * touchend→click delay; toolbar reactivates after. */
+  body.settings-modal-open .toolbar,
+  body.settings-just-closed .toolbar {
+    pointer-events: none;
+  }
   .toolbar .toolbar-btn {
     display: flex; align-items: center; justify-content: center;
     padding: 8px; min-width: 40px; min-height: 40px;
