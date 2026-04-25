@@ -806,7 +806,6 @@
   }
   .line.sent .speaker { color: var(--muted); }
   .line { position: relative; }
-  .line.history { opacity: 0.6; }
   .line .source-icon {
     display: inline-flex; vertical-align: middle; opacity: 0.25;
     margin-right: 3px; color: var(--muted);

@@ -1449,9 +1449,9 @@ function renderHistoryMessage(m: any, label: string, mode: 'append' | 'prepend' 
   const prepend = mode === 'prepend';
   if (m.role === 'assistant') {
     if (NO_REPLY_RE.test(text)) return;
-    chat.addLine(label, text, 'agent history', { markdown: true, timestamp: ts, prepend, batch: prepend });
+    chat.addLine(label, text, 'agent', { markdown: true, timestamp: ts, prepend, batch: prepend });
   } else if (m.role === 'user') {
-    chat.addLine('You', text, 's0 history', { timestamp: ts, prepend, batch: prepend });
+    chat.addLine('You', text, 's0', { timestamp: ts, prepend, batch: prepend });
   }
   // Tool role / system role: skip for now; UI has no slot for them.
 }
@@ -1533,10 +1533,10 @@ async function backfillHistory() {
 
       if (msg.role === 'assistant') {
         if (NO_REPLY_RE.test(text)) continue;
-        chat.addLine(getAgentLabel(), text, 'agent history', { markdown: true, timestamp });
+        chat.addLine(getAgentLabel(), text, 'agent', { markdown: true, timestamp });
         appended++;
       } else if (msg.role === 'user') {
-        chat.addLine('You', text, 's0 history', { timestamp });
+        chat.addLine('You', text, 's0', { timestamp });
         appended++;
       }
     }
