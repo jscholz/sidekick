@@ -1598,50 +1598,21 @@ async function boot() {
     }, true);  // capture phase to beat the existing onclick
   }
 
-  // ── Refresh/reconnect button (for standalone PWA — no browser refresh) ──
+  // ── Refresh button (full page reload for standalone PWA) ──
+  // Previously did a transport-rebind which had a confusing mental model
+  // ("why didn't it actually refresh?"). Renamed to "Refresh" + now
+  // does a real location.reload() — same as hitting browser-refresh on
+  // desktop. With the SSE-detach proxy fix, server-side agent runs
+  // outlive the reload, so refreshing mid-conversation no longer kills
+  // an in-flight reply (the next request on the same conversation
+  // chains via previous_response_id and picks up the reply).
   const btnRefresh = document.getElementById('btn-refresh');
   if (btnRefresh) {
-    btnRefresh.onclick = async () => {
-      // Tear down streaming so the next Stream tap rebinds to the current
-      // OS route — matters when BT headphones were connected after app open
-      // and iOS stuck with the speaker. stopStreaming also clears the
-      // sttBackfill ring (was previously left populated → stale 'Ns buffered'
-      // indicator). Also silence TTS: a reply still playing through the
-      // speaker should stop too when the user asks for a reset.
-      stopStreaming();
-      try { tts.stop('reconnect'); } catch {}
+    btnRefresh.onclick = () => {
+      try { tts.stop('refresh'); } catch {}
       try { player.pause(); player.src = ''; player.load(); } catch {}
-      await resetAudio();
-
-      diag('reset history: refresh button');
-      // Reconnect now emulates a native-app reconnect: rebind the
-      // transport, don't wipe UI. Chat bubbles + reply cache stay put,
-      // streaming/TTS were just reset above. If the user notices staleness
-      // they can manually resume a session from the drawer.
-      draft.dismiss();
-      voice.cancelPendingFlush();
-      if (typeof voiceMemos.clearSent === 'function') {
-        await voiceMemos.clearSent().catch(() => {});
-      }
-      await restoreMemoCards();
-      diag('reconnect: rebinding transport');
-      // Also refresh the session drawer — fast reload path for users
-      // who want fresh server state (e.g. they just sent a message in
-      // another adapter and want it to appear here) without doing a
-      // full page reload that'd kill any in-flight state.
-      sessionDrawer.refresh();
-      backend.disconnect();
-      await backend.connect({
-        onStatus: async (connected) => {
-          status.setStatus(connected ? 'Gateway: connected' : 'Gateway: disconnected',
-            connected ? 'ok' : undefined);
-          if (connected) await flushOutbox();
-        },
-        onDelta: handleReplyDelta,
-        onFinal: handleReplyFinal,
-        onToolEvent: handleToolEvent,
-        onActivity: handleActivity,
-      });
+      diag('refresh: location.reload()');
+      location.reload();
     };
   }
 
