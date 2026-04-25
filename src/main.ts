@@ -39,6 +39,7 @@ import * as composer from './composer.ts';
 import * as voice from './pipelines/classic/voice.ts';
 import * as replyPlayer from './pipelines/classic/replyPlayer.ts';
 import * as replyCache from './pipelines/classic/replyCache.ts';
+import * as webrtcControls from './pipelines/webrtc/controls.ts';
 import * as bgTrace from './bgTrace.ts';
 import { stripReasoningLeak } from './backends/hermes.ts';
 
@@ -1019,37 +1020,72 @@ async function boot() {
     if (capture.hasActive()) capture.release();
   };
 
-  // ── Mic button ──────────────────────────────────────────────────────────
+  // ── Mic + Speak buttons ────────────────────────────────────────────────
+  // Two transports share these two buttons:
+  //   classic — btn-mic toggles WS+PCM streaming;
+  //             btn-speak toggles TTS-on/off (settings.tts).
+  //   webrtc — btn-mic = stream-mode call (mic in, transcripts via SSE);
+  //             btn-speak = talk-mode call (mic in + TTS out).
+  //
+  // The transport choice is `settings.get().voiceTransport` (default
+  // 'webrtc' on this branch). Settings change is hot — re-resolve the
+  // active handler on every click so toggling in settings while either
+  // transport is alive cleanly hands off.
   const btnMic = document.getElementById('btn-mic');
-  btnMic.onclick = () => {
-    if (listening) stopStreaming();
-    else startStreaming();
-  };
-
-  // Speaking toggle — combines live mode + TTS
-  // ON: auto-send voice transcripts + agent replies via TTS
-  // OFF: listen-only (transcribe but don't send) + TTS disabled + stop current TTS
-  // Speaking toggle — master control for TTS + live mode
   const btnSpeak = document.getElementById('btn-speak');
-  function syncSpeakingButton() {
-    const on = settings.get().tts;
-    // Icon button: on = coloured speaker with waves, off = muted (crossed-out)
-    btnSpeak.classList.toggle('muted', !on);
-  }
-  btnSpeak.onclick = () => {
-    const on = !settings.get().tts;
-    settings.set('tts', on);
-    syncSpeakingButton();
-    if (!on) {
-      voice.cancelPendingFlush();
-      tts.stop('button');
-    } else {
-      // Turning TTS on inside a user gesture — opportunistic prime so the
-      // next agent reply triggers BT-routable mediaSession events. Safe
-      // even if AudioContext isn't unlocked yet (no-op until then).
-      audioSession.primeMediaSink();
+
+  // WebRTC controls — stateless init; the click handlers it installs
+  // override the classic ones below when voiceTransport === 'webrtc'.
+  webrtcControls.init({
+    getSessionId: () => sessionDrawer.getViewed() || backend.getCurrentSessionId?.() || null,
+    onStatus: (msg, kind) => status.setStatus(msg, kind ?? null),
+  });
+
+  // Re-bind the click handlers each time voiceTransport changes (or once
+  // at boot). Closures reference the ambient `listening` / startStreaming
+  // / stopStreaming declared above.
+  function rebindVoiceButtons() {
+    const transport = settings.get().voiceTransport;
+    if (transport === 'webrtc') {
+      // webrtcControls.init already installed click handlers on both
+      // buttons. Nothing further to do — but make sure classic state is
+      // released if we just flipped.
+      if (listening) stopStreaming();
+      return;
     }
-  };
+    // Classic: restore the legacy handlers.
+    if (btnMic) btnMic.onclick = () => {
+      if (listening) stopStreaming();
+      else startStreaming();
+    };
+    if (btnSpeak) btnSpeak.onclick = () => {
+      const on = !settings.get().tts;
+      settings.set('tts', on);
+      syncSpeakingButton();
+      if (!on) {
+        voice.cancelPendingFlush();
+        tts.stop('button');
+      } else {
+        audioSession.primeMediaSink();
+      }
+    };
+    // Close any open WebRTC call when leaving webrtc transport.
+    void webrtcControls.closeIfOpen();
+  }
+
+  function syncSpeakingButton() {
+    // In webrtc mode the speak button reflects "talk-mode active";
+    // in classic mode it reflects the persistent TTS setting.
+    if (settings.get().voiceTransport === 'webrtc') {
+      const isTalk = webrtcControls.currentMode() === 'talk' && webrtcControls.isOpen();
+      btnSpeak?.classList.toggle('muted', !isTalk);
+      return;
+    }
+    const on = settings.get().tts;
+    btnSpeak?.classList.toggle('muted', !on);
+  }
+
+  rebindVoiceButtons();
   syncSpeakingButton();
 
   // ── Composer ────────────────────────────────────────────────────────────

@@ -186,6 +186,12 @@ const DEFAULTS = {
   // id, or stored conversation name (tap ⋮ → Info on any row to see the
   // raw values). Empty → show ALL sessions. Non-empty → union of matches.
   sessionsFilter: 'sidekick-*,*whatsapp*,*telegram*',
+  // Voice transport: 'classic' = old WS+PCM pipeline (Deepgram via /api,
+  // local webRTC TTS via /api/tts), 'webrtc' = new full-duplex aiortc
+  // path on hermes. Default 'webrtc' on the feat/webrtc-voice branch;
+  // flip to 'classic' as a kill-switch if the new path misbehaves on
+  // the bike ride.
+  voiceTransport: 'webrtc',  // 'classic' | 'webrtc'
 };
 
 let current = { ...DEFAULTS };
