@@ -42,6 +42,7 @@ let optimisticActiveId: string | null = null;
  *  the adapter's token got superseded). */
 let viewedSessionId: string | null = null;
 export function setViewed(id: string | null) { viewedSessionId = id; }
+export function getViewed(): string | null { return viewedSessionId; }
 
 function fmtRelativeTime(epochSec: number): string {
   if (!epochSec) return '';

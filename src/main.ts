@@ -1396,6 +1396,11 @@ async function boot() {
       }
       await restoreMemoCards();
       diag('reconnect: rebinding transport');
+      // Also refresh the session drawer — fast reload path for users
+      // who want fresh server state (e.g. they just sent a message in
+      // another adapter and want it to appear here) without doing a
+      // full page reload that'd kill any in-flight state.
+      sessionDrawer.refresh();
       backend.disconnect();
       await backend.connect({
         onStatus: async (connected) => {
@@ -1634,7 +1639,11 @@ function showThinking() {
  *  "thinking…" / "using <tool>…" (confirmed, bright dots). Fires on
  *  every incremental activity event; we just update the label, the
  *  streamingEl / replyId swap happens in showStreamingIndicator. */
-function handleActivity({ working, detail }) {
+function handleActivity({ working, detail, conversation }: any) {
+  // Drop activity updates for off-screen conversations (user has switched
+  // to a different session mid-stream; the old conversation's "thinking"
+  // shouldn't render here).
+  if (conversation && conversation !== sessionDrawer.getViewed()) return;
   if (!streamingEl) return;
   streamingEl.classList.remove('pending');
   const dots = streamingEl.querySelector('.thinking-dots');
@@ -1792,8 +1801,12 @@ function drainPendingReply() {
   }
 }
 
-function handleReplyDelta({ replyId, cumulativeText }) {
+function handleReplyDelta({ replyId, cumulativeText, conversation }: any) {
   if (!cumulativeText) return;
+  // Drop deltas for off-screen conversations. Server-side stream keeps
+  // running; user can switch back later and the persisted reply will
+  // appear via replaySessionMessages.
+  if (conversation && conversation !== sessionDrawer.getViewed()) return;
 
   // FIFO-queue fast path: if a previous reply is still playing and
   // we're in FIFO mode, render the bubble + chime as usual but buffer
@@ -1859,13 +1872,25 @@ function handleReplyDelta({ replyId, cumulativeText }) {
 
 /** Complete reply. `content` (if present) is the raw block array used to
  *  pull out image attachments. */
-function handleReplyFinal({ replyId, text, content = [] }) {
+function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
   // A completed turn means hermes has persisted this response to
   // response_store.db (+ state.db/sessions gets the derived entry). If
   // this was the first turn of a brand-new session, the drawer's
   // placeholder row needs to be replaced with the real row — trigger a
   // refresh. Background fetch will repopulate the cached list.
+  // ALWAYS refresh the drawer, even when the reply belongs to an
+  // off-screen conversation — that's the whole point of letting the
+  // stream complete in the background: the user needs the row to find.
   sessionDrawer.refresh();
+
+  // If the user switched to a different session mid-stream, swallow the
+  // chat-bubble render here; the reply IS persisted server-side and
+  // will appear via replaySessionMessages when they switch back. Side
+  // effects above (drawer refresh) already fired.
+  if (conversation && conversation !== sessionDrawer.getViewed()) {
+    if (pendingReply?.replyId === replyId) pendingReply = null;
+    return;
+  }
 
   const imageBlocks = extractImageBlocks(content);
 
@@ -1942,7 +1967,9 @@ function handleReplyFinal({ replyId, text, content = [] }) {
 
 /** Tool-events — cards and similar side-channel data the agent emits.
  *  Currently just canvas.show; grows as backends add more. */
-function handleToolEvent({ kind, payload }) {
+function handleToolEvent({ kind, payload, conversation }: any) {
+  // Drop tool-event renders for off-screen conversations.
+  if (conversation && conversation !== sessionDrawer.getViewed()) return;
   if (kind === 'canvas.show' && payload) {
     log('canvas.show event from agent');
     attachCardToLatestAgentBubble(payload);

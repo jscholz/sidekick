@@ -47,6 +47,16 @@ let cumulativeText = '';
  *  response.completed so the chain advances. Cleared by newSession(). */
 let chainResponseId: string | null = null;
 
+/** Conversation that the currently in-flight SSE stream belongs to.
+ *  Tagged at sendMessage time, propagated through every event payload so
+ *  main.ts can gate rendering: if the user has switched to a different
+ *  session mid-stream, deltas for the old conversation are dropped at
+ *  the renderer level — but the stream stays open so the server-side
+ *  agent run completes (api_server cancels the agent task on
+ *  ConnectionResetError, see api_server.py:1150-1166, so we MUST keep
+ *  the stream alive to get the reply persisted). */
+let inflightConversation: string | null = null;
+
 /** Monotonic token for conversation-name changes. Any operation that
  *  intends to set `conversationName` (newSession, resumeSession) claims
  *  a fresh token at start. If the operation is async and its token isn't
@@ -177,13 +187,17 @@ export function stripReasoningLeak(text: string): string {
 }
 
 function handleEvent(type: string, d: any): void {
+  // Every renderable subs callback gets the conversation tag so main.ts
+  // can gate visual rendering when the user has switched away mid-stream.
+  // Server-side work continues; only the chat-panel render is suppressed.
+  const conv = inflightConversation;
   switch (type) {
     case 'response.created':
     case 'response.in_progress':
     case 'response.output_item.added':
       // Pre-streaming lifecycle. Signal activity so the thinking indicator
       // brightens even before the first text chunk lands.
-      subs?.onActivity?.({ working: true, detail: 'pending' });
+      subs?.onActivity?.({ working: true, detail: 'pending', conversation: conv });
       return;
 
     case 'response.output_text.delta': {
@@ -196,18 +210,19 @@ function handleEvent(type: string, d: any): void {
       cumulativeText += delta;
       const cleaned = stripReasoningLeak(cumulativeText);
       if (!cleaned) return;   // all-reasoning so far; wait for real text
-      subs?.onActivity?.({ working: true, detail: 'streaming' });
-      subs?.onDelta?.({ replyId: currentReplyId, cumulativeText: cleaned });
+      subs?.onActivity?.({ working: true, detail: 'streaming', conversation: conv });
+      subs?.onDelta?.({ replyId: currentReplyId, cumulativeText: cleaned, conversation: conv });
       return;
     }
 
     case 'response.function_call.added':
     case 'response.function_call_arguments.delta': {
       const name = d.name || d.function?.name || 'tool';
-      subs?.onActivity?.({ working: true, detail: name });
+      subs?.onActivity?.({ working: true, detail: name, conversation: conv });
       subs?.onToolEvent?.({
         kind: 'tool_call',
         payload: { name, args: d.arguments || d.delta },
+        conversation: conv,
       });
       return;
     }
@@ -216,6 +231,7 @@ function handleEvent(type: string, d: any): void {
       subs?.onToolEvent?.({
         kind: 'tool_result',
         payload: { name: d.name, output: d.output },
+        conversation: conv,
       });
       return;
 
@@ -238,8 +254,8 @@ function handleEvent(type: string, d: any): void {
         cumulativeText;
       currentReplyId = null;
       cumulativeText = '';
-      subs?.onActivity?.({ working: false });
-      subs?.onFinal?.({ replyId, text: stripReasoningLeak(finalText) });
+      subs?.onActivity?.({ working: false, conversation: conv });
+      subs?.onFinal?.({ replyId, text: stripReasoningLeak(finalText), conversation: conv });
       return;
     }
 
@@ -303,8 +319,13 @@ export const hermesAdapter = {
       throw new Error('Gateway not connected');
     }
     // One in-flight request at a time; barge-in cancels the current one.
+    // NB: barge-in DOES kill the prior agent run server-side (api_server
+    // catches the ConnectionResetError and cancels the task). That's the
+    // intended semantics for an explicit user re-send. Passive
+    // session-switch (resumeSession) does NOT abort — see comment there.
     if (inflight) { try { inflight.abort(); } catch {} }
     inflight = new AbortController();
+    inflightConversation = conversationName;
 
     const body: Record<string, any> = {
       // Omit model so server falls back to config.yaml's default.
@@ -349,6 +370,7 @@ export const hermesAdapter = {
       throw e;
     } finally {
       inflight = null;
+      inflightConversation = null;
     }
   },
 
@@ -458,14 +480,21 @@ export const hermesAdapter = {
   },
 
   async resumeSession(id: string) {
-    // Abort any in-flight reply on the PREVIOUS conversation — without this,
-    // SSE deltas for the old session keep arriving after switch and get
-    // rendered into the resumed (new) session's chat UI. Agent's reply
-    // is still computed + stored server-side against the old conversation's
-    // response chain; user can find it there if they resume that session
-    // again. Just the live UI view gets cut off.
-    if (inflight) { try { inflight.abort(); } catch {} inflight = null; }
-    subs?.onActivity?.({ working: false });
+    // Do NOT abort the in-flight SSE on session-switch. The earlier
+    // belief was "abort just cuts the UI; server keeps computing + the
+    // reply still lands in the old session" — that turned out to be
+    // wrong. api_server.py:1150-1166 catches ConnectionResetError on
+    // the SSE write and explicitly cancels the agent task. So aborting
+    // here was killing real work in flight.
+    //
+    // Instead: keep the stream open. handleEvent below tags every emitted
+    // payload with `conversation: inflightConversation`, and main.ts
+    // gates rendering on whether that matches the currently viewed
+    // session. Off-screen deltas are dropped at the renderer; on-screen
+    // ones render normally. When the stream completes, the reply lands
+    // in the original session's history; user can switch back and see
+    // it after the drawer-refresh-on-switch.
+    subs?.onActivity?.({ working: false, conversation: inflightConversation });
 
     // Claim a token. If a newer op (newSession, another resumeSession) runs
     // between here and this fetch resolving, conversationToken will have
