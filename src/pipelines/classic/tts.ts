@@ -381,17 +381,26 @@ function playChunkSegment(reply, idx, offset) {
     const gain = audioCtx.createGain();
     source.buffer = buffer;
     source.connect(gain);
-    gain.connect(audioCtx.destination);
-    // ALSO connect to the media-sink destination node so iOS sees an
-    // <audio> element actively playing. Without this fan-out, BT
-    // play/pause/skip never reach navigator.mediaSession handlers
-    // (Web Audio alone is invisible to AVFoundation as a media source).
-    // The mediaSink path is muted at the <audio> element — actual audible
-    // output still flows through audioCtx.destination, A2DP routing
-    // unchanged. No-op if the sink isn't available yet.
+    // Route ONLY through the media-sink destination node (NOT also to
+    // audioCtx.destination). The <audio> element fed by the media-sink
+    // is the sole audible path now. v2.32 attempted dual-output with a
+    // muted media-sink + audible ctx.destination — iOS didn't register
+    // the muted element as a media source, so BT controls stayed dead
+    // (verified on Jonathan's iPhone). Single-path through HTMLAudioElement
+    // gives iOS a real media source to route BT events to, without
+    // introducing dual-output echo. A2DP routing still works because
+    // HTMLAudioElement playback is natively routed by iOS to BT.
+    // Fallback: if the sink isn't yet available (no AudioContext, very
+    // early in boot), use ctx.destination so we don't drop audio entirely.
     const mediaSink = session.getMediaSink();
     if (mediaSink) {
-      try { gain.connect(mediaSink); } catch (e) { diag('media-sink connect failed:', (e as Error)?.message); }
+      try { gain.connect(mediaSink); }
+      catch (e) {
+        diag('media-sink connect failed:', (e as Error)?.message);
+        gain.connect(audioCtx.destination);
+      }
+    } else {
+      gain.connect(audioCtx.destination);
     }
     source.onended = () => {
       // Only advance state if this source is still the active one. If pause

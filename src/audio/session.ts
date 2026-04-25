@@ -175,11 +175,16 @@ function ensureMediaSinkEl(): HTMLAudioElement {
   const el = document.createElement('audio');
   el.id = 'audio-mediasink';
   el.setAttribute('playsinline', '');
-  el.muted = true;
+  // NOT muted: iOS PWA only registers the page as a BT media source when
+  // the <audio> element is producing AUDIBLE output. v2.32 used muted=true
+  // and that didn't take — Jonathan's iPhone test 2026-04-25 showed
+  // priming logged but BT events never routed. Now: this element is the
+  // SOLE audible path for TTS (tts.ts no longer connects to ctx.destination
+  // alongside the sink). The audio comes through the AudioContext into the
+  // MediaStreamAudioDestinationNode, then out through this element. iOS
+  // routes A2DP for HTMLAudioElement playback natively; no quality loss.
+  el.muted = false;
   el.autoplay = true;
-  // Volume stays 1.0 even though .muted is true — mirrors the keepalive's
-  // "iOS silences suspiciously quiet elements" heuristic. .muted is the
-  // safer signal that the user hears nothing from this element.
   el.volume = 1.0;
   document.body.appendChild(el);
   mediaSinkEl = el;
