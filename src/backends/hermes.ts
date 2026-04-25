@@ -137,7 +137,28 @@ export function stripReasoningLeak(text: string): string {
   if (new RegExp(`^${REASONING_NAMES}\\s*$`, 'i').test(text.trim())) {
     return '';
   }
+
   let out = text;
+
+  // Harmony-block leak: the model's full structured preamble
+  //   <|...|> ... thought\n thought\n <|channel|>final response
+  // bleeds through. The real reply starts AFTER the LAST channel
+  // marker. Conservative slice: only cut if everything before the
+  // last `<|channel|>` is harmony-shape noise (other `<|...|>` tokens,
+  // bare reasoning words, whitespace) — not real content.
+  const channelMatches = [...out.matchAll(/<\|?channel\|>/gi)];
+  if (channelMatches.length > 0) {
+    const last = channelMatches[channelMatches.length - 1];
+    const before = out.slice(0, last.index);
+    const residue = before
+      .replace(/<\|[^|]*\|>/g, '')                                     // strip <|...|> tokens
+      .replace(new RegExp(`\\b${REASONING_NAMES}\\b`, 'gi'), '')       // strip bare reasoning words
+      .replace(/[\s\n]/g, '');                                         // strip whitespace
+    if (residue === '') {
+      out = out.slice(last.index! + last[0].length);
+    }
+  }
+
   // Iterate: strip any combination of leading reasoning artifacts that
   // stack up. Order:
   //   1. bare word + newline(s)    ("thought\n")
@@ -148,6 +169,8 @@ export function stripReasoningLeak(text: string): string {
     const before = out;
     out = out.replace(new RegExp(`^\\s*${REASONING_NAMES}\\s*\\n+`, 'i'), '');
     out = out.replace(new RegExp(`^\\s*<\\|?${REASONING_NAMES}\\|?>\\s*`, 'i'), '');
+    // Catch-all leading <|anything|> tokens (incl. <|"|>, <|im_end|>, etc.)
+    out = out.replace(/^\s*(?:<\|[^|]*\|>\s*)+/i, '');
     if (out === before) break;
   }
   return out;
