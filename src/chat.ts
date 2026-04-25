@@ -130,35 +130,43 @@ function updateButton() {
  *  user-initiated jump-to-bottom, and anywhere we deliberately want to
  *  override the "user scrolled up" state.
  *
- *  Trailing-debounced on a microtask + a short timer because multiple
- *  unrelated triggers fire close together on session-resume (renderSession,
- *  backfillHistory, transcript-snapshot restore, image/code-block layout
- *  re-flows) and `.transcript` has `scroll-behavior: smooth` — without
- *  coalescing the user sees two animated jumps. The trailing edge wins so
- *  the FINAL scrollHeight (after async render passes settle) is captured. */
-let _scrollDebounceTimer: number | null = null;
-function _doForceScroll() {
-  _scrollDebounceTimer = null;
+ *  Bypasses smooth-scroll via `behavior: 'instant'` because session-resume
+ *  triggers multiple cascading scrolls (renderSession, backfillHistory,
+ *  snapshot restore, image/code-block reflows) — with `scroll-behavior:
+ *  smooth` in CSS each call animates separately and the user sees a stutter.
+ *  Streaming deltas still go through autoScroll() which keeps smooth so the
+ *  follow-along during reply still glides. */
+export function forceScrollToBottom() {
   if (!transcriptEl) return;
-  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  transcriptEl.scrollTo({ top: transcriptEl.scrollHeight, behavior: 'instant' as ScrollBehavior });
   pinnedToBottom = true;
   missedWhileScrolled = 0;
   updateButton();
 }
-export function forceScrollToBottom() {
-  if (_scrollDebounceTimer != null) {
-    clearTimeout(_scrollDebounceTimer);
-  }
-  _scrollDebounceTimer = window.setTimeout(_doForceScroll, 50);
-}
 
 /** Scroll to the live edge ONLY if the user is already pinned. If they've
  *  scrolled up to read earlier, leave their position alone and count the
- *  new message toward the unread badge on the jump-to-bottom button. */
+ *  new message toward the unread badge on the jump-to-bottom button.
+ *
+ *  Tracks the "owner" of the most recent autoScroll burst — when many calls
+ *  arrive in quick succession (resume + render + reflow) only the FIRST
+ *  animates smoothly; subsequent calls within 200ms snap instantly so the
+ *  user doesn't see two animations chained together. Streaming-delta
+ *  cadence (one call per ~100ms with steady scrollHeight growth) flows
+ *  through the smooth path naturally because each call re-establishes the
+ *  burst window from the same call site. */
+let _autoScrollBurstUntil = 0;
 export function autoScroll() {
   if (!transcriptEl) return;
   if (pinnedToBottom) {
-    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    const now = performance.now();
+    const inBurst = now < _autoScrollBurstUntil;
+    _autoScrollBurstUntil = now + 200;
+    if (inBurst) {
+      transcriptEl.scrollTo({ top: transcriptEl.scrollHeight, behavior: 'instant' as ScrollBehavior });
+    } else {
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
   } else {
     missedWhileScrolled++;
     updateButton();
