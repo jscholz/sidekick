@@ -1361,19 +1361,13 @@ async function boot() {
           return;
         }
 
-        if (settings.get().dictationAutoSend) {
-          // autoSend=on: keep the card (audio replay) + show transcript below it.
-          backend.sendMessage(text, { voice: true });
-          if (card) memoCard.update(card, { transcript: text, status: 'sent' });
-          await voiceMemos.update(id, { transcript: text, status: 'sent' });
-          playFeedback('send');
-        } else {
-          // autoSend=off: card was a placeholder during transcription. Drop it
-          // now that the text is going to the composer. Matches the live path.
-          if (card) card.remove();
-          await voiceMemos.remove(id);
-          composer.appendText(text);
-        }
+        // Compose-only: per webrtc-plan.md §11, memo never auto-sends —
+        // the transcript always lands in the composer textarea so the
+        // user can review, append more, or scrub before shipping. Drop
+        // the placeholder card; matches the live path.
+        if (card) card.remove();
+        await voiceMemos.remove(id);
+        composer.appendText(text);
       }
     );
     if (result.skipped) diag('outbox: flush skipped (already flushing)');
