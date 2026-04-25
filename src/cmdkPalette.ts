@@ -10,7 +10,7 @@
  *
  * Enter on either kind resumes the underlying session; we do NOT
  * scroll-to-specific-message for message hits — that's deferred. See the
- * cmdk follow-ups block in ~/code/blueberry-claw/backlog.md.
+ * cmdk follow-ups block in ~/code/openclaw-agent-private/backlog.md.
  */
 
 import * as backend from './backend.ts';
@@ -356,7 +356,7 @@ async function activate(hit: Hit) {
   // standard onResume callback (which is replaySessionMessages in
   // main.ts). For message hits we deliberately do NOT scroll to the
   // specific message id — that's queued in the deferred-feature block
-  // in ~/code/blueberry-claw/backlog.md (see "cmdk follow-ups").
+  // in ~/code/openclaw-agent-private/backlog.md (see "cmdk follow-ups").
   const id = hit.kind === 'session' ? hit.id : hit.session_id;
   if (!id) return;
   close();
