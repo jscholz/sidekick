@@ -895,6 +895,16 @@ const HERMES_STATE_DB = expandHome(cfgVal('SIDEKICK_HERMES_STATE_DB', 'backend.h
   path.join(HOME, '.hermes/state.db')) as string);
 const HERMES_CLI = expandHome(cfgVal('SIDEKICK_HERMES_CLI', 'backend.hermes.cli_path',
   path.join(HOME, '.local/bin/hermes')) as string);
+// Hindsight long-term memory bank — used to scrub session-derived memories
+// when the user deletes a session. Defaults match the local_external setup
+// described in ~/.hermes/hindsight/config.json. Empty url disables the purge
+// step (e.g. cloud mode where we don't have a direct delete path wired).
+const HINDSIGHT_URL = (cfgVal('SIDEKICK_HINDSIGHT_URL', 'backend.hindsight.url',
+  'http://127.0.0.1:8765') as string).replace(/\/+$/, '');
+const HINDSIGHT_BANK = cfgVal('SIDEKICK_HINDSIGHT_BANK', 'backend.hindsight.bank_id',
+  'jonathan') as string;
+const HINDSIGHT_API_KEY = (process.env.HINDSIGHT_API_KEY ||
+  cfgVal('SIDEKICK_HINDSIGHT_API_KEY', 'backend.hindsight.api_key', '') as string).trim();
 // Filter so random test names / non-sidekick conversations don't clutter the UI.
 // hermes adapter generates names as 'sidekick-main' or 'sidekick-<timestamp>'.
 const HERMES_SESSION_PREFIX = cfgVal('SIDEKICK_HERMES_SESSION_PREFIX',
@@ -1067,6 +1077,99 @@ async function handleHermesSessionRename(req, res, name: string) {
   });
 }
 
+/** Scrub all hindsight memories tagged with this session UUID.
+ *
+ * Two storage shapes need handling:
+ *   1. Live retains (hermes hindsight plugin going forward) — the plugin sets
+ *      `document_id = self._session_id`, so document.id == session UUID and
+ *      the dedicated `DELETE /documents/{document_id}` endpoint cascades to
+ *      the document, all extracted memory units, and their links.
+ *   2. Backfilled docs (one document per historical message) — document.id is
+ *      a random UUID; the session UUID lives only in `document_metadata.session_id`.
+ *      The list-documents endpoint can't filter by metadata, so we paginate
+ *      through all docs in the bank and delete those whose metadata matches.
+ *
+ * Best-effort: any failure is logged but does NOT fail the overall session
+ * delete (sqlite cleanup is the primary guarantee — a stranded hindsight row
+ * is a privacy bug, but a failed sqlite delete is a UI/state corruption bug).
+ */
+async function purgeHindsightSession(sessionUuid: string): Promise<{ docs: number; units: number; errors: number }> {
+  if (!HINDSIGHT_URL) return { docs: 0, units: 0, errors: 0 };
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (HINDSIGHT_API_KEY) headers['authorization'] = `Bearer ${HINDSIGHT_API_KEY}`;
+  const bank = encodeURIComponent(HINDSIGHT_BANK);
+  let docs = 0, units = 0, errors = 0;
+
+  // (1) Direct delete by document_id == session UUID. 404 = no such doc
+  // (live retain never happened or already gone), which is fine.
+  try {
+    const r = await fetch(`${HINDSIGHT_URL}/v1/default/banks/${bank}/documents/${encodeURIComponent(sessionUuid)}`,
+      { method: 'DELETE', headers });
+    if (r.ok) {
+      const j: any = await r.json().catch(() => ({}));
+      docs++;
+      units += j.memory_units_deleted ?? 0;
+    } else if (r.status !== 404) {
+      console.warn(`[hindsight purge] direct delete returned ${r.status} for ${sessionUuid}`);
+      errors++;
+    }
+  } catch (e: any) {
+    console.warn(`[hindsight purge] direct delete failed for ${sessionUuid}:`, e.message);
+    errors++;
+    // If hindsight is unreachable, skip the metadata sweep — same root cause.
+    return { docs, units, errors };
+  }
+
+  // (2) Metadata sweep: pull all documents and match on document_metadata.session_id.
+  // Bank size is small (~tens of docs per active user), so a paginated full-list
+  // scan is fine. If banks grow large, an indexed metadata-filter endpoint would
+  // be the right server-side answer.
+  const PAGE_SIZE = 200;
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    let items: any[] = [];
+    try {
+      const r = await fetch(`${HINDSIGHT_URL}/v1/default/banks/${bank}/documents?limit=${PAGE_SIZE}&offset=${offset}`,
+        { headers });
+      if (!r.ok) {
+        console.warn(`[hindsight purge] list returned ${r.status} at offset ${offset}`);
+        errors++;
+        break;
+      }
+      const j: any = await r.json();
+      items = Array.isArray(j.items) ? j.items : [];
+    } catch (e: any) {
+      console.warn(`[hindsight purge] list failed at offset ${offset}:`, e.message);
+      errors++;
+      break;
+    }
+    if (items.length === 0) break;
+    for (const doc of items) {
+      const docSid = doc?.document_metadata?.session_id;
+      if (docSid !== sessionUuid) continue;
+      // Skip if we already nuked it by id in step (1) — same id won't list anymore,
+      // but be defensive against races.
+      if (doc.id === sessionUuid) continue;
+      try {
+        const r = await fetch(`${HINDSIGHT_URL}/v1/default/banks/${bank}/documents/${encodeURIComponent(doc.id)}`,
+          { method: 'DELETE', headers });
+        if (r.ok) {
+          const j: any = await r.json().catch(() => ({}));
+          docs++;
+          units += j.memory_units_deleted ?? 0;
+        } else if (r.status !== 404) {
+          console.warn(`[hindsight purge] delete ${doc.id} returned ${r.status}`);
+          errors++;
+        }
+      } catch (e: any) {
+        console.warn(`[hindsight purge] delete ${doc.id} failed:`, e.message);
+        errors++;
+      }
+    }
+    if (items.length < PAGE_SIZE) break;
+  }
+  return { docs, units, errors };
+}
+
 async function handleHermesSessionDelete(req, res, name: string) {
   if (!/^[a-zA-Z0-9_-]+$/.test(name) || name.length > 128) {
     res.writeHead(400, { 'content-type': 'application/json' });
@@ -1094,8 +1197,15 @@ async function handleHermesSessionDelete(req, res, name: string) {
       `DELETE FROM responses WHERE response_id IN (SELECT response_id FROM conversations WHERE name='${name}');`,
       `DELETE FROM conversations WHERE name='${name}';`,
     ]);
+    // Step 3: scrub long-term memories the agent retained from this session.
+    // Hindsight runs as a separate service and can be unreachable; treat as
+    // best-effort so we don't strand the sqlite delete on a memory-service blip.
+    const purged = await purgeHindsightSession(uuid);
+    if (purged.docs > 0 || purged.errors > 0) {
+      console.log(`[hermes delete] hindsight purge for ${uuid}: ${purged.docs} docs, ${purged.units} memory units, ${purged.errors} errors`);
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true }));
+    res.end(JSON.stringify({ ok: true, hindsightDocs: purged.docs, hindsightUnits: purged.units }));
   } catch (e: any) {
     console.error('hermes sessions delete failed:', e.message);
     res.writeHead(500, { 'content-type': 'application/json' });
