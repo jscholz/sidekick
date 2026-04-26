@@ -33,6 +33,7 @@
 
 import { log, diag } from '../../util/log.ts';
 import { playFeedback } from '../../audio/feedback.ts';
+import * as settings from '../../settings.ts';
 
 export type CallMode = 'stream' | 'talk';
 
@@ -241,12 +242,19 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     throw e;
   }
 
-  // POST the offer.
+  // POST the offer. Pass silence_sec + commit_phrase from settings so
+  // the server's STT bridge can mirror classic-mode dictation behavior:
+  // a configured commit word ("over") triggers an immediate flush, and
+  // silence_sec scopes the no-speech utterance timeout (Deepgram's
+  // utterance_end_ms tops out at 5000ms; longer windows wrap with a
+  // manual asyncio timer server-side).
   const offerPayload = {
     sdp: pc.localDescription?.sdp ?? '',
     type: pc.localDescription?.type ?? 'offer',
     mode,
     session_id: opts?.sessionId || null,
+    silence_sec: settings.get().silenceSec,
+    commit_phrase: settings.get().commitPhrase,
   };
 
   let answer: { peer_id: string; sdp: string; type: string } | null = null;
