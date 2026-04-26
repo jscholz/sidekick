@@ -446,13 +446,21 @@ async function boot() {
       btnTransport.classList.toggle('transport-classic', t === 'classic');
     };
     sync();
-    btnTransport.onclick = () => {
+    // addEventListener (not onclick=) so it can't be silently overwritten by
+    // any later wiring. console.log explicitly so it shows up in DevTools
+    // even if the floating debug panel happens to be filtered/hidden.
+    btnTransport.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       const cur = settings.get().voiceTransport;
       const next = cur === 'webrtc' ? 'classic' : 'webrtc';
       settings.set('voiceTransport', next);
+      console.log('[transport] flipped', cur, '→', next, '(reloading)');
       log('voiceTransport flipped:', cur, '→', next, '(reloading)');
-      location.reload();
-    };
+      // Tiny delay so the log() write to #debug actually flushes before the
+      // reload destroys the page; otherwise Jonathan can't see it post-reload.
+      setTimeout(() => location.reload(), 50);
+    }, true);
   }
 
   // Sidebar — always visible (48px rail), expands on hamburger. Holds
