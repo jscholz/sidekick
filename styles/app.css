@@ -275,13 +275,28 @@
   }
   .toolbar .toolbar-btn:hover { color: var(--fg); background: var(--surface); }
   .toolbar .toolbar-btn svg { width: 24px; height: 24px; }
-  /* Text-content variant for the dev transport toggle (RTC/Classic). */
+  /* Text-content variant for the dev transport toggle (RTC/Classic).
+   * When RTC mode is selected (default), the button is filled with the
+   * primary colour so it's obvious WebRTC is on. When Classic kill-switch
+   * is engaged, the button goes red on dark so the legacy mode is also
+   * obvious. There's no "off" state — exactly one transport is always
+   * active. */
   .toolbar .toolbar-btn-text {
     font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.04em;
     padding: 8px 10px; min-width: 0;
+    background: var(--primary); color: var(--primary-fg); font-weight: 600;
+  }
+  .toolbar .toolbar-btn-text:hover {
+    background: var(--primary); color: var(--primary-fg);
+    filter: brightness(1.1);
   }
   .toolbar .toolbar-btn-text.transport-classic {
-    color: var(--danger); /* red-ish so the kill-switch state is obvious */
+    background: transparent; color: var(--danger);
+    border: 1px solid var(--danger);
+  }
+  .toolbar .toolbar-btn-text.transport-classic:hover {
+    background: rgba(192, 80, 74, 0.12); color: var(--danger);
+    filter: none;
   }
   /* Stream icon — live/active state. A ring around the mic icon reacts
      to actual mic level via the --mic-peak CSS var (0..1), set from JS
