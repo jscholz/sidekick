@@ -871,6 +871,16 @@ async function handleOpenAICompatChat(req, res) {
 // /responses) straight through without buffering — SSE breaks if buffered.
 const HERMES_UPSTREAM = cfgVal('SIDEKICK_HERMES_URL', 'backend.hermes.url', 'http://127.0.0.1:8642') as string;
 const HERMES_TOKEN = process.env.SIDEKICK_HERMES_TOKEN || '';  // secret — env only
+// Sidekick audio bridge — standalone Python aiortc service for WebRTC
+// signaling + STT + TTS. The proxy forwards /api/rtc/* to the bridge
+// rather than hermes; the bridge talks back to the proxy at
+// /api/hermes/responses for agent dispatch (single sidekick→agent
+// gateway). See ~/code/sidekick/audio-bridge/.
+const AUDIO_BRIDGE_UPSTREAM = cfgVal(
+  'SIDEKICK_AUDIO_BRIDGE_URL',
+  'backend.audio_bridge.url',
+  'http://127.0.0.1:8643',
+) as string;
 
 // ─── Hermes session browser (direct sqlite read of response_store.db) ────────
 // Hermes chains conversation turns server-side via previous_response_id,
@@ -1715,21 +1725,25 @@ function handleHermesProxy(req, res) {
   else upReq.end();
 }
 
-// ── WebRTC voice transport proxy: /api/rtc/* → http://127.0.0.1:8642/v1/rtc/* ─
-// Phase 1 shim for the new full-duplex voice pipeline. Mirrors handleHermesProxy
-// but maps /api/rtc/<path> -> /v1/rtc/<path> upstream. Same auth + error
-// semantics. Body sizes are tiny (an SDP offer is <4KB, ICE candidates <1KB)
-// so no special streaming concerns.
+// ── WebRTC voice transport proxy: /api/rtc/* → audio-bridge /v1/rtc/* ────────
+// The audio bridge (~/code/sidekick/audio-bridge/) is a standalone Python
+// aiortc service on :8643. The bridge owns WebRTC signaling, STT, and
+// TTS; it dispatches utterances back through this proxy at
+// /api/hermes/responses (agent traffic stays funneled through one
+// sidekick→agent gateway).
+//
+// Body sizes are tiny (an SDP offer is <4KB, ICE candidates <1KB) so no
+// special streaming concerns. No auth header forwarding — the bridge is
+// loopback-only and the agent token is irrelevant here.
 function handleRtcProxy(req, res) {
   const suffix = req.url.replace(/^\/api\/rtc/, '') || '/';
   const upstreamPath = `/v1/rtc${suffix}`;
-  const upstream = new URL(upstreamPath, HERMES_UPSTREAM);
+  const upstream = new URL(upstreamPath, AUDIO_BRIDGE_UPSTREAM);
 
   const headers = {};
   for (const h of ['content-type', 'content-length', 'accept']) {
     if (req.headers[h]) headers[h] = req.headers[h];
   }
-  if (HERMES_TOKEN) headers['authorization'] = `Bearer ${HERMES_TOKEN}`;
 
   const lib = upstream.protocol === 'https:' ? https : http;
   const upReq = lib.request({
