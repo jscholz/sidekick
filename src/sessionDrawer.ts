@@ -71,14 +71,19 @@ let filterServerAbort: AbortController | null = null;
 let optimisticActiveId: string | null = null;
 
 /** The session id whose transcript is CURRENTLY RENDERED in the chat pane.
- *  Set by main.ts via setViewed() when replaySessionMessages runs; cleared
- *  when the user starts a new chat (rotation) so the drawer falls back to
- *  the adapter's conversationName. Takes priority over optimisticActiveId
- *  and conversationName — the drawer should always highlight the row the
- *  user is actually reading, regardless of what the adapter thinks its
- *  current send-target is (they can diverge e.g. after a resume where
- *  conversationName updated but then the user tapped another session and
- *  the adapter's token got superseded). */
+ *  Set by main.ts via setViewed() at every transition: replaySessionMessages,
+ *  new-chat (pinned to the freshly-rotated conversationName), and boot
+ *  (pinned to the restored snapshot id). Takes priority over
+ *  optimisticActiveId and conversationName — the drawer should always
+ *  highlight the row the user is actually reading, regardless of what
+ *  the adapter thinks its current send-target is (they can diverge e.g.
+ *  after a resume where conversationName updated but then the user tapped
+ *  another session and the adapter's token got superseded).
+ *
+ *  Also load-bearing for the renderable-event gates in main.ts
+ *  (handleReplyDelta/Final): incoming `conversation` is compared against
+ *  getViewed() to decide whether to render. Must stay populated whenever
+ *  there's a chat on screen, even one that's not yet persisted. */
 let viewedSessionId: string | null = null;
 export function setViewed(id: string | null) { viewedSessionId = id; }
 export function getViewed(): string | null { return viewedSessionId; }

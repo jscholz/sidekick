@@ -882,12 +882,17 @@ async function boot() {
       historyLoaded = false;
       backend.newSession?.();
       chat.addSystemLine('New chat started');
-      // Drop the viewed-session pin — chat no longer shows any persisted
-      // session, so the drawer should fall back to the adapter's fresh
-      // conversationName (not yet in response_store.db → placeholder row).
-      sessionDrawer.setViewed(null);
+      // Pin the viewed-session to the freshly-rotated conversationName.
+      // Invariant: getViewed() mirrors the session on screen. The render
+      // gates in handleReplyDelta/Final compare incoming `conversation`
+      // against getViewed() — leaving it null here would drop the first
+      // reply of a new chat (the conversation id IS truthy on the wire,
+      // so `truthy !== null` would suppress every delta until the user
+      // switched away and back).
+      sessionDrawer.setViewed(backend.getCurrentSessionId?.() || null);
       // Re-render the session list so the old session row loses its
-      // active highlight (new one isn't in response_store.db yet).
+      // active highlight (new one isn't in response_store.db yet —
+      // the optimistic placeholder row covers it).
       sessionDrawer.refresh();
       // On mobile, collapse the sidebar so the user sees the fresh chat —
       // otherwise the expanded drawer hides the transition and the action
