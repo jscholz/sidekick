@@ -390,8 +390,15 @@ function showInfo(s: any) {
     <form method="dialog"><button>Close</button></form>
   `;
   // Tap-outside to dismiss. Esc is built-in on <dialog>.
+  // Use the actual bounding rect — `e.target === dialog` fires for clicks
+  // on the dialog's own padding/whitespace (any spot not on a child),
+  // which closed the modal mid-text-selection if the user dragged the
+  // cursor out then released in empty space inside the dialog.
   dialog.addEventListener('click', (e) => {
-    if (e.target === dialog) dialog.close();
+    const r = dialog.getBoundingClientRect();
+    const inside = e.clientX >= r.left && e.clientX <= r.right
+                && e.clientY >= r.top && e.clientY <= r.bottom;
+    if (!inside) dialog.close();
   });
   dialog.addEventListener('close', () => dialog.remove());
   document.body.appendChild(dialog);
