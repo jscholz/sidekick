@@ -273,6 +273,14 @@ async function populateMicPicker() {
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
 async function boot() {
+  // Hydrate localStorage settings BEFORE any UI wiring reads them. Earlier
+  // settings.load() lived ~300 lines down in boot, after toolbar wiring,
+  // which made btn-transport's sync() read DEFAULTS instead of the stored
+  // value — the toggle would flip in storage but the highlight wouldn't
+  // reflect it. Generally: any boot code that calls settings.get() before
+  // this line was reading uninitialised defaults.
+  settings.load();
+
   // Load config from server (keys, gateway info)
   await loadConfig();
   const cfg = getConfig();
