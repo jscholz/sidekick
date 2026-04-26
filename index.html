@@ -75,13 +75,7 @@
   <button id="sb-toggle-mobile" class="toolbar-btn mobile-only" title="Menu" aria-label="Menu">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
   </button>
-  <!-- Voice transport toggle (dev): WebRTC ↔ Classic. Brutal kill-switch
-       so Jonathan can flip the underlying transport without the settings
-       panel during bike-ride testing. Reloads the page on flip so the
-       new transport's wiring takes effect cleanly. Remove once WebRTC
-       is verified and classic pipeline is gutted. -->
-  <button id="btn-transport" class="toolbar-btn toolbar-btn-text" style="margin-left:auto" title="Voice transport — tap to flip">RTC</button>
-  <button id="btn-mic" class="toolbar-btn" title="Stream — tap to start listening · ⌥M">
+  <button id="btn-mic" class="toolbar-btn" style="margin-left:auto" title="Stream — tap to start listening · ⌥M">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2.5" fill="currentColor"/><path d="M8 8a5.5 5.5 0 0 0 0 8"/><path d="M16 8a5.5 5.5 0 0 1 0 8"/><path d="M5 5a9.5 9.5 0 0 0 0 14"/><path d="M19 5a9.5 9.5 0 0 1 0 14"/></svg>
   </button>
   <button id="btn-speak" class="toolbar-btn" title="TTS reply — tap to mute · ⌥T · Space plays current">

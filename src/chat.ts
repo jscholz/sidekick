@@ -352,24 +352,9 @@ export function addLine(speaker: string, text: string, cls = '', opts: {
   };
   div.appendChild(copyBtn);
 
-  // Agent lines get a play button + a loading/playback bar along the top
-  // of the bubble. Both play + pause glyphs are rendered; CSS swaps
-  // visibility based on .tts-playing / .tts-paused classes so replyPlayer
-  // doesn't have to re-render the SVG on every state transition.
-  if (cls.includes('agent')) {
-    const playGlyph = `<svg class="glyph-play" viewBox="0 0 16 16" fill="none"><polygon points="5 3 13 8 5 13 5 3" fill="currentColor"/></svg>`;
-    const pauseGlyph = `<svg class="glyph-pause" viewBox="0 0 16 16" fill="none"><rect x="4" y="3" width="3" height="10" fill="currentColor"/><rect x="9" y="3" width="3" height="10" fill="currentColor"/></svg>`;
-    const playBtn = document.createElement('button');
-    playBtn.className = 'play-btn';
-    playBtn.title = 'Play this reply';
-    playBtn.innerHTML = playGlyph + pauseGlyph;
-    div.appendChild(playBtn);
-
-    const bar = document.createElement('div');
-    bar.className = 'play-bar';
-    bar.innerHTML = `<div class="play-bar-loaded"></div><div class="play-bar-played"></div>`;
-    div.appendChild(bar);
-  }
+  // Per-turn replay machinery gutted with the classic pipeline: no
+  // bubble-level play button or scrub bar. The WebRTC talk-mode track
+  // is the only audio surface; if you can see the text, you can read it.
 
   // All links in rendered markdown open in new tab
   if (opts.markdown) {

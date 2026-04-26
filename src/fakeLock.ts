@@ -8,8 +8,10 @@
 
 import { log } from './util/log.ts';
 import { getAudioCtx } from './audio/unlock.ts';
-import { getActiveStream } from './pipelines/classic/deepgram.ts';
-import * as tts from './pipelines/classic/tts.ts';
+// Classic pipeline gone: getActiveStream + tts imports removed. Pocket-lock
+// keeps the cover overlay + status text + idle meter; per-turn player UI
+// is hidden via display:none in CSS while the WebRTC call surface owns
+// playback state on the lock screen via the iOS native call UI.
 
 const DIM_MS = 10000;
 const UNLOCK_THRESHOLD = 0.85;
@@ -88,62 +90,8 @@ export function init({ statusFn, onPrev, onNext }: {
 }
 
 function wirePlayerControls() {
-  if (!playerEl) return;
-  // Play/pause toggle based on current TTS state.
-  playerPlayBtn?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const state = tts.getState();
-    if (state === 'playing') { tts.pause(); return; }
-    if (state === 'paused')  { tts.resume(); return; }
-    if (state === 'ended' && tts.replay()) return;
-    // No active reply (idle) or buffers destroyed — replay the most
-    // recent agent reply, re-synthesizing if necessary.
-    onPrevReply();
-  });
-  playerPrevBtn?.addEventListener('click', (e) => { e.stopPropagation(); onPrevReply(); });
-  // Replay current — if a reply is active (playing/paused/ended) restart
-  // it from 0; otherwise fall back to most-recent via onPrevReply.
-  playerReplayBtn?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const state = tts.getState();
-    if (state === 'playing' || state === 'paused') tts.seekTo(0);
-    else if (state === 'ended' && tts.replay()) return;
-    else onPrevReply();
-  });
-  playerNextBtn?.addEventListener('click', (e) => { e.stopPropagation(); onNextReply(); });
-  // Scrub bar tap.
-  playerBar?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const rect = /** @type {HTMLElement} */ (playerBar).getBoundingClientRect();
-    const ratio = (e.clientX - rect.left) / rect.width;
-    tts.seekTo(Math.max(0, Math.min(1, ratio)));
-  });
-
-  // Subscribe to tts events and reflect them in the lock-screen player UI.
-  const show = () => { playerEl?.classList.add('active'); };
-  const setPlaying = (on) => { playerEl?.classList.toggle('playing', on); };
-  const setLoaded = (ratio) => {
-    if (playerLoadedEl) /** @type {HTMLElement} */ (playerLoadedEl).style.width = `${Math.min(100, Math.max(0, ratio * 100))}%`;
-  };
-  const setPlayed = (ratio) => {
-    if (playerPlayedEl) /** @type {HTMLElement} */ (playerPlayedEl).style.width = `${Math.min(100, Math.max(0, ratio * 100))}%`;
-  };
-
-  tts.on('synth-start',    () => { show(); setLoaded(0); setPlayed(0); setPlaying(false); });
-  tts.on('load-progress',  ({ ratio }) => { setLoaded(ratio); });
-  tts.on('duration-known', () => { setLoaded(1); });
-  tts.on('play-start',     () => { setPlaying(true); });
-  tts.on('progress',       ({ position, duration, estimatedTotal }) => {
-    const ref = duration || estimatedTotal || 1;
-    setPlayed(position / ref);
-  });
-  tts.on('seek',           ({ position, duration }) => {
-    if (duration) setPlayed(position / duration);
-  });
-  tts.on('paused',         () => { setPlaying(false); });
-  tts.on('resumed',        () => { setPlaying(true); });
-  tts.on('ended',          () => { setPlaying(false); setPlayed(1); });
-  tts.on('stopped',        () => { setPlaying(false); });
+  // Per-turn replay gutted: no buttons to wire. Lock-screen player UI
+  // stays hidden via .fake-lock-player without the .active class.
 }
 
 export function isActive() { return active; }
@@ -270,23 +218,12 @@ function tickStatus() {
 // ── Mic meter ────────────────────────────────────────────────────────
 function startMeter() {
   if (analyser || !canvasEl) return;
-  const ctx = getAudioCtx();
-  const stream = getActiveStream();
-  if (!ctx || !stream) {
-    // No live mic — draw a flat idle line anyway so the UI isn't blank.
-    drawIdle();
-    return;
-  }
-  try {
-    audioSourceNode = ctx.createMediaStreamSource(stream);
-    analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
-    audioSourceNode.connect(analyser);
-    drawMeter();
-  } catch (e) {
-    log('fake-lock meter setup failed:', e.message);
-    drawIdle();
-  }
+  // With the classic mic stream gone, the lock-screen meter no longer has
+  // a direct handle to the active mic — WebRTC owns its capture inside
+  // connection.ts. Draw an idle waveform so the UI isn't blank; live
+  // metering during a call can be added later via a connection-level
+  // accessor if needed.
+  drawIdle();
 }
 
 function stopMeter() {

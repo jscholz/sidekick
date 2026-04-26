@@ -15,13 +15,10 @@ import * as backend from './backend.ts';
 import * as sessionDrawer from './sessionDrawer.ts';
 import * as cmdkPalette from './cmdkPalette.ts';
 import * as gateway from './gateway.ts';
-import * as tts from './pipelines/classic/tts.ts';
-import { unlock, getAudioCtx, reset as resetAudio } from './audio/unlock.ts';
+import { unlock, getAudioCtx } from './audio/unlock.ts';
 import * as audioSession from './audio/session.ts';
 import * as capture from './audio/capture.ts';
 import * as fakeLock from './fakeLock.ts';
-import * as deepgram from './pipelines/classic/deepgram.ts';
-import * as sttBackfill from './pipelines/classic/sttBackfill.ts';
 import { setMicPeakListener } from './audio/micMeter.ts';
 import { attachCard } from './canvas/attach.ts';
 import { registerCard } from './canvas/registry.ts';
@@ -36,9 +33,6 @@ import * as memoCard from './memoCard.ts';
 import * as attachments from './attachments.ts';
 import * as draft from './draft.ts';
 import * as composer from './composer.ts';
-import * as voice from './pipelines/classic/voice.ts';
-import * as replyPlayer from './pipelines/classic/replyPlayer.ts';
-import * as replyCache from './pipelines/classic/replyCache.ts';
 import * as webrtcControls from './pipelines/webrtc/controls.ts';
 import * as bgTrace from './bgTrace.ts';
 import { stripReasoningLeak } from './backends/hermes.ts';
@@ -56,155 +50,6 @@ import loadingCard from './canvas/cards/loading.ts';
 /** Matches NO_REPLY and variants the agent sometimes emits when deciding not to reply. */
 const NO_REPLY_RE = /^\s*NO[-_]?(?:REPL(?:Y)?)?\.?\s*$/i;
 
-/** Track pointer — which agent reply BT next/prev navigates relative to.
- *  Distinct from `tts.getReplyId()` which is "what's currently playing":
- *  the pointer persists when nothing is playing (e.g., user tapped pause
- *  or hasn't started yet), so BT prev/next has a deterministic anchor.
- *  Defaults to the latest agent reply on session load + advances every
- *  time a new agent reply lands. setTrackPointer() also updates the DOM
- *  class so the bubble-edge indicator follows. */
-let trackPointerId: string | null = null;
-function setTrackPointer(id: string | null) {
-  trackPointerId = id;
-  const el = document.getElementById('transcript');
-  if (!el) return;
-  el.querySelectorAll('.line.agent.track-pointer').forEach(b => b.classList.remove('track-pointer'));
-  if (!id) return;
-  const target = el.querySelector(`.line.agent[data-reply-id="${CSS.escape(id)}"]`);
-  if (target) {
-    target.classList.add('track-pointer');
-    // Cached / not-cached → primary vs muted edge color.
-    if (replyCache.has(id)) target.classList.add('track-cached');
-    else target.classList.remove('track-cached');
-  }
-}
-function getTrackPointer(): string | null {
-  // Lazy default: if no explicit pointer, fall back to whatever's playing,
-  // else to the latest agent reply in DOM order. Lets a fresh session
-  // have a sane "current track" without an explicit init step.
-  if (trackPointerId) return trackPointerId;
-  const playing = tts.getReplyId();
-  if (playing) return playing;
-  const el = document.getElementById('transcript');
-  if (!el) return null;
-  const bubbles = el.querySelectorAll('.line.agent[data-reply-id]:not(.streaming)');
-  if (!bubbles.length) return null;
-  return (bubbles[bubbles.length - 1] as HTMLElement).dataset.replyId || null;
-}
-
-// When TTS chunks land in replyCache, flip the pointer's edge color from
-// gray (uncached) → primary (cached). Subscribe once at module load.
-replyCache.on('cached', ({ replyId }: { replyId: string }) => {
-  if (trackPointerId === replyId) {
-    const el = document.querySelector(`.line.agent[data-reply-id="${CSS.escape(replyId)}"]`);
-    if (el) el.classList.add('track-cached');
-  }
-});
-replyCache.on('evicted', ({ replyId }: { replyId: string }) => {
-  if (trackPointerId === replyId) {
-    const el = document.querySelector(`.line.agent[data-reply-id="${CSS.escape(replyId)}"]`);
-    if (el) el.classList.remove('track-cached');
-  }
-});
-
-/** Find the agent reply bubble AFTER the one identified by `currentReplyId`
- *  in DOM order. Skips the .streaming bubble (mid-flight, not a "track").
- *  Returns { replyId, text } or null. */
-function findAgentReplyAfter(currentReplyId) {
-  const el = document.getElementById('transcript');
-  if (!el) return null;
-  const bubbles = Array.from(
-    el.querySelectorAll('.line.agent[data-reply-id]:not(.streaming)')
-  ) as HTMLElement[];
-  if (!currentReplyId) return null;
-  const idx = bubbles.findIndex(b => b.dataset.replyId === currentReplyId);
-  if (idx < 0 || idx === bubbles.length - 1) return null;
-  const next = bubbles[idx + 1];
-  return { replyId: next.dataset.replyId, text: next.dataset.text || '' };
-}
-
-/** Find the agent reply bubble BEFORE the one identified by `currentReplyId`,
- *  or the LAST one if no current reply (for "play previous" from idle). */
-function findAgentReplyBefore(currentReplyId) {
-  const el = document.getElementById('transcript');
-  if (!el) return null;
-  const bubbles = Array.from(
-    el.querySelectorAll('.line.agent[data-reply-id]:not(.streaming)')
-  ) as HTMLElement[];
-  if (bubbles.length === 0) return null;
-  if (!currentReplyId) {
-    const last = bubbles[bubbles.length - 1];
-    return { replyId: last.dataset.replyId, text: last.dataset.text || '' };
-  }
-  const idx = bubbles.findIndex(b => b.dataset.replyId === currentReplyId);
-  if (idx <= 0) return null;
-  const prev = bubbles[idx - 1];
-  return { replyId: prev.dataset.replyId, text: prev.dataset.text || '' };
-}
-
-/** Skip to the previous or next agent reply relative to the currently-active
- *  TTS reply. Unified behavior across all skip surfaces (pocket-lock
- *  prev/next buttons, Apple Watch / iOS Control Center / BT headset track
- *  buttons via Media Session API).
- *
- *  Cached replies play instantly via playCached + resume from the position
- *  they were at when the user skipped away. Uncached replies re-synthesize
- *  from scratch (no way to resume into audio that doesn't exist yet).
- *
- *  On the LATEST reply, "next" has no successor — treat it as barge-in
- *  (interrupt the agent, let the user speak).
- *
- *  @param {'prev' | 'next'} direction
- */
-function skipTo(direction) {
-  // Pointer drives BT prev/next, NOT the currently-playing reply id.
-  // Persistent across pause/idle so the user has a deterministic anchor
-  // for "skip from here" even when nothing is playing right now.
-  const anchor = getTrackPointer();
-  const target = direction === 'prev'
-    ? findAgentReplyBefore(anchor)
-    : findAgentReplyAfter(anchor);
-  if (!target) {
-    // Past-latest "next": pointer stays put, seek the current TTS to its
-    // end so playback finishes naturally rather than barging in. (Pause
-    // / barge-in is the single-tap behavior; skip-next-past-end is "let
-    // this finish, I'm done"). If nothing is playing at all, no-op.
-    if (direction === 'next') {
-      if (tts.isSpeaking()) {
-        try { tts.seekTo(1.0); } catch {}
-      }
-    }
-    return;
-  }
-  const reason = direction === 'prev' ? 'previous-track' : 'next-track';
-  tts.stop(reason);  // saves position of outgoing reply into replyCache
-  setTrackPointer(target.replyId);
-  if (replyCache.has(target.replyId)) {
-    if (tts.playCached(target.replyId, { resume: true })) return;
-  }
-  // Uncached: re-synthesize. tts.speak takes care of marking the cache
-  // entry once chunks arrive; a separate hook below toggles .track-cached
-  // when replyCache fills so the edge color flips from gray to primary.
-  tts.speak(target.text, { replyId: target.replyId });
-}
-
-/** Handle voice-nav keywords fired from voice.ts. Same behavior as the
- *  pocket-lock prev/next buttons, BT headset media keys, and the iOS
- *  Control Center's track controls — all funnel through skipTo().
- *  'pause' toggles the current reply's playback. */
-function handleNavAction(action: 'prev' | 'next' | 'pause') {
-  if (action === 'pause') {
-    if (tts.isSpeaking()) tts.pause();
-    else tts.resume();
-    return;
-  }
-  skipTo(action);
-}
-window.addEventListener('sidekick:nav', (e) => {
-  const detail = (e as CustomEvent).detail;
-  if (detail && typeof detail.action === 'string') handleNavAction(detail.action);
-});
-
 /** Re-render memo cards from IndexedDB into the transcript. Idempotent — render skips existing. */
 async function restoreMemoCards() {
   try {
@@ -219,18 +64,12 @@ async function restoreMemoCards() {
   } catch (e) { log('memo restore failed:', e.message); }
 }
 
-let listening = false;
-let mediaStream = null;
 let memoActive = false;  // true while voice-memo recording bar is shown
 
 // releaseCaptureIfActive is defined as a closure inside boot() so it can
-// call stopStreaming() directly (which is itself a closure there). That
-// avoids the synthetic-btn-mic-click coordination the previous version
-// used. See `function releaseCaptureIfActive` inside boot below.
+// close the WebRTC peer connection cleanly when slash-commands or other
+// reset paths fire.
 let releaseCaptureIfActive: () => void = () => {};
-/** Reply ID of an in-flight streaming TTS session (created on first chat.delta,
- *  finalized on chat.final or cleared on NO_REPLY / image-only). null when idle. */
-let streamingTtsReplyId = null;
 
 /** Toggle the composer send button between idle (grey) and active (green).
  *  Sendable = memo recording in progress, typed text, draft content, or
@@ -332,88 +171,31 @@ async function boot() {
   }
 
   // Background audio session — Media Session (lock-screen + BT headset tap)
-  // + silent keepalive. BT taps map to play/pause handlers so a Pixel Buds
-  // tap stops TTS or toggles listening without needing to touch the phone.
+  // + silent keepalive. BT taps map to play/pause handlers; in WebRTC mode
+  // these toggle the active call (mic stream / talk) on or off.
   audioSession.init({
     onPlay: () => {
-      // BT play priority:
-      // 1. If TTS paused → resume from where we paused.
-      // 2. Else if TTS already speaking → no-op (don't restart).
-      // 3. Else play whatever the track pointer is on (generate audio
-      //    on demand if the bubble isn't cached). User-confirmed
-      //    behavior: "start talking now, wherever the pointer is" —
-      //    even if nothing was playing before.
-      // 4. Else (no reply to play, no pointer) → fall through to mic
-      //    listening (existing keep-doing-what-you-were-doing default).
-      if (tts.getState() === 'paused') { tts.resume(); return; }
-      if (tts.isSpeaking()) return;
-      const ptr = getTrackPointer();
-      if (ptr) {
-        const bubble = document.querySelector(`.line.agent[data-reply-id="${CSS.escape(ptr)}"]`) as HTMLElement | null;
-        const text = bubble?.dataset.text || '';
-        if (text) {
-          if (replyCache.has(ptr)) {
-            if (tts.playCached(ptr, { resume: true })) return;
-          }
-          tts.speak(text, { replyId: ptr });
-          return;
-        }
-      }
-      if (listening) return;
+      // BT play: open or resume the most-recent WebRTC mode. If a call is
+      // already open, no-op. Otherwise default to stream mode (mic in).
+      if (webrtcControls.isOpen()) return;
       const btnMicEl = document.getElementById('btn-mic');
       if (btnMicEl) btnMicEl.click();
     },
     onPause: () => {
-      // Single-tap BT / media-session pause. If TTS is playing, PAUSE
-      // (not stop — keeps position so the user can resume). If TTS is
-      // paused, resume. Otherwise, toggle listening.
-      const state = tts.getState();
-      if (state === 'playing') { tts.pause(); return; }
-      if (state === 'paused')  { tts.resume(); return; }
-      if (listening) {
-        const btnMicEl = document.getElementById('btn-mic');
-        if (btnMicEl) btnMicEl.click();
+      // BT pause: close the active call.
+      if (webrtcControls.isOpen()) {
+        void webrtcControls.closeIfOpen();
       }
     },
     onStop: () => {
-      // Explicit stop (distinct from pause) — user wants playback to
-      // fully end and the mic released.
-      if (tts.isSpeaking()) tts.stop('bt-tap');
-      if (listening) {
-        const btnMicEl = document.getElementById('btn-mic');
-        if (btnMicEl) btnMicEl.click();
+      // BT explicit stop: same as pause for now — close the call.
+      if (webrtcControls.isOpen()) {
+        void webrtcControls.closeIfOpen();
       }
     },
-    // BT double-tap → nexttrack. On the latest reply, there IS no next,
-    // so semantically "skip ahead" = interrupt the agent = barge-in.
-    // On older replies, advance to the next agent reply (if any) and
-    // play it — cached if available, re-synth otherwise.
-    //
-    // resume:true so that next→prev→next comes back to where the user
-    // left off in each track (position saved in replyCache on stop).
-    onNextTrack: () => skipTo('next'),
-    onPreviousTrack: () => skipTo('prev'),
-    onSeekTo: (time) => {
-      const duration = tts.getDuration();
-      if (!duration || !Number.isFinite(time)) return;
-      tts.seekTo(Math.max(0, Math.min(1, time / duration)));
-    },
-    // When the tab returns to foreground, webkitSpeechRecognition may be
-    // in an error state ("not-allowed" is common after being backgrounded).
-    // Bounce the mic button to re-initialize cleanly — same pattern used
-    // for engine-toggle recovery.
     onForeground: () => {
-      if (!listening) return;
-      if (settings.get().streamingEngine !== 'local') return;
-      // Defer slightly so visibility settles.
-      setTimeout(() => {
-        if (!listening) return;
-        const btnMicEl = document.getElementById('btn-mic') as HTMLButtonElement | null;
-        if (!btnMicEl) return;
-        log('foreground: bouncing mic to recover SR');
-        btnMicEl.click();
-        setTimeout(() => { if (!listening) btnMicEl.click(); }, 500);
-      }, 300);
+      // No-op: WebRTC peer connection auto-recovers via ICE; classic-mode's
+      // SR-recovery hop isn't needed.
     },
   });
   if (!audioSession.isStandalone()) {
@@ -426,50 +208,23 @@ async function boot() {
   // Media Session handlers below.
   fakeLock.init({
     statusFn: () => ({
-      listening,
-      speaking: tts.isSpeaking(),
+      listening: webrtcControls.isOpen() && webrtcControls.currentMode() === 'stream',
+      speaking: webrtcControls.isOpen() && webrtcControls.currentMode() === 'talk',
       modelLabel: (() => {
         const e = settings.getCurrentModelEntry?.();
         if (!e) return '';
         return (e.name || e.id).replace(/^openrouter\//, '').split('/').slice(-1)[0];
       })(),
     }),
-    // Pocket-lock prev/next share the same skip logic as Media Session
-    // (Apple Watch, iOS Control Center, BT headset buttons). One source of
-    // truth; consistent behavior across all control surfaces.
-    onPrev: () => skipTo('prev'),
-    onNext: () => skipTo('next'),
+    // Pocket-lock prev/next: no-ops with the per-turn replay machinery
+    // gutted. Wired to () => {} so fakeLock.ts's button handlers don't
+    // crash on undefined callbacks; CSS hides the buttons in the
+    // post-replay world but the call sites still fire.
+    onPrev: () => {},
+    onNext: () => {},
   });
   const btnLock = document.getElementById('btn-lock');
   if (btnLock) btnLock.onclick = () => fakeLock.show();
-
-  // Voice transport toggle (dev kill-switch). Label reflects the current
-  // setting; click flips it and reloads so the new transport's wiring
-  // applies cleanly. Removed when classic pipeline is gutted.
-  const btnTransport = document.getElementById('btn-transport');
-  if (btnTransport) {
-    const sync = () => {
-      const t = settings.get().voiceTransport;
-      btnTransport.textContent = t === 'webrtc' ? 'RTC' : 'Classic';
-      btnTransport.classList.toggle('transport-classic', t === 'classic');
-    };
-    sync();
-    // addEventListener (not onclick=) so it can't be silently overwritten by
-    // any later wiring. console.log explicitly so it shows up in DevTools
-    // even if the floating debug panel happens to be filtered/hidden.
-    btnTransport.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const cur = settings.get().voiceTransport;
-      const next = cur === 'webrtc' ? 'classic' : 'webrtc';
-      settings.set('voiceTransport', next);
-      console.log('[transport] flipped', cur, '→', next, '(reloading)');
-      log('voiceTransport flipped:', cur, '→', next, '(reloading)');
-      // Tiny delay so the log() write to #debug actually flushes before the
-      // reload destroys the page; otherwise Jonathan can't see it post-reload.
-      setTimeout(() => location.reload(), 50);
-    }, true);
-  }
 
   // Sidebar — always visible (48px rail), expands on hamburger. Holds
   // new-chat, sessions list (if backend supports it), and info/settings
@@ -537,8 +292,6 @@ async function boot() {
       diag('reset history: viewed session disappeared from server');
       chat.clear();
       draft.dismiss();
-      voice.cancelPendingFlush();
-      replyCache.clear();
       voiceMemos.clearAll().catch(() => {});
       historyLoaded = false;
       backend.newSession?.();
@@ -573,22 +326,6 @@ async function boot() {
     });
   }
 
-  // Tap the status text to toggle streaming engine (only while listening)
-  const statusTextEl = document.getElementById('status-text');
-  if (statusTextEl) {
-    statusTextEl.onclick = () => {
-      if (!listening) return;
-      const next = settings.get().streamingEngine === 'server' ? 'local' : 'server';
-      settings.set('streamingEngine', next);
-      // Keep Settings dropdown in sync
-      const select = document.getElementById('set-streaming-engine') as HTMLSelectElement | null;
-      if (select) select.value = next;
-      // Restart streaming with the new engine (same pattern as setting change)
-      const btnMic = document.getElementById('btn-mic') as HTMLButtonElement | null;
-      if (btnMic) { btnMic.click(); setTimeout(() => btnMic.click(), 800); }
-    };
-  }
-
   // Settings
   settings.load();
   settings.applyVisuals();
@@ -596,27 +333,19 @@ async function boot() {
     onThemeChange: () => theme.applyTheme(settings.get().theme),
     onSessionsFilterChange: () => sessionDrawer.refreshAfterFilterChange(),
     onVoiceChange: () => {
-      // Drop cached audio that was synthesized in the old voice so future
-      // replays re-synthesize in the voice the user just picked.
-      replyCache.invalidateOtherVoices(settings.get().voice);
-      if (settings.get().tts) tts.speak('Voice changed.');
+      // Voice change: takes effect on the next WebRTC talk-mode call
+      // (server-side TTS provider reads its config). No client-side cache
+      // to invalidate now that per-turn replay is gone.
     },
     onMicChange: () => {
-      // If currently listening, restart with the new device/engine.
-      // Longer delay (800ms) gives iOS time to actually release the mic
-      // before re-acquiring — race here produces a stream that looks live
-      // but won't route audio to createMediaStreamSource.
-      if (listening) {
-        const btnMic = document.getElementById('btn-mic') as HTMLButtonElement | null;
-        if (btnMic) { btnMic.click(); setTimeout(() => btnMic.click(), 800); }
-      }
+      // If a WebRTC call is open, close it so the new device picks up on
+      // the next open. (Live device-swap on a peer connection is finicky;
+      // simpler to bounce.)
+      if (webrtcControls.isOpen()) void webrtcControls.closeIfOpen();
     },
     onStreamingEngineChange: () => {
-      // If currently listening, restart with the new STT engine
-      if (listening) {
-        const btnMic = document.getElementById('btn-mic');
-        if (btnMic) { btnMic.click(); setTimeout(() => btnMic.click(), 300); }
-      }
+      // STT engine selection now lives entirely server-side under the
+      // hermes voice-config. Client-side flip is a no-op for WebRTC.
     },
     onWakeLockChange: () => {
       // Decoupled from `listening`: the UI checkbox is labelled
@@ -628,7 +357,7 @@ async function boot() {
       if (settings.get().wakeLock) wakeLock.acquire('setting');
       else wakeLock.release('setting');
     },
-    onAutoSendChange: () => syncSpeakingButton(),
+    onAutoSendChange: () => {},
     onModelChange: (ref: string, catalog: any[], opts: { silent?: boolean } = {}) => {
       const entry = catalog.find((e: any) => e.id === ref);
       const label = entry ? (entry.name || entry.id).replace(/^openrouter\//, '') : ref;
@@ -648,32 +377,6 @@ async function boot() {
   wakeLock.watchVisibility();
   if (settings.get().wakeLock) wakeLock.acquire('setting');
 
-  // Mic-stream resuscitation on foreground. When iOS backgrounds the
-  // PWA, the MediaStream may be invalidated even though `listening`
-  // stays true; audioCtx.resume() alone won't bring the mic back. On
-  // visibility→visible or focus we check whether the mic track is still
-  // live — if it ended, simulate a mic-toggle double-click to cleanly
-  // tear down the dead stream and re-request getUserMedia.
-  const resuscitateMic = () => {
-    if (document.visibilityState !== 'visible') return;
-    if (!listening || !mediaStream) return;
-    const track = mediaStream.getAudioTracks()[0];
-    if (!track || track.readyState === 'ended') {
-      diag('mic: foreground resuscitation — track dead, restarting');
-      const btnMic = document.getElementById('btn-mic') as HTMLButtonElement | null;
-      if (btnMic) {
-        // click once to clear internal state, again to re-start. Small
-        // delay so the stop path finishes cleanup before the start path
-        // requests a new MediaStream.
-        btnMic.click();
-        setTimeout(() => btnMic.click(), 300);
-      }
-    }
-  };
-  document.addEventListener('visibilitychange', resuscitateMic);
-  window.addEventListener('focus', resuscitateMic);
-  document.addEventListener('resume', resuscitateMic);
-
   // Chat
   const transcriptEl = document.getElementById('transcript');
   const chatRestored = await chat.init(transcriptEl);
@@ -685,52 +388,9 @@ async function boot() {
 
   // Attachments + draft — composer wiring that isn't tied to a specific button
   attachments.init({ onChange: updateSendButtonState });
-  replyPlayer.init({ transcriptEl });
 
-  // STT backfill — subscribe to DG WS state events and translate into
-  // gap-start / gap-end markers in the ring buffer. On mic stop,
-  // voice.flushBackfill() POSTs each gap to /transcribe. First dg-open
-  // fires when there's no active gap (just bootstraps the connection);
-  // sttBackfill.markGapEnd is a no-op in that case.
-  deepgram.on('dg-close', ({ ctxTime }) => sttBackfill.markGapStart(ctxTime));
-  deepgram.on('dg-wedge', ({ ctxTime }) => sttBackfill.markGapStart(ctxTime));
-  deepgram.on('dg-open',  ({ ctxTime }) => {
-    sttBackfill.markGapEnd(ctxTime);
-    // Proactive drain: any gaps that got deferred on a prior failed
-    // /transcribe attempt now have a fresh chance over the healthy
-    // connection. Without this, deferred gaps wait for mic stop
-    // before surfacing — a rider on a flaky network loses the middle
-    // of their utterance until they pause. Splice any recovered
-    // text straight into the draft at the chronologically correct
-    // position so it reads as continuous dictation.
-    sttBackfill.tryDrainDeferred().then((gaps) => {
-      for (const g of gaps) {
-        if (g.text && g.text.trim()) draft.appendBackfill(g.text.trim(), g.ctxStart);
-      }
-    }).catch(() => { /* silent — drain is best-effort */ });
-  });
-
-  // Feed TTS state to Media Session so iOS Control Center / Android
-  // media notification / Apple Watch Now Playing know we're actually
-  // playing audio. Without a 'playing' state, Watch taps fire our
-  // action handlers but iOS doesn't route the playback gesture to our
-  // page — user sees "playing" on Watch but no audio comes out of phone.
-  tts.on('play-start', () => { audioSession.setPlaybackState('playing'); });
-  tts.on('resumed',    () => { audioSession.setPlaybackState('playing'); });
-  tts.on('paused',     () => { audioSession.setPlaybackState('paused'); });
-  tts.on('ended',      () => { audioSession.setPlaybackState('none'); drainPendingReply(); });
-  tts.on('stopped',    () => { audioSession.setPlaybackState('none'); drainPendingReply(); });
-  tts.on('progress', ({ position, duration }) => {
-    audioSession.setPositionState(duration || 0, position || 0, 1.0);
-  });
-  tts.on('duration-known', ({ duration }) => {
-    const pos = tts.getPosition();
-    audioSession.setPositionState(duration, pos?.position || 0, 1.0);
-  });
-
-  // Global hotkeys. Space toggles play/pause of current TTS (skipped in
-  // text inputs). Alt+M toggles the mic stream. Esc closes an open
-  // settings or info panel.
+  // Global hotkeys. Alt+M toggles the WebRTC stream call; Alt+T toggles
+  // talk mode. Esc closes an open settings or info panel.
   document.addEventListener('keydown', (e) => {
     const t = e.target as HTMLElement;
     const tag = t?.tagName;
@@ -778,25 +438,16 @@ async function boot() {
       return;
     }
 
-    // Alt+T: toggle TTS ("Talk" — makes the agent speak replies).
+    // Alt+T: toggle Talk-mode WebRTC call (full-duplex with TTS).
     if (e.altKey && e.code === 'KeyT') {
       e.preventDefault();
       document.getElementById('btn-speak')?.click();
       return;
     }
-
-    // Space: play/pause the current TTS (only when nothing editable is focused).
-    if (e.key === ' ' || e.code === 'Space') {
-      if (inText) return;
-      const state = tts.getState();
-      if (state === 'playing') { e.preventDefault(); tts.pause(); }
-      else if (state === 'paused') { e.preventDefault(); tts.resume(); }
-    }
   });
   draft.init({
     transcriptEl,
     onChange: updateSendButtonState,
-    onFocus: voice.cancelPendingFlush,
     onFlush: (text) => {
       // User bubble FIRST, then send. Send fires backend.onSend → the
       // "thinking…" agent bubble, which appends at the end of the
@@ -823,18 +474,11 @@ async function boot() {
   // Restore memo cards from IndexedDB (only pending now)
   await restoreMemoCards();
 
-  // TTS
+  // The legacy <audio id="player"> element survives in the DOM as a
+  // generic media-source anchor for the audio session; classic-mode TTS
+  // playback was wired into it but is gone now. WebRTC creates its own
+  // <audio> element on pc.ontrack inside connection.ts.
   const player = document.getElementById('player') as HTMLAudioElement;
-  tts.init(player);
-  tts.setListeningGetter(() => listening);
-  tts.setOnStop((reason) => {
-    if (reason === 'barge-in') {
-      // Short cooldown — catches the immediate "stop" / "ok" word uttered
-      // as the user interrupted, nothing more. Previous 2s window was
-      // swallowing real content during rapid speech right after a barge-in.
-      voice.setBargeInCooldown(300);
-    }
-  });
 
   // Register card kinds — inline attachments on agent bubbles.
   [imageCard, youtubeCard, spotifyCard, linksCard, markdownCard, loadingCard]
@@ -954,93 +598,31 @@ async function boot() {
     if (rowModel) rowModel.style.display = 'none';
   }
 
-  // ── Streaming lifecycle ────────────────────────────────────────────────
+  // ── Mic + Speak buttons (WebRTC) ──────────────────────────────────────
+  //   btn-mic   = stream-mode call (mic in, transcripts via data channel)
+  //   btn-speak = talk-mode call (mic in + TTS out)
   //
-  // startStreaming / stopStreaming are the full lifecycle for the live-mic
-  // mode (AudioWorklet → Deepgram WS). Extracted as named functions so other
-  // paths (releaseCaptureIfActive, btn-refresh, memo-auto-resume) can
-  // invoke them directly instead of synthetic button clicks.
+  // webrtcControls.init wires the click handlers; the connection module
+  // owns the lifecycle. No transport toggle, no classic fallback.
+  const btnMic = document.getElementById('btn-mic');
+  const btnSpeak = document.getElementById('btn-speak');
 
-  async function startStreaming() {
-    if (listening) return;
-    unlock(player);
-    // Register the page as a BT media source while we're inside this user
-    // gesture — iOS gates play() on the hidden audio-mediasink element
-    // behind a gesture, and only opts the page in to BT play/pause/skip
-    // routing once that play() succeeds.
-    audioSession.primeMediaSink();
+  webrtcControls.init({
+    getSessionId: () => sessionDrawer.getViewed() || backend.getCurrentSessionId?.() || null,
+    onStatus: (msg, kind) => status.setStatus(msg, kind ?? null),
+  });
 
-    // Kick off resume SYNCHRONOUSLY inside the user gesture — iOS loses
-    // the "user activated" state after any await, so a resume() called
-    // after getUserMedia silently fails to actually wake the context.
-    const ctx = getAudioCtx();
-    const resumePromise = (ctx && ctx.state !== 'running') ? ctx.resume() : null;
+  // Populate the mic picker once on boot. It needs prior getUserMedia
+  // permission for labels to surface — until permission is granted, the
+  // dropdown shows generic "Mic <id>" entries. Subsequent WebRTC calls
+  // will get full labels on the next render.
+  populateMicPicker().catch(() => {});
 
-    // Prime speechSynthesis inside this gesture so later async-context
-    // speak() calls aren't blocked by iOS Safari's gesture rule.
-    tts.primeLocalSynthesis?.();
-
-    try {
-      const micDevice = settings.get().micDevice;
-      const audioConstraints: MediaTrackConstraints = {
-        echoCancellation: true, noiseSuppression: true, autoGainControl: true,
-      };
-      if (micDevice) audioConstraints.deviceId = { exact: micDevice };
-      log('requesting mic…', micDevice ? `device=${micDevice}` : '(default)',
-          'ctx.state=', ctx?.state);
-      mediaStream = await capture.acquire('streaming', audioConstraints);
-      const track = mediaStream.getAudioTracks()[0];
-      log('mic granted, track:', track?.label);
-      playFeedback('start');
-      populateMicPicker();
-      if (resumePromise) {
-        try { await resumePromise; log('ctx resumed, state=', ctx?.state); } catch {}
-      }
-      listening = true;
-      const btnMicEl = document.getElementById('btn-mic');
-      if (btnMicEl) btnMicEl.classList.add('active');
-      audioSession.setListening(true);
-      // Wake lock is app-lifecycle scoped now (acquired at boot if setting
-      // is on, re-acquired on visibility change via wakeLock.watchVisibility).
-      // Streaming no longer acquires/releases — that created a hole where
-      // stopStreaming would drop the lock even if the user wanted it held.
-      draft.ensureBlock();
-      sttBackfill.init({ audioCtx: ctx });
-      deepgram.start(mediaStream, voice.handleResult);
-    } catch (err) {
-      log('mic error:', err.message);
-      status.setStatus(`Mic error: ${err.message}`);
-    }
-  }
-
-  function stopStreaming() {
-    if (!listening) return;
-    listening = false;
-    const btnMicEl = document.getElementById('btn-mic');
-    if (btnMicEl) btnMicEl.classList.remove('active');
-    deepgram.stop();
-    capture.release('streaming');
-    mediaStream = null;
-    voice.cancelPendingFlush();
-    // Flush any recoverable audio from DG-gaps, THEN reset the ring.
-    // Resetting here also clears the 'Ns buffered' status indicator —
-    // previously the buffer stayed populated across reconnects and the
-    // header kept showing a stale "6s buffered" readout.
-    voice.flushBackfill().finally(() => sttBackfill.reset());
-    if (!draft.hasContent()) draft.dismiss();
-    // Wake lock intentionally NOT released here — see startStreaming comment;
-    // policy is app-lifecycle scoped via settings, not streaming-scoped.
-    audioSession.setListening(false);
-    status.setStatus(backend.isConnected() ? 'Stopped (gateway connected)' : 'Stopped');
-  }
-
-  // Release-all coordinator. Defined here as a closure over startStreaming /
-  // stopStreaming / memo state so it calls them directly instead of firing
-  // synthetic DOM clicks. Module-scope `releaseCaptureIfActive` (declared
-  // at the top of this file) gets reassigned to this closure so external
-  // call sites keep working.
+  // Release-all coordinator. Closes the active WebRTC call + tears down
+  // any in-progress voice memo. External call sites assign through this
+  // module-level handle so the closure references the right state.
   releaseCaptureIfActive = () => {
-    if (listening) stopStreaming();
+    if (webrtcControls.isOpen()) void webrtcControls.closeIfOpen();
     if (memoActive) {
       memo.cancel();
       const bar = document.querySelector('.memo-bar');
@@ -1051,77 +633,17 @@ async function boot() {
       if (composerInputEl) composerInputEl.style.display = '';
       if (btnMemoEl) btnMemoEl.style.display = '';
     }
-    // Belt-and-suspenders if some future code path leaves the stream held
-    // without going through a module teardown.
     if (capture.hasActive()) capture.release();
   };
 
-  // ── Mic + Speak buttons ────────────────────────────────────────────────
-  // Two transports share these two buttons:
-  //   classic — btn-mic toggles WS+PCM streaming;
-  //             btn-speak toggles TTS-on/off (settings.tts).
-  //   webrtc — btn-mic = stream-mode call (mic in, transcripts via SSE);
-  //             btn-speak = talk-mode call (mic in + TTS out).
-  //
-  // The transport choice is `settings.get().voiceTransport` (default
-  // 'webrtc' on this branch). Settings change is hot — re-resolve the
-  // active handler on every click so toggling in settings while either
-  // transport is alive cleanly hands off.
-  const btnMic = document.getElementById('btn-mic');
-  const btnSpeak = document.getElementById('btn-speak');
-
-  // WebRTC controls — stateless init; the click handlers it installs
-  // override the classic ones below when voiceTransport === 'webrtc'.
-  webrtcControls.init({
-    getSessionId: () => sessionDrawer.getViewed() || backend.getCurrentSessionId?.() || null,
-    onStatus: (msg, kind) => status.setStatus(msg, kind ?? null),
-  });
-
-  // Re-bind the click handlers each time voiceTransport changes (or once
-  // at boot). Closures reference the ambient `listening` / startStreaming
-  // / stopStreaming declared above.
-  function rebindVoiceButtons() {
-    const transport = settings.get().voiceTransport;
-    if (transport === 'webrtc') {
-      // webrtcControls.init already installed click handlers on both
-      // buttons. Nothing further to do — but make sure classic state is
-      // released if we just flipped.
-      if (listening) stopStreaming();
-      return;
-    }
-    // Classic: restore the legacy handlers.
-    if (btnMic) btnMic.onclick = () => {
-      if (listening) stopStreaming();
-      else startStreaming();
-    };
-    if (btnSpeak) btnSpeak.onclick = () => {
-      const on = !settings.get().tts;
-      settings.set('tts', on);
-      syncSpeakingButton();
-      if (!on) {
-        voice.cancelPendingFlush();
-        tts.stop('button');
-      } else {
-        audioSession.primeMediaSink();
-      }
-    };
-    // Close any open WebRTC call when leaving webrtc transport.
-    void webrtcControls.closeIfOpen();
-  }
-
+  // Speak button visual state — reflects whether talk-mode is currently
+  // active. Driven off webrtcControls; controls.ts already toggles
+  // .active / .connecting on the button itself, so we only adjust the
+  // .muted class for the icon-x overlay.
   function syncSpeakingButton() {
-    // In webrtc mode the speak button reflects "talk-mode active";
-    // in classic mode it reflects the persistent TTS setting.
-    if (settings.get().voiceTransport === 'webrtc') {
-      const isTalk = webrtcControls.currentMode() === 'talk' && webrtcControls.isOpen();
-      btnSpeak?.classList.toggle('muted', !isTalk);
-      return;
-    }
-    const on = settings.get().tts;
-    btnSpeak?.classList.toggle('muted', !on);
+    const isTalk = webrtcControls.currentMode() === 'talk' && webrtcControls.isOpen();
+    btnSpeak?.classList.toggle('muted', !isTalk);
   }
-
-  rebindVoiceButtons();
   syncSpeakingButton();
 
   // ── Composer ────────────────────────────────────────────────────────────
@@ -1171,10 +693,7 @@ async function boot() {
         releaseCaptureIfActive();
         chat.clear();
         draft.dismiss();
-        voice.cancelPendingFlush();
-        replyCache.clear();
         voiceMemos.clearAll().catch(() => {});
-        pendingReply = null;  // drop any FIFO-queued reply
         historyLoaded = false;
       } else {
         chat.addLine('You', text || '', 's0', {
@@ -1285,8 +804,6 @@ async function boot() {
       // trade: user asked for a fresh thread, they get one.
       chat.clear();
       draft.dismiss();
-      voice.cancelPendingFlush();
-      replyCache.clear();
       voiceMemos.clearAll().catch(() => {});
       historyLoaded = false;
       backend.newSession?.();
@@ -1440,21 +957,15 @@ async function boot() {
     } catch {}
   }, 30_000);
 
-  // Periodic network-status refresh. Surfaces queued count, weak-signal
-  // detection, and sttBackfill buffered duration in the header. Only
-  // writes when the user isn't actively listening or speaking — feature
-  // statuses ("Listening", "Speaking", "Mic muted — Speaking") carry
-  // their own narrative and we don't want to stomp them. The ~2s cadence
-  // is a compromise: granular enough to notice drift, not chatty enough
-  // to flicker the header during normal use.
+  // Periodic network-status refresh. Surfaces queued count + weak-signal
+  // detection in the header. Only writes when there's no active WebRTC
+  // call (controls.ts owns the call-status narrative).
   const WEAK_SIGNAL_MS = 8_000;
   setInterval(async () => {
-    if (listening) return;  // listening path owns status (Listening / Mic muted / Speaking)
-    if (tts.isSpeaking()) return;
+    if (webrtcControls.isOpen()) return;
     try {
       const gwConnected = backend.isConnected();
       const summary = await queue.summary();
-      const buffered = sttBackfill.getBufferedSeconds();
       const msIdle = gateway.msSinceLastMessage();
 
       if (!gwConnected) {
@@ -1467,7 +978,6 @@ async function boot() {
         status.setState('connected', {
           queuedCount: summary.count,
           queuedAudioMs: summary.totalAudioMs,
-          bufferedSeconds: buffered,
         });
       }
     } catch {}
@@ -1538,31 +1048,33 @@ async function boot() {
   }
 
   if (btnMemo) {
-    // Tracks whether streaming was active when memo started, so we can
-    // auto-resume streaming after memo completes. Native-app-ish: user
-    // was in a voice-conversation flow, tapped memo for a one-shot aside,
-    // expects to be back in the flow when the aside is done.
-    let resumeStreamingAfterMemo = false;
+    // Tracks the WebRTC call mode that was active when memo started, so
+    // we can re-open it once the memo completes. Mic is exclusive: any
+    // open call must close before getUserMedia is acquired by memo.
+    let resumeCallMode: 'stream' | 'talk' | null = null;
     btnMemo.onclick = async () => {
       if (memoActive) return;
-      // Stop streaming if active — mic is exclusive. Remember so we can
-      // resume after memo completes (memoActive → false path).
-      resumeStreamingAfterMemo = listening;
-      if (listening) stopStreaming();
-      // Prime the iOS AVAudioSession the same way streaming does. Plays a
-      // tiny silent MP3 through the <audio> element which wakes the
-      // session so subsequent getUserMedia delivers real audio samples.
-      // Without this, memo capture on iOS 18.5 can return a non-empty
-      // blob full of silence after the app has been backgrounded — the
-      // "audio system needs streaming to initialize" symptom the user hit
-      // after leaving the phone on the counter while brushing teeth.
-      // MUST run synchronously inside this click gesture.
+      // Snapshot the current call mode (if any), then close it so the mic
+      // is free for the memo recorder.
+      resumeCallMode = webrtcControls.isOpen() ? webrtcControls.currentMode() : null;
+      if (webrtcControls.isOpen()) await webrtcControls.closeIfOpen();
+      // iOS AVAudioSession prep: prepareForCapture before getUserMedia.
+      // unlock(player) keeps the legacy <audio id="player"> element warm
+      // so the session category settles correctly.
       unlock(player);
-      audioSession.primeMediaSink();
+      audioSession.prepareForCapture();
       memoActive = true;
       composerInput.style.display = 'none';
       btnMemo.style.display = 'none';
       updateSendButtonState();
+      const resumeCall = () => {
+        const mode = resumeCallMode;
+        resumeCallMode = null;
+        if (!mode) return;
+        const target = mode === 'stream' ? document.getElementById('btn-mic')
+          : document.getElementById('btn-speak');
+        if (target) (target as HTMLElement).click();
+      };
       composerSend.onclick = async () => {
         if (composerSend.disabled) return;
         composerSend.disabled = true;
@@ -1570,41 +1082,32 @@ async function boot() {
           const { audioBlob, durationMs } = await memo.stop();
           exitMemoMode();
           await handleMemoResult(audioBlob, durationMs);
-          // Auto-resume streaming if that's where we came from.
-          if (resumeStreamingAfterMemo) { resumeStreamingAfterMemo = false; startStreaming(); }
+          resumeCall();
         } finally {
           composerSend.disabled = false;
         }
       };
       const composerEl = composerInput.parentElement;
-      // Insert the recording bar where the textarea was — before the actions row.
       const composerActionsEl = composerEl?.querySelector('.composer-actions') as HTMLElement | null;
-      // Hide the entire actions row during recording — the send button gets
-      // relocated into the memo bar (WhatsApp-style), so the row would just
-      // be a redundant second row of icons. Without this, composer height
-      // doubles to ~102px during memo. Restored in exitMemoMode().
       if (composerActionsEl) composerActionsEl.style.display = 'none';
       const ok = await memo.start({
         container: composerEl,
         insertBefore: composerActionsEl || composerSend,
-        // Move the send button into the bar so it sits at the right edge of
-        // the recording row, like WhatsApp. memo.ts relocates the node;
-        // exitMemoMode reparents it back to .composer-actions-right.
         sendBtn: composerSend,
         onDone: (audioBlob) => {
           exitMemoMode();
           handleMemoResult(audioBlob);
-          if (resumeStreamingAfterMemo) { resumeStreamingAfterMemo = false; startStreaming(); }
+          resumeCall();
         },
         onCancel: () => {
           exitMemoMode();
-          if (resumeStreamingAfterMemo) { resumeStreamingAfterMemo = false; startStreaming(); }
+          resumeCall();
         },
       });
       if (!ok) {
         exitMemoMode();
         status.setStatus('Mic not available', 'err');
-        resumeStreamingAfterMemo = false;
+        resumeCallMode = null;
       }
     };
     // Esc to cancel, Enter to send memo on desktop
@@ -1697,7 +1200,7 @@ async function boot() {
   const btnRefresh = document.getElementById('btn-refresh');
   if (btnRefresh) {
     btnRefresh.onclick = () => {
-      try { tts.stop('refresh'); } catch {}
+      try { void webrtcControls.closeIfOpen(); } catch {}
       try { player.pause(); player.src = ''; player.load(); } catch {}
       diag('refresh: location.reload()');
       location.reload();
@@ -1710,17 +1213,14 @@ async function boot() {
 // ─── Session resume (drawer tap) ────────────────────────────────────────────
 
 /** Replay a transcript into the chat UI after the adapter resumes a session.
- *  Clears current chat + replyCache, re-renders the messages, and marks
- *  history as loaded so backfillHistory doesn't double-append. */
+ *  Clears current chat, re-renders the messages, and marks history as
+ *  loaded so backfillHistory doesn't double-append. */
 function replaySessionMessages(
   id: string,
   messages: any[],
   pagination?: { firstId: number | null; hasMore: boolean }
 ) {
   chat.clear();
-  replyCache.clear();
-  voice.cancelPendingFlush();
-  pendingReply = null;
   historyLoaded = true;  // we just populated history ourselves; skip backfill
   // Tell the drawer which session is ACTUALLY on screen — covers edge
   // cases where the adapter's conversationName diverges from what the
@@ -2021,15 +1521,6 @@ function clearStreamingIndicator() {
     streamingEl.remove();
     streamingEl = null;
   }
-  // Invariant: streamingTtsReplyId is the id of the current streamingEl.
-  // When the bubble is gone, drop the id too (and any in-flight TTS for
-  // it) so the next reply's first delta mints a fresh id. Forgetting
-  // this caused multiple bubbles to end up sharing a stale id, which
-  // made play-click route to the wrong reply via the activeReply match.
-  if (streamingTtsReplyId) {
-    try { tts.stop('stream-cleared'); } catch {}
-    streamingTtsReplyId = null;
-  }
 }
 
 /** Find the most-recent non-streaming agent bubble and attach a card.
@@ -2056,106 +1547,16 @@ function attachCardToLatestAgentBubble(card) {
 
 /** Streaming partial reply. `cumulativeText` is the full text so far.
  *  Adapter already drops user-echo prefix variants so we don't need to
- *  defensively filter them here. */
-/** FIFO-queue state for Bug 3: when autoAdvanceOnNew=false (default),
- *  a new reply that arrives while TTS is still playing gets its bubble
- *  and chime as normal, but the actual speech is buffered here. When
- *  the current reply finishes (tts 'ended' or 'stopped'), drain kicks
- *  off playback of the deferred one.
- *
- *  Single-slot queue — if a 3rd reply arrives while #2 is deferred,
- *  the latest replaces (user isn't usefully served by infinite stacking
- *  on a bike). replyId + done flag let the drain decide whether we can
- *  start with full text (tts.speak) or need to stream. For MVP we only
- *  drain when done=true; pre-done drain would need chunk re-routing.
- */
-let pendingReply: { replyId: string, text: string, done: boolean } | null = null;
-
-function ttsActiveForStreaming() {
-  return settings.get().tts && settings.get().ttsEngine !== 'local';
-}
-
-function shouldDeferReply() {
-  return !settings.get().autoAdvanceOnNew && tts.isSpeaking() && ttsActiveForStreaming();
-}
-
-function drainPendingReply() {
-  if (!pendingReply || !pendingReply.done) return;
-  if (tts.isSpeaking()) return;  // something else started speaking; wait
-  const p = pendingReply;
-  pendingReply = null;
-  if (ttsActiveForStreaming()) {
-    tts.speak(p.text, { replyId: p.replyId });
-  }
-}
-
+ *  defensively filter them here. With per-turn replay machinery gutted,
+ *  the bubble is purely a text surface: TTS is owned by the WebRTC
+ *  talk-mode track on the server side and arrives as audio independently. */
 function handleReplyDelta({ replyId, cumulativeText, conversation }: any) {
   if (!cumulativeText) return;
   // Drop deltas for off-screen conversations. Server-side stream keeps
   // running; user can switch back later and the persisted reply will
   // appear via replaySessionMessages.
   if (conversation && conversation !== sessionDrawer.getViewed()) return;
-
-  // FIFO-queue fast path: if a previous reply is still playing and
-  // we're in FIFO mode, render the bubble + chime as usual but buffer
-  // the speech. The existing bubble infra treats streamingTtsReplyId
-  // staying null the same as TTS-off — visible text, no audio yet.
-  if (pendingReply && pendingReply.replyId === replyId) {
-    // Continuation of an already-buffered reply.
-    showStreamingIndicator(cumulativeText, replyId);
-    pendingReply.text = cumulativeText;
-    return;
-  }
-  // First delta of a new reply-id. Two FIFO cases to handle here:
-  //   (a) Nothing streaming and we're still speaking → defer.
-  //   (b) Already streaming/deferring a prior reply AND a NEW replyId
-  //       arrives → user sent another message. Latest wins: clear the
-  //       pending buffer and let the new one go through the normal
-  //       interrupt path. Prevents a 3rd reply from silently orphaning.
-  const isNewReplyId = streamingTtsReplyId !== replyId
-    && (!streamingEl || streamingEl.dataset.replyId !== replyId)
-    && pendingReply?.replyId !== replyId;
-  if (isNewReplyId && !streamingEl && shouldDeferReply()) {
-    showStreamingIndicator(cumulativeText, replyId);
-    pendingReply = { replyId, text: cumulativeText, done: false };
-    playFeedback('receive');
-    return;
-  }
-  if (isNewReplyId && pendingReply) {
-    // 3rd-reply arrival: drop the queued 2nd, let this one run normally.
-    diag(`fifo: dropping queued reply ${pendingReply.replyId} — newer ${replyId} arrived`);
-    pendingReply = null;
-  }
-
-  // "First delta" is not just !streamingEl — showThinking() may have
-  // already created a pending bubble (r-pending-<ts> id). That bubble
-  // needs to adopt the real replyId AND trigger tts.beginReply the
-  // same way a from-scratch bubble would. Without this, the else
-  // branch fires with streamingTtsReplyId=null, which sets
-  // dataset.replyId=undefined — later replies collide on empty ids
-  // and play-click routing sends clicks from ANY bubble to the most
-  // recent actively-streaming one. That's the regression symptom.
-  const pendingShell = streamingEl
-    && typeof streamingEl.dataset.replyId === 'string'
-    && streamingEl.dataset.replyId.startsWith('r-pending-');
-  const isFirstDelta = !streamingEl || pendingShell;
-
-  if (isFirstDelta) {
-    if (streamingTtsReplyId) {
-      try { tts.stop('stream-reset'); } catch {}
-      streamingTtsReplyId = null;
-    }
-    showStreamingIndicator(cumulativeText, replyId);
-    // Gate the streaming-TTS pipeline on engine==='server'. Local TTS
-    // can't chunk-stream; it degrades to one-shot speak() on final.
-    if (settings.get().tts && settings.get().ttsEngine !== 'local') {
-      tts.beginReply({ replyId });
-      streamingTtsReplyId = replyId;
-    }
-  } else {
-    showStreamingIndicator(cumulativeText, streamingTtsReplyId);
-  }
-  if (streamingTtsReplyId) tts.pushReplyText(cumulativeText);
+  showStreamingIndicator(cumulativeText, replyId);
 }
 
 /** Complete reply. `content` (if present) is the raw block array used to
@@ -2176,7 +1577,6 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
   // will appear via replaySessionMessages when they switch back. Side
   // effects above (drawer refresh) already fired.
   if (conversation && conversation !== sessionDrawer.getViewed()) {
-    if (pendingReply?.replyId === replyId) pendingReply = null;
     return;
   }
 
@@ -2185,49 +1585,14 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
   if (NO_REPLY_RE.test(text)) {
     log('suppressed NO_REPLY from agent');
     clearStreamingIndicator();
-    if (pendingReply?.replyId === replyId) pendingReply = null;
-    return;
-  }
-
-  // FIFO-queue branch: this reply was deferred during streaming. Update
-  // the bubble with the final text + mark the buffer done + try to
-  // drain. No 'receive' chime — we already played it on the first
-  // deferred delta. No tts calls — drainPendingReply owns that.
-  if (pendingReply && pendingReply.replyId === replyId) {
-    if (text) {
-      let bubble = finalizeStreamingBubble(text);
-      if (!bubble) {
-        bubble = chat.addLine(getAgentLabel(), text, 'agent', { markdown: true, replyId });
-      }
-      try {
-        const cards = parseCardsFromText(text);
-        for (const c of cards) attachCard(bubble, c);
-      } catch (e) { log('card parse err:', e.message); }
-      for (const b of imageBlocks) attachCard(bubble, b);
-      pendingReply.text = text;
-      pendingReply.done = true;
-      drainPendingReply();
-      // New reply landed → advance the BT track pointer to it. Mirrors
-      // "default to latest" UX: a fresh user interaction puts BT next/prev
-      // in the most-recent context. User-driven prev navigation later
-      // explicitly setTrackPointer to where they want it.
-      setTrackPointer(replyId);
-    } else {
-      pendingReply = null;
-    }
     return;
   }
 
   if (text) {
     let bubble = finalizeStreamingBubble(text);
     if (!bubble) {
-      const fallbackId = streamingTtsReplyId || replyId;
-      bubble = chat.addLine(getAgentLabel(), text, 'agent', { markdown: true, replyId: fallbackId });
+      bubble = chat.addLine(getAgentLabel(), text, 'agent', { markdown: true, replyId });
     }
-    // Advance BT track pointer to the new reply (this is the non-pending
-    // path — matches the same behavior as the pending-drain block above).
-    const finalizedId = bubble?.dataset.replyId || streamingTtsReplyId || replyId;
-    if (finalizedId) setTrackPointer(finalizedId);
     playFeedback('receive');
 
     try {
@@ -2236,24 +1601,6 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
     } catch (e) { log('card parse err:', e.message); }
 
     for (const b of imageBlocks) attachCard(bubble, b);
-
-    if (settings.get().tts) {
-      if (streamingTtsReplyId) {
-        tts.endReply(text);
-        streamingTtsReplyId = null;
-      } else {
-        const bubbleReplyId = bubble?.dataset?.replyId;
-        tts.speak(text, { replyId: bubbleReplyId });
-      }
-    } else {
-      // TTS output muted — don't synthesize the full reply (wastes
-      // Aura quota + bandwidth for audio the user never hears). Do
-      // precache the first chunk so if the user changes their mind
-      // and clicks play, audio starts in ~500ms instead of ~3-5s.
-      // Remaining chunks synthesize on demand inside playCached.
-      const bubbleReplyId = bubble?.dataset?.replyId;
-      if (bubbleReplyId) tts.precacheFirstChunk(bubbleReplyId, text).catch(() => {});
-    }
   } else if (imageBlocks.length) {
     clearStreamingIndicator();
     for (const b of imageBlocks) attachCardToLatestAgentBubble(b);
