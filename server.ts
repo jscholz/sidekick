@@ -1352,10 +1352,33 @@ async function handleHermesSessionMessages(req, res, name: string) {
     }
     // Newest-first page, reversed client-visibly below. SQLite's `id` is
     // autoincrement so lower = older. hasMore is a peek of 1 extra row.
-    const whereCursor = before !== null ? `AND id < ${before}` : '';
-    const msgSql = `SELECT id, role, content, tool_name, timestamp FROM messages
-      WHERE session_id='${uuid}' ${whereCursor}
-      ORDER BY id DESC LIMIT ${limit + 1}`;
+    //
+    // Compression rotation: the resolved `uuid` may itself be a child of
+    // a rotated chain (e.g. an orphan-resume id passed in raw). Walk
+    // upward via parent_session_id to the root, then walk downward via
+    // a recursive CTE to gather every descendant. Messages from any
+    // session in the chain are returned, ordered globally by id DESC —
+    // child sessions are created later than their parent, so id
+    // ordering matches timestamp ordering across the chain (verified).
+    // The `before=<id>` cursor still works because messages.id is a
+    // global autoincrement, not per-session.
+    const whereCursor = before !== null ? `AND m.id < ${before}` : '';
+    const msgSql = `WITH RECURSIVE
+      up(id) AS (
+        SELECT id FROM sessions WHERE id='${uuid}'
+        UNION ALL
+        SELECT s.parent_session_id FROM sessions s JOIN up ON s.id = up.id
+          WHERE s.parent_session_id IS NOT NULL
+      ),
+      root(id) AS (SELECT id FROM up WHERE id IN (SELECT id FROM sessions WHERE parent_session_id IS NULL)),
+      chain(id) AS (
+        SELECT id FROM root
+        UNION ALL
+        SELECT s.id FROM sessions s JOIN chain ON s.parent_session_id = chain.id
+      )
+      SELECT m.id, m.role, m.content, m.tool_name, m.timestamp FROM messages m
+        WHERE m.session_id IN (SELECT id FROM chain) ${whereCursor}
+        ORDER BY m.id DESC LIMIT ${limit + 1}`;
     const rows = await sqlQuery(HERMES_STATE_DB, msgSql);
     const hasMore = rows.length > limit;
     const trimmed = hasMore ? rows.slice(0, limit) : rows;
@@ -1507,8 +1530,21 @@ async function searchSessionsImpl(rawQ: string, limit: number): Promise<any[]> {
     whereClause = clauses.join(' OR ');
   }
 
+  // Hermes auto-rotates state.db sessions when the agent's internal
+  // context grows past budget (run_agent.py:7572-7585): old session is
+  // ended with end_reason='compression', a new session is created with
+  // parent_session_id pointing back. The drawer still shows ONE row per
+  // root (rotations are an internal detail), but message_count /
+  // lastMessageAt / snippet must aggregate over the entire chain or the
+  // drawer freezes at the moment compression fired. Recursive CTE walks
+  // root → descendants; aggregates pull from any session in the chain.
   const sql = `
     ATTACH '${HERMES_STORE_DB.replace(/'/g, "''")}' AS store;
+    WITH RECURSIVE chain(root, id) AS (
+      SELECT s.id, s.id FROM sessions s WHERE s.parent_session_id IS NULL
+      UNION ALL
+      SELECT c.root, s.id FROM sessions s JOIN chain c ON s.parent_session_id = c.id
+    )
     SELECT
       CASE WHEN s.source = 'api_server'
         THEN COALESCE(
@@ -1521,11 +1557,14 @@ async function searchSessionsImpl(rawQ: string, limit: number): Promise<any[]> {
         ELSE s.id END AS id,
       s.source,
       s.title,
-      s.message_count AS messageCount,
-      (SELECT MAX(timestamp) FROM messages m WHERE m.session_id = s.id) AS lastMessageAt,
-      (SELECT substr(content, 1, 120) FROM messages m
-         WHERE m.session_id = s.id AND m.role IN ('user','assistant') AND m.content IS NOT NULL
-         ORDER BY id DESC LIMIT 1) AS snippet
+      (SELECT COALESCE(SUM(s2.message_count), 0) FROM sessions s2
+         JOIN chain ch ON ch.id = s2.id WHERE ch.root = s.id) AS messageCount,
+      (SELECT MAX(m.timestamp) FROM messages m
+         JOIN chain ch ON ch.id = m.session_id WHERE ch.root = s.id) AS lastMessageAt,
+      (SELECT substr(m.content, 1, 120) FROM messages m
+         JOIN chain ch ON ch.id = m.session_id WHERE ch.root = s.id
+           AND m.role IN ('user','assistant') AND m.content IS NOT NULL
+         ORDER BY m.id DESC LIMIT 1) AS snippet
     FROM sessions s
     WHERE (${whereClause})
       AND s.parent_session_id IS NULL
