@@ -320,7 +320,14 @@ def register_routes(
     app.router.add_post("/v1/rtc/close", handle_close)
     app.router.add_get("/v1/rtc/health", handle_health)
 
-    REGISTRY.start_sweep()
+    # Defer the registry sweep loop until the event loop is running.
+    # When mounted in-process by an existing aiohttp app (the legacy
+    # hermes path), the loop is already alive and start_sweep is safe
+    # to call directly; for the standalone bridge the app's on_startup
+    # hook runs after the loop is up.
+    async def _start_sweep(_app: "web.Application") -> None:  # pragma: no cover
+        REGISTRY.start_sweep()
+    app.on_startup.append(_start_sweep)
 
     logger.info(
         "[webrtc-signaling] mounted /v1/rtc/{offer,ice,close,health} "
