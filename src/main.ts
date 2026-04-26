@@ -1288,6 +1288,19 @@ async function boot() {
     memoActive = false;
     composerInput.style.display = '';
     btnMemo.style.display = '';
+    // Restore the composer-actions row + put the send button back in its
+    // original DOM home (last child of .composer-actions-right). The bar
+    // itself is removed by memo.cleanup(). Re-query each time since the
+    // composer DOM is stable but the const lived in the onclick scope.
+    const composerEl2 = composerInput.parentElement;
+    const actionsEl = composerEl2?.querySelector('.composer-actions') as HTMLElement | null;
+    const actionsRightEl = composerEl2?.querySelector('.composer-actions-right') as HTMLElement | null;
+    if (actionsEl) actionsEl.style.display = '';
+    // Only reparent if the send button got moved into the bar (it may
+    // already be in its home if memo.start failed before renderBar).
+    if (actionsRightEl && composerSend.parentElement !== actionsRightEl) {
+      actionsRightEl.appendChild(composerSend);
+    }
     composerSend.onclick = sendTypedMessage;
     updateSendButtonState();
   }
@@ -1530,9 +1543,18 @@ async function boot() {
       const composerEl = composerInput.parentElement;
       // Insert the recording bar where the textarea was — before the actions row.
       const composerActionsEl = composerEl?.querySelector('.composer-actions') as HTMLElement | null;
+      // Hide the entire actions row during recording — the send button gets
+      // relocated into the memo bar (WhatsApp-style), so the row would just
+      // be a redundant second row of icons. Without this, composer height
+      // doubles to ~102px during memo. Restored in exitMemoMode().
+      if (composerActionsEl) composerActionsEl.style.display = 'none';
       const ok = await memo.start({
         container: composerEl,
         insertBefore: composerActionsEl || composerSend,
+        // Move the send button into the bar so it sits at the right edge of
+        // the recording row, like WhatsApp. memo.ts relocates the node;
+        // exitMemoMode reparents it back to .composer-actions-right.
+        sendBtn: composerSend,
         onDone: (audioBlob) => {
           exitMemoMode();
           handleMemoResult(audioBlob);

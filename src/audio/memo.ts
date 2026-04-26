@@ -36,6 +36,9 @@ export function isSupported() { return typeof MediaRecorder !== 'undefined'; }
  * @param {Object} opts
  * @param {HTMLElement} opts.container
  * @param {HTMLElement} [opts.insertBefore]
+ * @param {HTMLElement} [opts.sendBtn] — if provided, this existing button DOM
+ *   node is moved into the recording bar (WhatsApp-style trash/timer/wave/send
+ *   on a single row). Caller restores it on exit.
  * @param {(audioBlob: Blob|null) => void} opts.onDone
  * @param {() => void} opts.onCancel
  */
@@ -58,7 +61,7 @@ export async function start(opts) {
   // Render UI IMMEDIATELY — don't wait for the mic permission chime or
   // audio pipeline setup. drawWaveform safely no-ops when analyser is null,
   // so starting rAF early means bars animate the moment analyser connects.
-  renderBar(opts.container, opts.onCancel, opts.insertBefore);
+  renderBar(opts.container, opts.onCancel, opts.insertBefore, opts.sendBtn);
   startTime = Date.now();
   timerInterval = setInterval(updateTimer, 100);
   // Reset waveform state for a fresh recording
@@ -174,7 +177,7 @@ let barEl = null;
 let timerEl = null;
 let canvasEl = null;
 
-function renderBar(container, onCancel, insertBefore) {
+function renderBar(container, onCancel, insertBefore, sendBtn) {
   barEl = document.createElement('div');
   barEl.className = 'memo-bar';
 
@@ -205,6 +208,11 @@ function renderBar(container, onCancel, insertBefore) {
   barEl.appendChild(dot);
   barEl.appendChild(timerEl);
   barEl.appendChild(canvasEl);
+  // Relocate the existing send button into the bar (WhatsApp-style). The
+  // node is *moved*, not cloned, so its onclick stays wired. CSS still
+  // applies because `.composer .send-btn` matches inside `.memo-bar`.
+  // Caller restores it to its original parent in exitMemoMode.
+  if (sendBtn) barEl.appendChild(sendBtn);
 
   if (insertBefore) {
     container.insertBefore(barEl, insertBefore);
