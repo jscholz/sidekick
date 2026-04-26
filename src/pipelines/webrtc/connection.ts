@@ -242,17 +242,22 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     throw e;
   }
 
-  // POST the offer. Pass silence_sec + commit_phrase from settings so
-  // the server's STT bridge can mirror classic-mode dictation behavior:
-  // a configured commit word ("over") triggers an immediate flush, and
-  // silence_sec scopes the no-speech utterance timeout (Deepgram's
-  // utterance_end_ms tops out at 5000ms; longer windows wrap with a
-  // manual asyncio timer server-side).
+  // POST the offer. conv_name is sidekick's stable conversation
+  // identifier (sidekick-<slug>), the same key classic-mode chat sends
+  // — the STT bridge passes it as body.conversation when dispatching
+  // to /v1/chat/completions so voice and text turns chain through one
+  // session. Earlier wire format used X-Hermes-Session-Id which spawned
+  // a divergent session row in state.db (the moennxml duplicate).
+  //
+  // silence_sec + commit_phrase mirror classic-mode dictation tuning:
+  // commit word ("over") flushes immediately; silence_sec scopes the
+  // no-speech timeout (Deepgram's utterance_end_ms tops out at 5000ms;
+  // longer windows wrap with a manual asyncio timer server-side).
   const offerPayload = {
     sdp: pc.localDescription?.sdp ?? '',
     type: pc.localDescription?.type ?? 'offer',
     mode,
-    session_id: opts?.sessionId || null,
+    conv_name: opts?.sessionId || null,
     silence_sec: settings.get().silenceSec,
     commit_phrase: settings.get().commitPhrase,
   };

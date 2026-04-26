@@ -1380,8 +1380,21 @@ async function handleHermesSessionMessages(req, res, name: string) {
         WHERE m.session_id IN (SELECT id FROM chain) ${whereCursor}
         ORDER BY m.id DESC LIMIT ${limit + 1}`;
     const rows = await sqlQuery(HERMES_STATE_DB, msgSql);
-    const hasMore = rows.length > limit;
-    const trimmed = hasMore ? rows.slice(0, limit) : rows;
+    // Strip context-compaction handoff messages from the visible
+    // transcript. Hermes injects these as role='assistant' rows whose
+    // content starts with literal '[CONTEXT COMPACTION'. They're agent
+    // bookkeeping (a summary of the prior context window), not a turn
+    // the user wrote or read — surfacing them in the chat is noisy.
+    // Filter post-CTE so the recursive chain walk + cursor pagination
+    // above stay simple. The 'tool_name LIKE %compaction%' alternative
+    // doesn't match in practice — verified against state.db: tool_name
+    // is empty for all role='tool' rows; the marker lives in content.
+    const compactionRe = /^\[CONTEXT COMPACTION\b/;
+    const filtered = rows.filter((m: any) =>
+      !(m.role === 'assistant' && typeof m.content === 'string' && compactionRe.test(m.content)),
+    );
+    const hasMore = filtered.length > limit;
+    const trimmed = hasMore ? filtered.slice(0, limit) : filtered;
     // Reverse to chronological (oldest → newest).
     trimmed.reverse();
     const messages = trimmed.map((m: any) => ({

@@ -36,19 +36,22 @@ function btnEl(id: string): HTMLButtonElement | null {
 function setActive(mode: conn.CallMode | null, state: conn.CallState | null) {
   const mic = btnEl('btn-mic');
   const speak = btnEl('btn-speak');
-  // Reset both, then mark the owning button.
-  mic?.classList.remove('active', 'connecting');
-  speak?.classList.remove('active', 'connecting');
-  if (!mode) return;
-  const owner = mode === 'stream' ? mic : speak;
-  if (!owner) return;
-  if (state === 'requesting-mic' || state === 'connecting') {
-    owner.classList.add('connecting');
-  } else if (state === 'connected') {
-    owner.classList.add('active');
-  } else if (state === 'closing' || state === 'failed') {
-    // No class — clean state.
-  }
+  // Stickiness: a button keeps its .active class while it owns the
+  // current mode AND the connection is open, regardless of intermediate
+  // states.  The .connecting class signals work in flight and is purely
+  // additive.  This stops the visual flicker when ICE renegotiates or
+  // a transient 'disconnected' bubble fires mid-call.
+  const ownsActive = (which: 'stream' | 'talk') =>
+    conn.currentMode() === which && conn.isOpen();
+
+  const applyState = (el: HTMLButtonElement | null, which: 'stream' | 'talk') => {
+    if (!el) return;
+    el.classList.toggle('active', ownsActive(which));
+    const isThisModeWorkingNow = mode === which && (state === 'requesting-mic' || state === 'connecting');
+    el.classList.toggle('connecting', isThisModeWorkingNow);
+  };
+  applyState(mic, 'stream');
+  applyState(speak, 'talk');
 }
 
 export function init(o: ControlsOpts) {
