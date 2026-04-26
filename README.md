@@ -45,7 +45,7 @@ The essentials:
 
 | Variable | Required | What |
 |---|---|---|
-| `DEEPGRAM_API_KEY` | yes | Deepgram key — powers both STT (`/ws/deepgram`, `/transcribe`) and Aura TTS (`/tts`) |
+| `DEEPGRAM_API_KEY` | yes | Deepgram key — powers STT (audio-bridge: live + batch via `/transcribe`) and Aura TTS (`/tts`) |
 | `SIDEKICK_BACKEND` | no | `hermes` (default), `openclaw`, `zeroclaw`, or `openai-compat` |
 | `SIDEKICK_HERMES_URL` | no | Hermes API URL (default `http://127.0.0.1:8642`) |
 | `SIDEKICK_HERMES_TOKEN` | hermes only | Bearer token matching Hermes's `API_SERVER_KEY` |

@@ -24,6 +24,14 @@ Routes:
     GET  /v1/rtc/health
         Returns: { "ok": true, "peers": <count>, "providers": {...} }
 
+    POST /v1/transcribe
+        Body: raw audio bytes; Content-Type indicates the mime
+        Returns: { "transcript": "..." }
+
+        Batch transcription path (one-shot voice memos).  Routes through
+        the same STTProvider as the streaming WebRTC path so swapping
+        provider in voice config affects both.
+
 Trickle ICE: the client may post candidates after the answer is
 received.  Empty candidate string ("end of candidates") is a no-op.
 """
@@ -252,6 +260,59 @@ async def handle_close(request: "web.Request") -> "web.Response":
     return web.json_response({"ok": True, "closed": evicted})
 
 
+async def handle_transcribe(request: "web.Request") -> "web.Response":
+    """POST /v1/transcribe — batch-transcribe a blob via the configured STT provider.
+
+    Body is the raw audio (the sidekick proxy forwards what the browser
+    POSTs to /transcribe verbatim — no multipart wrapping).  Content-Type
+    must indicate the mime so providers can decode appropriately; we
+    default to ``audio/webm`` to match what the PWA records.
+
+    On NotImplementedError (placeholder providers like local_whisper)
+    we return 501 so callers can surface a clear "this provider doesn't
+    support batch yet" message.
+    """
+    if _VOICE_CONFIG is None:
+        return _err("not initialized", status=503, code="not_ready")
+
+    mime = request.headers.get("Content-Type", "audio/webm")
+    try:
+        audio = await request.read()
+    except Exception as e:
+        return _err(f"could not read body: {e}", status=400)
+
+    if not audio:
+        return _err("empty body", status=400, code="empty_body")
+
+    # Lazy import so a config without webrtc deps still serves /v1/rtc/health.
+    # Importing the package (not just the module) triggers self-registration
+    # of the bundled deepgram adapter via providers/__init__.py.
+    from providers import get_stt_provider
+
+    try:
+        provider = get_stt_provider(_VOICE_CONFIG.stt)
+    except KeyError as e:
+        return _err(str(e), status=500, code="unknown_provider")
+
+    try:
+        text = await provider.transcribe(audio, mime)
+    except NotImplementedError as e:
+        return web.json_response(
+            {"error": f"provider does not support batch: {e}"},
+            status=501,
+        )
+    except Exception as e:
+        logger.exception("[transcribe] failed")
+        return _err(str(e), status=500, code="transcribe_failed")
+    finally:
+        try:
+            await provider.aclose()
+        except Exception:  # pragma: no cover
+            pass
+
+    return web.json_response({"transcript": text or ""})
+
+
 async def handle_health(request: "web.Request") -> "web.Response":
     """GET /v1/rtc/health — diagnostic endpoint."""
     if not AIORTC_AVAILABLE:
@@ -319,6 +380,9 @@ def register_routes(
     app.router.add_post("/v1/rtc/ice", handle_ice)
     app.router.add_post("/v1/rtc/close", handle_close)
     app.router.add_get("/v1/rtc/health", handle_health)
+    # Batch transcription — same STT provider as the streaming path,
+    # so swapping providers in voice config affects live + memo together.
+    app.router.add_post("/v1/transcribe", handle_transcribe)
 
     # Defer the registry sweep loop until the event loop is running.
     # When mounted in-process by an existing aiohttp app (the legacy
@@ -330,7 +394,7 @@ def register_routes(
     app.on_startup.append(_start_sweep)
 
     logger.info(
-        "[webrtc-signaling] mounted /v1/rtc/{offer,ice,close,health} "
+        "[webrtc-signaling] mounted /v1/rtc/{offer,ice,close,health} + /v1/transcribe "
         "(stt=%s, tts=%s, proxy=%s)",
         voice_config.stt.provider, voice_config.tts.provider, proxy_url or "<none>",
     )
@@ -347,4 +411,5 @@ __all__ = [
     "handle_ice",
     "handle_close",
     "handle_health",
+    "handle_transcribe",
 ]

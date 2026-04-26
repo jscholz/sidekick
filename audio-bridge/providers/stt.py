@@ -35,12 +35,31 @@ class Transcript:
 
 
 class STTProvider(Protocol):
-    """Streaming speech-to-text contract."""
+    """Speech-to-text contract — streaming + batch.
+
+    Both modes are obligatory on the Protocol so the bridge can serve
+    live mic (``stream``) and one-shot voice memos (``transcribe``)
+    through the same provider config.  Providers that genuinely cannot
+    do batch should raise :class:`NotImplementedError` from
+    ``transcribe`` with a helpful message; the signaling handler
+    surfaces that as HTTP 501 to the caller.
+    """
 
     async def stream(
         self, pcm_iter: AsyncIterator[bytes]
     ) -> AsyncIterator[Transcript]:
         """Consume PCM frames; yield Transcripts."""
+        ...
+
+    async def transcribe(self, audio: bytes, mime: str) -> str:
+        """Batch-transcribe a complete audio blob; return the final text.
+
+        ``mime`` is the Content-Type of the blob (e.g. ``audio/webm``,
+        ``audio/wav``); providers that need a specific container format
+        should validate or transcode upstream.  Returns whitespace-
+        normalized text matching the streaming path's formatting so
+        live + memo paths produce identical bubbles.
+        """
         ...
 
     async def aclose(self) -> None:  # pragma: no cover — providers may no-op

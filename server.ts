@@ -9,8 +9,7 @@
  * - GET  /weather      → Open-Meteo weather proxy
  * - GET  /link-preview → OG metadata for a URL
  * - GET  /spotify-check → Spotify oEmbed validation
- * - WS   /ws/deepgram  → Deepgram STT proxy (audio frames relayed, key stays server-side)
- * - POST /transcribe   → Deepgram pre-recorded STT proxy (audio blob → transcript)
+ * - POST /transcribe   → batch STT (forwards to audio-bridge /v1/transcribe)
  * - GET  /screenshot   → ?url= → page screenshot via persistent Chromium (fallback for sites with no OG)
  * - GET  /render       → ?url=&mode=text|html → DOM after JS (for the `browser` agent skill)
  */
@@ -597,7 +596,10 @@ async function handleRender(req, res) {
   }
 }
 
-// ── Deepgram pre-recorded transcription proxy ─────────────────────────────
+// ── Batch transcription proxy: POST /transcribe → audio-bridge /v1/transcribe ──
+// Forwards to audio bridge — STT abstraction lives there. Swap providers via
+// bridge config, both live + memo paths follow. The bridge calls the same
+// STTProvider as the WebRTC streaming path (see audio-bridge/providers/stt.py).
 async function handleTranscribe(req, res) {
   const contentType = req.headers['content-type'] || 'audio/webm';
   const chunks = [];
@@ -615,24 +617,21 @@ async function handleTranscribe(req, res) {
       return;
     }
     try {
-      const dgUrl = 'https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&language=en-US';
-      const dgRes = await fetch(dgUrl, {
+      const upstream = new URL('/v1/transcribe', AUDIO_BRIDGE_UPSTREAM);
+      const bridgeRes = await fetch(upstream.toString(), {
         method: 'POST',
-        headers: {
-          'Authorization': `Token ${DEEPGRAM_KEY}`,
-          'Content-Type': contentType,
-        },
+        headers: { 'Content-Type': contentType },
         body,
       });
-      if (!dgRes.ok) {
-        const err = await dgRes.text();
-        console.error(`Deepgram transcribe error ${dgRes.status}: ${err.slice(0, 200)}`);
+      const data = await bridgeRes.json().catch(() => ({}));
+      if (!bridgeRes.ok) {
+        const errMsg = (data && (data.error?.message || data.error)) || `bridge ${bridgeRes.status}`;
+        console.error(`transcribe bridge error ${bridgeRes.status}: ${JSON.stringify(errMsg).slice(0, 200)}`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: `deepgram ${dgRes.status}` }));
+        res.end(JSON.stringify({ ok: false, error: errMsg }));
         return;
       }
-      const data = await dgRes.json();
-      const transcript = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
+      const transcript = (data && data.transcript) || '';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, transcript }));
     } catch (e) {
@@ -1816,12 +1815,11 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(405); res.end('method not allowed');
 });
 
-// ── WebSocket proxy: /ws/deepgram ──────────────────────────────────────────
-// Client sends audio frames here. We open a Deepgram WS with the API key
-// server-side, relay audio frames → Deepgram, relay results → client.
-// The client never sees the Deepgram key.
+// ── WebSocket servers ──────────────────────────────────────────────────────
+// (Legacy /ws/deepgram STT proxy removed when classic pipeline was gut-cut;
+// streaming STT now flows through the audio-bridge WebRTC path, batch STT
+// through POST /transcribe → audio-bridge /v1/transcribe.)
 
-const dgWss = new WebSocketServer({ noServer: true });
 const canvasWss = new WebSocketServer({ noServer: true });
 const zcWss = new WebSocketServer({ noServer: true });
 
@@ -1898,75 +1896,6 @@ server.on('upgrade', (req, socket, head) => {
 
   if (url.pathname === '/ws/canvas') {
     canvasWss.handleUpgrade(req, socket, head, (ws) => canvasWss.emit('connection', ws, req));
-    return;
-  }
-
-  if (url.pathname.startsWith('/ws/deepgram')) {
-    dgWss.handleUpgrade(req, socket, head, (clientWs) => {
-    // Read DG params from query string (client specifies model, rate, etc.)
-    const params = new URLSearchParams(url.search);
-    const sampleRate = params.get('sample_rate') || '48000';
-    const keyterms = params.get('keyterms') || '';
-
-    const dgUrl = `wss://api.deepgram.com/v1/listen?model=nova-3&language=en-US&smart_format=true&diarize=true&filler_words=false&endpointing=300&encoding=linear16&sample_rate=${sampleRate}&channels=1&interim_results=true&utterance_end_ms=1500${keyterms ? '&' + keyterms : ''}`;
-
-    console.log(`DG proxy: opening upstream (rate=${sampleRate})`);
-    const dgWs = new WebSocket(dgUrl, ['token', DEEPGRAM_KEY]);
-    dgWs.binaryType = 'arraybuffer';
-
-    let upstreamOpen = false;
-
-    dgWs.on('open', () => {
-      upstreamOpen = true;
-      console.log('DG proxy: upstream open');
-    });
-
-    // Client → Deepgram: relay audio frames
-    let clientFrames = 0;
-    clientWs.on('message', (data, isBinary) => {
-      if (upstreamOpen && dgWs.readyState === WebSocket.OPEN) {
-        clientFrames++;
-        if (clientFrames <= 3 || clientFrames === 10 || clientFrames === 50) {
-          console.log(`DG proxy: client frame #${clientFrames} bytes=${data.length || data.byteLength} binary=${isBinary}`);
-        }
-        dgWs.send(data);
-      }
-    });
-
-    // Deepgram → Client: relay transcription results
-    dgWs.on('message', (data) => {
-      if (clientWs.readyState === WebSocket.OPEN) {
-        // Deepgram sends JSON text; forward as-is
-        clientWs.send(typeof data === 'string' ? data : data.toString());
-      }
-    });
-
-    // Clean up on either side closing
-    clientWs.on('close', () => {
-      console.log('DG proxy: client disconnected');
-      if (dgWs.readyState === WebSocket.OPEN || dgWs.readyState === WebSocket.CONNECTING) {
-        dgWs.close();
-      }
-    });
-
-    dgWs.on('close', (code, reason) => {
-      console.log(`DG proxy: upstream closed (${code} ${reason || ''})`);
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.close(code, reason);
-      }
-    });
-
-    dgWs.on('error', (e) => {
-      console.error('DG proxy: upstream error:', e.message);
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.close(1011, 'upstream error');
-      }
-    });
-
-    clientWs.on('error', () => {
-      if (dgWs.readyState === WebSocket.OPEN) dgWs.close();
-    });
-    });
     return;
   }
 

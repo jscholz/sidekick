@@ -26,6 +26,7 @@ from .stt import STTProvider, Transcript, register_stt_provider
 logger = logging.getLogger(__name__)
 
 DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen"
+DEEPGRAM_REST_URL = "https://api.deepgram.com/v1/listen"
 DEFAULT_MODEL = "nova-3"
 DEFAULT_LANGUAGE = "en-US"
 DEFAULT_SAMPLE_RATE = 16000
@@ -161,6 +162,73 @@ class DeepgramSTT(STTProvider):
                     await send_task
                 except (asyncio.CancelledError, Exception):
                     pass
+
+    async def transcribe(self, audio: bytes, mime: str) -> str:
+        """Batch transcribe an audio blob via Deepgram REST /listen.
+
+        Mirrors the streaming-path query parameters (model + language +
+        smart_format) so live and memo bubbles read the same way.  We
+        do NOT pass diarize/endpointing/utterance_end_ms — those only
+        apply to the streaming endpoint.  Whitespace normalization
+        matches the streaming parser so both paths emit identically
+        formatted strings.
+        """
+        if not self._api_key:
+            raise RuntimeError(
+                "DeepgramSTT requires an API key.  Set the env var named in "
+                "voice.stt.api_key_env (default DEEPGRAM_API_KEY)."
+            )
+        if not audio:
+            return ""
+
+        try:
+            import aiohttp  # type: ignore
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "aiohttp not installed; install hermes-agent[messaging] or [webrtc]"
+            ) from exc
+
+        params = {
+            "model": self._model,
+            "language": self._language,
+            "smart_format": "true" if self._smart_format else "false",
+        }
+        url = f"{DEEPGRAM_REST_URL}?{urllib.parse.urlencode(params)}"
+        headers = {
+            "Authorization": f"Token {self._api_key}",
+            "Content-Type": mime or "audio/webm",
+        }
+
+        logger.info(
+            "[deepgram-stt] batch transcribe bytes=%d mime=%s model=%s",
+            len(audio), mime, self._model,
+        )
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=audio, headers=headers) as resp:
+                if resp.status != 200:
+                    err = (await resp.text())[:200]
+                    raise RuntimeError(
+                        f"deepgram REST returned {resp.status}: {err}"
+                    )
+                payload = await resp.json()
+
+        try:
+            text = (
+                payload.get("results", {})
+                .get("channels", [{}])[0]
+                .get("alternatives", [{}])[0]
+                .get("transcript", "")
+                or ""
+            )
+        except (IndexError, AttributeError, TypeError):
+            text = ""
+
+        # Same normalization as the streaming Results parser; smart_format
+        # injects newlines at speaker pauses / paragraph breaks and we
+        # want clean inline text in user bubbles.
+        text = _WHITESPACE_RE.sub(" ", text).strip()
+        return text
 
     async def aclose(self) -> None:
         self._closed = True

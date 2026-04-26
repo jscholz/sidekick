@@ -26,6 +26,13 @@ Skeleton (uncomment + fill):
             # Use VAD (Silero or webrtcvad) to mark utterance boundaries.
             ...
 
+        async def transcribe(self, audio: bytes, mime: str) -> str:
+            # Decode <mime> -> 16 kHz mono PCM (ffmpeg/av), run the
+            # offline whisper model, return the joined text.  Keep the
+            # whitespace normalization identical to deepgram.py so live
+            # + memo paths produce matching bubbles.
+            ...
+
         async def aclose(self):
             pass
 
