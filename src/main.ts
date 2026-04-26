@@ -640,10 +640,22 @@ async function boot() {
       return;
     }
     if (ev.role === 'assistant') {
-      // Assistant deltas are cumulative in the SSE path but per-chunk over
-      // the data channel. Concatenate into a single streaming bubble per
-      // assistant turn; close it implicitly when the next user-final lands
-      // or when the call closes.
+      // Assistant deltas: per-chunk over the data channel. Concatenate
+      // into a single streaming bubble per assistant turn. The server
+      // sends a final empty `is_final: true` envelope when the agent
+      // run completes — that's the signal to drop the streaming class
+      // (and its thinking-cursor) so the bubble stops blinking once
+      // the reply is actually done.
+      if (ev.is_final) {
+        if (dcAssistantStreamingId) {
+          const el = document.querySelector(
+            `.line.agent[data-reply-id="${CSS.escape(dcAssistantStreamingId)}"]`,
+          ) as HTMLElement | null;
+          if (el) el.classList.remove('streaming', 'pending');
+        }
+        dcAssistantStreamingId = null;
+        return;
+      }
       if (!dcAssistantStreamingId) {
         dcAssistantStreamingId = `dc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         chat.addLine(getAgentLabel(), ev.text, 'agent streaming', {
