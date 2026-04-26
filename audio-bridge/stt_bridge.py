@@ -1,6 +1,6 @@
 """
 STT bridge: incoming RTC audio track -> 16 kHz mono int16 PCM -> STTProvider
--> agent input.
+-> data-channel transcript envelopes.
 
 Per peer:
 
@@ -14,83 +14,38 @@ Per peer:
         +- async stt task
             - get pcm_bytes off pcm_queue
             - feed STTProvider.stream(pcm_iter)
-            - on Transcript.is_final + non-empty text:
-                dispatch(text) -> agent (api_server adapter or raw call)
-            - on Transcript (interim): forward to peer.on_transcript
-              callback if registered (so the client can render live caps).
+            - on every Transcript:
+                send {type: 'transcript', role: 'user', text, is_final}
+                over the peer's data channel.  Pass-through only — no
+                buffering, no commit-phrase, no silence timer.  The PWA
+                owns all UX logic (utterance buffer, silence timeout,
+                commit-phrase, dispatch decision).
 
-Agent dispatch path:
+Dispatch path:
 
-    The cleanest hook in the existing code is APIServerAdapter._run_agent
-    (which both /v1/chat/completions and /v1/responses go through).
-    We grab the api_server reference passed to attach() and call
-    _run_agent in a background task, plumbing the streaming callback
-    through to the TTS bridge (if attached) and to the peer's
-    on_transcript hook (so the client gets the assistant text as it
-    streams).
+    The PWA decides when to send an utterance to the agent and posts a
+    {type: 'dispatch', text} envelope back over the data channel.  The
+    bridge's dispatch_listener (in dispatch_listener.py) handles those
+    messages and calls _dispatch_to_agent() here, which POSTs to
+    ``<proxy_url>/api/hermes/responses`` and streams the SSE reply
+    back over the data channel as assistant transcript envelopes.
 
-    Session continuity: if the offer payload included session_id, we
-    pass it through so multi-turn voice conversations chain.  Otherwise
-    each utterance is a fresh session — adequate for the bike-ride
-    smoke-test.
+    Bridge → proxy → agent: the bridge does NOT POST directly to the
+    agent backend.  The sidekick proxy is the sole sidekick→agent
+    gateway.  proxy_url is stashed on the PeerSession at offer time.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
-from typing import Any, AsyncIterator, List, Optional
+from typing import Any, AsyncIterator, Optional
 
 from config import VoiceConfig
 from providers import Transcript, get_stt_provider
 
 logger = logging.getLogger(__name__)
-
-# Threshold at which Deepgram's native utterance_end_ms tops out.  Above
-# this, the bridge wraps the silence detection with a manual asyncio
-# timer that flushes the buffered utterance if no new is_final arrives
-# within the configured window.
-_DG_NATIVE_SILENCE_CAP_SEC = 5.0
-
-
-def _make_commit_regex(phrase: str) -> Optional[re.Pattern]:
-    """Build the commit-phrase matcher.  Returns None for empty/disabled.
-
-    Mirrors the JS regex in voice.ts:
-
-        /^(.*)\s*\b<escaped>\b[\s.,!?]*$/i
-
-    A non-empty match yields the prefix-text (without the phrase) so the
-    bridge can flush the cleaned utterance to the agent.
-    """
-    if not phrase:
-        return None
-    escaped = re.escape(phrase)
-    return re.compile(
-        rf"^(.*)\s*\b{escaped}\b[\s.,!?]*$",
-        re.IGNORECASE,
-    )
-
-
-def _check_commit_phrase(
-    pattern: Optional[re.Pattern],
-    transcript: str,
-) -> Optional[str]:
-    """Run the commit-phrase regex against *transcript*.
-
-    Returns the stripped prefix (with surrounding whitespace trimmed)
-    when the phrase matches; None otherwise.  Empty stripped text still
-    counts as a match — the user said the commit word with nothing
-    before it, intent is "send whatever's already buffered".
-    """
-    if pattern is None:
-        return None
-    m = pattern.match(transcript)
-    if not m:
-        return None
-    return m.group(1).strip()
 
 # Target sample rate / format for STT providers (Deepgram nova-3 prefers
 # 16 kHz mono int16, plus the local_whisper stub will too).  If a provider
@@ -105,7 +60,7 @@ TARGET_FORMAT = "s16"
 MAX_PCM_QUEUE = 100
 
 
-def attach(peer, *, voice_config: VoiceConfig, api_server: Any) -> None:
+def attach(peer, *, voice_config: VoiceConfig, api_server: Any = None) -> None:
     """Wire the inbound audio track of *peer* into the configured STT provider.
 
     Idempotent: if attach() is called twice on the same peer, only the
@@ -141,7 +96,7 @@ def attach(peer, *, voice_config: VoiceConfig, api_server: Any) -> None:
             name=f"webrtc-pump-{peer.peer_id[:8]}",
         )
         stt_task = asyncio.create_task(
-            _run_stt(peer, voice_config, api_server, pcm_q, pump_task),
+            _run_stt(peer, voice_config, pcm_q, pump_task),
             name=f"webrtc-stt-{peer.peer_id[:8]}",
         )
         peer.stt_task = stt_task
@@ -207,11 +162,10 @@ async def _pump_audio(track, pcm_q: "asyncio.Queue[Optional[bytes]]", peer_id: s
 async def _run_stt(
     peer,
     voice_config: VoiceConfig,
-    api_server: Any,
     pcm_q: "asyncio.Queue[Optional[bytes]]",
     pump_task: asyncio.Task,
 ) -> None:
-    """Consume the PCM queue, drive the STT provider, dispatch finals to the agent."""
+    """Consume the PCM queue, drive the STT provider, forward transcripts to the data channel."""
     stt = get_stt_provider(voice_config.stt)
 
     async def _pcm_iter() -> AsyncIterator[bytes]:
@@ -223,7 +177,7 @@ async def _run_stt(
 
     try:
         async for tx in stt.stream(_pcm_iter()):
-            await _handle_transcript(peer, tx, api_server)
+            await _handle_transcript(peer, tx)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -263,70 +217,16 @@ def _send_data_channel(peer, payload: dict) -> None:
         )
 
 
-def _cancel_silence_timer(peer) -> None:
-    timer: Optional[asyncio.Task] = peer.extra.get("silence_timer")
-    if timer is not None and not timer.done():
-        timer.cancel()
-    peer.extra["silence_timer"] = None
+async def _handle_transcript(peer, tx: Transcript) -> None:
+    """Forward an interim or final transcript to the data channel.
 
+    Pass-through behavior: every non-empty transcript (interim + final)
+    goes out as a {type:'transcript', role:'user'} envelope. The bridge
+    does NOT buffer, gate on commit-phrase, or run a silence timer —
+    those decisions belong to the PWA, which owns the dispatch trigger.
 
-def _arm_silence_timer(peer, api_server: Any, silence_sec: float) -> None:
-    """Schedule a flush of the current utterance buffer after *silence_sec*.
-
-    Only used when the configured silence window exceeds Deepgram's native
-    utterance_end_ms cap (5s).  Cancelled on every new is_final.
-    """
-    _cancel_silence_timer(peer)
-
-    async def _wait_then_flush() -> None:
-        try:
-            await asyncio.sleep(silence_sec)
-        except asyncio.CancelledError:
-            return
-        # Pull whatever's still buffered and dispatch.
-        buffer: List[str] = peer.extra.setdefault("utterance_buffer", [])
-        if not buffer:
-            return
-        utterance = " ".join(buffer).strip()
-        buffer.clear()
-        if not utterance:
-            return
-        logger.info(
-            "[stt-bridge] peer %s silence-timer flush: %s",
-            peer.peer_id,
-            utterance[:120] + ("..." if len(utterance) > 120 else ""),
-        )
-        asyncio.create_task(
-            _dispatch_to_agent(peer, utterance, api_server),
-            name=f"webrtc-agent-{peer.peer_id[:8]}",
-        )
-
-    peer.extra["silence_timer"] = asyncio.create_task(
-        _wait_then_flush(),
-        name=f"webrtc-silence-{peer.peer_id[:8]}",
-    )
-
-
-async def _handle_transcript(peer, tx: Transcript, api_server: Any) -> None:
-    """Forward an interim or final transcript downstream.
-
-    Live captions: if the peer has registered an ``on_transcript``
-    callback or opened the 'events' data channel, every transcript
-    (interim + final) is forwarded.  Empty-final markers
-    (UtteranceEnd) are skipped — they're internal sync points, not
-    user-visible text.
-
-    Final dispatch: only non-empty finals trigger an agent run.  An
-    empty final = UtteranceEnd marker, which we use to flush a buffered
-    utterance to the agent.
-
-    Commit phrase: when configured, an utterance ending in the commit
-    word (e.g. "over") is stripped and dispatched immediately, without
-    waiting for UtteranceEnd.
-
-    Silence timer: when ``silence_sec`` exceeds 5s (Deepgram's native
-    cap), a manual asyncio timer is armed on every new is_final and
-    flushes the buffer if no further speech arrives in the window.
+    Empty finals (Deepgram's UtteranceEnd marker) are skipped — they're
+    internal sync points, not user-visible text.
     """
     if peer.on_transcript is not None:
         try:
@@ -334,152 +234,61 @@ async def _handle_transcript(peer, tx: Transcript, api_server: Any) -> None:
         except Exception as e:  # pragma: no cover
             logger.warning("[stt-bridge] peer %s on_transcript hook raised: %s", peer.peer_id, e)
 
-    # Push user-speech transcripts over the data channel so the client
-    # can render live captions / final user bubbles without waiting for
-    # the agent to echo them back through the chat path.
-    if tx.text:
-        _send_data_channel(peer, {
-            "type": "transcript",
-            "text": tx.text,
-            "is_final": tx.is_final,
-            "role": "user",
-        })
-
-    if not tx.is_final:
+    if not tx.text:
         return
 
-    # Lazy-build the commit-phrase pattern once per peer.
-    if "commit_pattern" not in peer.extra:
-        peer.extra["commit_pattern"] = _make_commit_regex(
-            str(peer.extra.get("commit_phrase") or "")
-        )
-    commit_pattern = peer.extra["commit_pattern"]
-    silence_sec = float(peer.extra.get("silence_sec") or 0)
+    _send_data_channel(peer, {
+        "type": "transcript",
+        "text": tx.text,
+        "is_final": tx.is_final,
+        "role": "user",
+    })
 
-    # Buffer up multiple finals so we batch the agent dispatch on
-    # UtteranceEnd.  Deepgram emits is_final per utterance segment, then
-    # an UtteranceEnd marker when the speaker pauses.
-    buffer: List[str] = peer.extra.setdefault("utterance_buffer", [])
 
-    if tx.text:
-        # Commit-phrase short-circuit: build the joined buffer + this
-        # segment, run the regex against the combined text, and if it
-        # matches, flush immediately (skip the UtteranceEnd wait).
-        if commit_pattern is not None:
-            joined = (" ".join(buffer + [tx.text])).strip()
-            cleaned = _check_commit_phrase(commit_pattern, joined)
-            if cleaned is not None:
-                buffer.clear()
-                _cancel_silence_timer(peer)
-                if cleaned:
-                    logger.info(
-                        "[stt-bridge] peer %s commit-phrase flush: %s",
-                        peer.peer_id,
-                        cleaned[:120] + ("..." if len(cleaned) > 120 else ""),
-                    )
-                    asyncio.create_task(
-                        _dispatch_to_agent(peer, cleaned, api_server),
-                        name=f"webrtc-agent-{peer.peer_id[:8]}",
-                    )
-                return
+async def dispatch_to_agent(peer, utterance: str) -> None:
+    """Public dispatch entry point invoked by the PWA-driven dispatch listener.
 
-        buffer.append(tx.text)
-
-        # Re-arm the manual silence timer for windows that exceed
-        # Deepgram's native cap.  Below the cap, Deepgram's UtteranceEnd
-        # is the trusted trigger; above it we add our own backstop.
-        if silence_sec > _DG_NATIVE_SILENCE_CAP_SEC:
-            _arm_silence_timer(peer, api_server, silence_sec)
-        return
-
-    # Empty final => UtteranceEnd.
-    #
-    # When the user has configured a commit phrase OR a silence window
-    # larger than Deepgram's native cap, we IGNORE UtteranceEnd as a
-    # dispatch trigger — DG fires it on every ~1.5s pause, which would
-    # ship a half-formed sentence to the agent before the user is done
-    # thinking. Instead we let either the commit-phrase short-circuit or
-    # the manual silence timer be the dispatch trigger, and treat
-    # UtteranceEnd as an internal sync point only.
-    #
-    # When neither is configured (commit_phrase empty AND silence_sec
-    # under the DG cap), UtteranceEnd is the trusted natural-conversation
-    # trigger — we honor it as before.
-    if commit_pattern is not None or silence_sec > _DG_NATIVE_SILENCE_CAP_SEC:
-        return
-
-    _cancel_silence_timer(peer)
-    if not buffer:
-        return
-    utterance = " ".join(buffer).strip()
-    buffer.clear()
-    if not utterance:
-        return
-
-    logger.info(
-        "[stt-bridge] peer %s utterance: %s",
-        peer.peer_id,
-        utterance[:120] + ("..." if len(utterance) > 120 else ""),
-    )
+    POSTs *utterance* to the sidekick proxy and streams the agent's
+    reply back over the data channel as assistant transcript envelopes.
+    """
     asyncio.create_task(
-        _dispatch_to_agent(peer, utterance, api_server),
+        _dispatch_to_agent(peer, utterance),
         name=f"webrtc-agent-{peer.peer_id[:8]}",
     )
 
 
-async def _dispatch_to_agent(peer, utterance: str, api_server: Any) -> None:
+async def _dispatch_to_agent(peer, utterance: str) -> None:
     """Run an agent turn for *utterance* and route the streaming reply.
+
+    Wire shape: POST <proxy_url>/api/hermes/responses with the OpenAI
+    Responses API body (input + conversation + stream).  The proxy
+    forwards to the agent's /v1/responses, returns the SSE stream as-is.
+    The bridge parses the Responses API event format
+    (response.output_text.delta + response.completed) and mirrors text
+    deltas onto the data channel.
 
     Two sinks for the reply tokens:
 
-    1. The peer's TTS bridge (if attached, i.e. talk mode) — the bridge
-       registers a queue under peer.extra["tts_text_queue"].  We push
-       text deltas into that queue.
+    1. The peer's TTS bridge (talk mode) — registers a queue under
+       peer.extra["tts_text_queue"]; we push text deltas into it.
 
-    2. The peer's on_transcript hook is reused to also surface assistant
-       text back to the client (clients can disambiguate via a flag, or
-       — current V1 — render both into the chat log).
-
-    For the first overnight pass we keep the integration narrow: rather
-    than hijack /v1/chat/completions plumbing, we open an aiohttp client
-    against ``http://127.0.0.1:<port>/v1/chat/completions`` so we travel
-    the same code path as a normal client.  This is slower than calling
-    APIServerAdapter._run_agent directly but it's MUCH safer (uses the
-    same auth, same tokenization, same response_store).
+    2. The data channel — the PWA renders the assistant bubble from
+       these envelopes.  A terminal {role:'assistant', is_final:true}
+       fires after the SSE stream completes so the PWA can drop the
+       streaming-cursor on the bubble.
     """
-    # Determine which port to talk to.  api_server may be None during
-    # in-process tests.
-    host = "127.0.0.1"
-    port = 8642
-    if api_server is not None:
-        try:
-            host = getattr(api_server, "_host", host) or host
-            if host in ("0.0.0.0", "::", ""):
-                host = "127.0.0.1"
-            port = int(getattr(api_server, "_port", port) or port)
-        except Exception:
-            pass
+    proxy_url = (peer.extra.get("proxy_url") or "http://127.0.0.1:3001").rstrip("/")
+    url = f"{proxy_url}/api/hermes/responses"
 
-    headers = {"Content-Type": "application/json"}
-    api_key = None
-    if api_server is not None:
-        api_key = getattr(api_server, "_api_key", None) or None
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    # conv_name is sidekick's stable conversation key (sidekick-<slug>);
-    # passing it as body.conversation rather than the older
-    # X-Hermes-Session-Id header keeps voice and chat turns chained
-    # through ONE session row in state.db.  Earlier wire format spawned
-    # a divergent session (the duplicate moennxml-rooted row).
     conv_name = peer.extra.get("conv_name")
     body = {
-        "model": "hermes-agent",
-        "messages": [{"role": "user", "content": utterance}],
+        "input": utterance,
         "stream": True,
     }
     if conv_name:
         body["conversation"] = conv_name
+
+    headers = {"Content-Type": "application/json"}
 
     try:
         import aiohttp  # type: ignore
@@ -487,10 +296,15 @@ async def _dispatch_to_agent(peer, utterance: str, api_server: Any) -> None:
         logger.error("[stt-bridge] aiohttp missing for agent dispatch")
         return
 
-    url = f"http://{host}:{port}/v1/chat/completions"
     logger.debug("[stt-bridge] peer %s dispatching to %s", peer.peer_id, url)
 
     text_queue: Optional[asyncio.Queue] = peer.extra.get("tts_text_queue")
+
+    # Responses API SSE events arrive as `event: <name>\ndata: <json>\n\n`
+    # frames.  We track the current event name across lines so the
+    # data: payload can be interpreted in context.  See hermes-agent
+    # gateway/platforms/api_server.py:_handle_responses for the writer.
+    current_event: Optional[str] = None
 
     async with aiohttp.ClientSession() as sess:
         try:
@@ -502,48 +316,56 @@ async def _dispatch_to_agent(peer, utterance: str, api_server: Any) -> None:
                         peer.peer_id, resp.status, err,
                     )
                     return
-                async for line in resp.content:
-                    line = line.strip()
-                    if not line or line.startswith(b":"):
+                async for raw in resp.content:
+                    line = raw.rstrip(b"\r\n")
+                    if not line:
+                        # Blank line marks end of an SSE frame; reset event.
+                        current_event = None
+                        continue
+                    if line.startswith(b":"):
+                        continue  # comment
+                    if line.startswith(b"event:"):
+                        current_event = line[len(b"event:"):].strip().decode(
+                            "utf-8", errors="replace",
+                        )
                         continue
                     if not line.startswith(b"data:"):
                         continue
                     data = line[len(b"data:"):].strip()
-                    if data == b"[DONE]":
-                        break
+                    if not data:
+                        continue
                     try:
                         import json as _json
                         chunk = _json.loads(data)
                     except (ValueError, TypeError):
                         continue
-                    delta = (
-                        (chunk.get("choices") or [{}])[0]
-                        .get("delta", {})
-                        .get("content")
-                    )
-                    if not delta:
-                        continue
-                    if text_queue is not None:
-                        try:
-                            text_queue.put_nowait(delta)
-                        except asyncio.QueueFull:
-                            pass
-                    if peer.on_transcript is not None:
-                        try:
-                            await peer.on_transcript(delta, False)
-                        except Exception:  # pragma: no cover
-                            pass
-                    # Mirror assistant deltas onto the data channel so the
-                    # PWA can render the reply bubble without subscribing
-                    # to the same /v1/chat/completions stream the bridge
-                    # already consumes.  Each delta is a partial; the
-                    # client appends rather than replaces.
-                    _send_data_channel(peer, {
-                        "type": "transcript",
-                        "text": delta,
-                        "is_final": False,
-                        "role": "assistant",
-                    })
+                    # Honor an explicit type field on the payload when
+                    # the event header was missing (some SSE writers omit
+                    # the `event:` line and rely on payload.type).
+                    event_name = current_event or chunk.get("type")
+                    if event_name == "response.output_text.delta":
+                        delta = chunk.get("delta") or ""
+                        if not delta:
+                            continue
+                        if text_queue is not None:
+                            try:
+                                text_queue.put_nowait(delta)
+                            except asyncio.QueueFull:
+                                pass
+                        if peer.on_transcript is not None:
+                            try:
+                                await peer.on_transcript(delta, False)
+                            except Exception:  # pragma: no cover
+                                pass
+                        _send_data_channel(peer, {
+                            "type": "transcript",
+                            "text": delta,
+                            "is_final": False,
+                            "role": "assistant",
+                        })
+                    elif event_name == "response.completed":
+                        # Terminal event; loop will exit on next iter.
+                        break
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -556,9 +378,7 @@ async def _dispatch_to_agent(peer, utterance: str, api_server: Any) -> None:
                 except asyncio.QueueFull:
                     pass
             # Signal end-of-reply on the data channel so the PWA can drop
-            # the streaming-cursor on the assistant bubble. Without this,
-            # the bubble keeps `class="agent streaming"` forever and shows
-            # a perpetual blinking thinking-cursor under every prior reply.
+            # the streaming-cursor on the assistant bubble.
             _send_data_channel(peer, {
                 "type": "transcript",
                 "text": "",
@@ -567,4 +387,4 @@ async def _dispatch_to_agent(peer, utterance: str, api_server: Any) -> None:
             })
 
 
-__all__ = ["attach"]
+__all__ = ["attach", "dispatch_to_agent"]

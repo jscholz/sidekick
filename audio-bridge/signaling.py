@@ -107,25 +107,13 @@ async def handle_offer(request: "web.Request") -> "web.Response":
     # (sidekick-<slug>), the same key the classic-mode chat path sends.
     # Backwards-compat: an older client using `session_id` is read but
     # treated as conv_name; the bridge passes it through as
-    # body["conversation"] when dispatching to /v1/chat/completions, so
-    # voice and text turns chain through one session row in state.db.
+    # body["conversation"] when dispatching to /api/hermes/responses,
+    # so voice and text turns chain through one session row.
     conv_name = (
         payload.get("conv_name")
         or payload.get("session_id")
         or ""
     ).strip() or None
-
-    # Optional dictation-tuning knobs from the client.  silence_sec scopes
-    # the no-speech utterance flush (Deepgram's native utterance_end_ms
-    # tops out at 5000ms; the bridge wraps anything longer with a manual
-    # asyncio timer).  commit_phrase is a literal word; when matched at
-    # the end of an utterance, the bridge strips it and flushes
-    # immediately, mirroring the classic-mode "send word" UX.
-    try:
-        silence_sec = float(payload.get("silence_sec") or 0)
-    except (TypeError, ValueError):
-        silence_sec = 0.0
-    commit_phrase = (payload.get("commit_phrase") or "").strip().lower()
 
     # Build the PeerConnection and accept the offer.
     from aiortc import RTCSessionDescription  # local for lazy import
@@ -134,21 +122,22 @@ async def handle_offer(request: "web.Request") -> "web.Response":
     peer_id = make_peer_id()
     peer = PeerSession(peer_id=peer_id, mode=mode, pc=pc)
     peer.extra["conv_name"] = conv_name
-    peer.extra["silence_sec"] = silence_sec
-    peer.extra["commit_phrase"] = commit_phrase
     # Bridge dispatches to <proxy>/api/hermes/responses, NOT directly to the
     # agent backend. The sidekick proxy is the sole gateway between
     # sidekick-land and agent-land.
     peer.extra["proxy_url"] = _PROXY_URL
 
-    # Defer to bridge module to install ontrack / outbound track wiring.
-    # Importing here keeps peer.py free of bridge dependencies.
+    # Defer to bridge modules to install ontrack / outbound track wiring.
+    # The dispatch listener handles inbound DataChannel control messages
+    # ({type:'dispatch', text} from the PWA).
     import stt_bridge
     import tts_bridge
+    import dispatch_listener
 
     stt_bridge.attach(peer, voice_config=_VOICE_CONFIG, api_server=_API_SERVER_REF)
     if mode == "talk":
         tts_bridge.attach(peer, voice_config=_VOICE_CONFIG, api_server=_API_SERVER_REF)
+    dispatch_listener.attach(peer)
 
     # Lifecycle logging — useful for postmortems on the bike.
     @pc.on("connectionstatechange")
@@ -165,15 +154,16 @@ async def handle_offer(request: "web.Request") -> "web.Response":
     @pc.on("datachannel")
     def _on_datachannel(channel):  # pragma: no cover — wiring hook
         # The browser opens an 'events' channel inside the offer SDP for
-        # transcript + reply-delta text events.  Stash it on the peer so
-        # the STT bridge can push JSON envelopes when finals + assistant
-        # deltas arrive.  The client can open additional channels later
-        # with different labels; we only wire 'events' for V1.
+        # transcript + reply-delta text events. Stash it on the peer so
+        # the STT bridge can push JSON envelopes when transcripts arrive,
+        # and bind the dispatch listener so PWA-initiated control
+        # messages ({type:'dispatch', text}) reach the bridge.
         peer.data_channel = channel
         logger.info(
             "[peer %s] data channel opened: label=%s id=%s",
             peer_id, channel.label, channel.id,
         )
+        dispatch_listener.bind_if_pending(peer, channel)
 
         @channel.on("close")
         def _on_dc_close():  # pragma: no cover
