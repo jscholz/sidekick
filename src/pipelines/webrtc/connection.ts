@@ -50,12 +50,34 @@ interface CallSession {
   micStream: MediaStream;
   peerId: string | null;
   remoteAudio: HTMLAudioElement | null;
+  /** Outbound data channel for transcript + reply text events. */
+  dataChannel: RTCDataChannel | null;
   state: CallState;
   /**
    * Pending ICE candidates collected by onicecandidate before the
    * server returned an answer.  We drain them once we have a peer_id.
    */
   pendingCandidates: RTCIceCandidate[];
+}
+
+/**
+ * Wire-format envelopes from the server's data channel.  V1: transcript
+ * events for both user-speech and assistant-reply text.
+ */
+interface TranscriptEvent {
+  type: 'transcript';
+  text: string;
+  is_final: boolean;
+  role: 'user' | 'assistant';
+}
+type DataChannelEvent = TranscriptEvent;
+
+let onDataChannelEvent: ((ev: DataChannelEvent) => void) | null = null;
+
+/** Register a single global handler for data-channel events from the
+ *  active peer connection.  Replaces any prior handler. */
+export function setDataChannelListener(cb: (ev: DataChannelEvent) => void) {
+  onDataChannelEvent = cb;
 }
 
 let active: CallSession | null = null;
@@ -149,12 +171,36 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     remoteAudio.play().catch((e) => diag('[webrtc] remoteAudio.play err', e?.message));
   });
 
+  // Open a data channel BEFORE createOffer so the SDP includes the
+  // m=application section. Server stashes the matching channel via
+  // RTCPeerConnection.ondatachannel; messages are JSON envelopes
+  // (transcript / reply-delta) routed through onDataChannelEvent.
+  const dataChannel = pc.createDataChannel('events', { ordered: true });
+  dataChannel.addEventListener('open', () => {
+    log('[webrtc] data channel open');
+  });
+  dataChannel.addEventListener('close', () => {
+    log('[webrtc] data channel close');
+  });
+  dataChannel.addEventListener('message', (ev: MessageEvent) => {
+    if (typeof ev.data !== 'string') return;
+    let parsed: any;
+    try { parsed = JSON.parse(ev.data); }
+    catch (e: any) { diag('[webrtc] dc bad json:', e?.message); return; }
+    if (!parsed || typeof parsed.type !== 'string') return;
+    if (onDataChannelEvent) {
+      try { onDataChannelEvent(parsed as DataChannelEvent); }
+      catch (e: any) { diag('[webrtc] dc listener threw:', e?.message); }
+    }
+  });
+
   active = {
     pc,
     mode,
     micStream,
     peerId: null,
     remoteAudio,
+    dataChannel,
     state: 'connecting',
     pendingCandidates: [],
   };
@@ -282,6 +328,9 @@ export async function close(): Promise<void> {
       try { t.stop(); } catch { /* ignore */ }
     }
   } catch { /* ignore */ }
+  if (session.dataChannel) {
+    try { session.dataChannel.close(); } catch { /* ignore */ }
+  }
   try { session.pc.close(); } catch { /* ignore */ }
   if (session.remoteAudio) {
     try {

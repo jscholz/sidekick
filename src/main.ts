@@ -34,6 +34,7 @@ import * as attachments from './attachments.ts';
 import * as draft from './draft.ts';
 import * as composer from './composer.ts';
 import * as webrtcControls from './pipelines/webrtc/controls.ts';
+import * as webrtcConnection from './pipelines/webrtc/connection.ts';
 import * as bgTrace from './bgTrace.ts';
 import { stripReasoningLeak } from './backends/hermes.ts';
 
@@ -610,6 +611,60 @@ async function boot() {
   webrtcControls.init({
     getSessionId: () => sessionDrawer.getViewed() || backend.getCurrentSessionId?.() || null,
     onStatus: (msg, kind) => status.setStatus(msg, kind ?? null),
+  });
+
+  // WebRTC data-channel events: parallel text path that surfaces
+  // user-speech transcripts and assistant reply deltas as the call
+  // proceeds. Each event maps to a chat bubble — interim user
+  // transcripts feed the composer-interim line, finals + assistant
+  // deltas land as their own bubbles. The same agent run also flows
+  // through the gateway WS path; a turn-id dedupe is left for a
+  // follow-up if it produces visible duplicates in practice.
+  let dcAssistantStreamingId: string | null = null;
+  webrtcConnection.setDataChannelListener((ev) => {
+    if (ev.type !== 'transcript' || typeof ev.text !== 'string') return;
+    if (ev.role === 'user') {
+      if (!ev.is_final) {
+        // Interim: render into composer-interim (lightweight live caption).
+        const interim = document.getElementById('composer-interim');
+        if (interim) interim.textContent = ev.text;
+        return;
+      }
+      // Final user transcript: clear the interim, append a user bubble.
+      // Also reset the assistant streaming id so the next assistant
+      // delta starts a new bubble for the new turn.
+      const interim = document.getElementById('composer-interim');
+      if (interim) interim.textContent = '';
+      chat.addLine('You', ev.text, 's0', { source: 'voice' });
+      dcAssistantStreamingId = null;
+      return;
+    }
+    if (ev.role === 'assistant') {
+      // Assistant deltas are cumulative in the SSE path but per-chunk over
+      // the data channel. Concatenate into a single streaming bubble per
+      // assistant turn; close it implicitly when the next user-final lands
+      // or when the call closes.
+      if (!dcAssistantStreamingId) {
+        dcAssistantStreamingId = `dc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        chat.addLine(getAgentLabel(), ev.text, 'agent streaming', {
+          markdown: true,
+          replyId: dcAssistantStreamingId,
+        });
+        return;
+      }
+      const el = document.querySelector(
+        `.line.agent[data-reply-id="${CSS.escape(dcAssistantStreamingId)}"]`,
+      ) as HTMLElement | null;
+      if (!el) {
+        dcAssistantStreamingId = null;
+        return;
+      }
+      const prev = el.dataset.text || '';
+      const next = prev + ev.text;
+      el.dataset.text = next;
+      const textSpan = el.querySelector('.text') as HTMLElement | null;
+      if (textSpan) textSpan.innerHTML = miniMarkdown(next);
+    }
   });
 
   // Populate the mic picker once on boot. It needs prior getUserMedia
