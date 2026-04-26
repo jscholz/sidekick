@@ -33,7 +33,6 @@
 
 import { log, diag } from '../../util/log.ts';
 import { playFeedback } from '../../audio/feedback.ts';
-import * as settings from '../../settings.ts';
 
 export type CallMode = 'stream' | 'talk';
 
@@ -109,6 +108,29 @@ export function isOpen(): boolean {
 
 export function currentMode(): CallMode | null {
   return active ? active.mode : null;
+}
+
+/**
+ * Send a {type:'dispatch', text} envelope to the audio bridge over the
+ * data channel.  The bridge POSTs the text to /api/hermes/responses
+ * via the proxy and streams the agent reply back as assistant
+ * transcript envelopes.
+ *
+ * Returns true on success, false if no channel is open or the payload
+ * couldn't be serialized.  The dictation module owns the decision of
+ * WHEN to call this — silence-timer fire, commit-phrase match, or any
+ * future trigger.
+ */
+export function dispatch(text: string): boolean {
+  if (!active || !active.dataChannel) return false;
+  if (active.dataChannel.readyState !== 'open') return false;
+  try {
+    active.dataChannel.send(JSON.stringify({ type: 'dispatch', text }));
+    return true;
+  } catch (e: any) {
+    diag('[webrtc] dispatch send failed', e?.message);
+    return false;
+  }
 }
 
 export async function open(mode: CallMode, opts?: { sessionId?: string | null }): Promise<void> {
@@ -244,22 +266,19 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
 
   // POST the offer. conv_name is sidekick's stable conversation
   // identifier (sidekick-<slug>), the same key classic-mode chat sends
-  // — the STT bridge passes it as body.conversation when dispatching
-  // to /v1/chat/completions so voice and text turns chain through one
-  // session. Earlier wire format used X-Hermes-Session-Id which spawned
-  // a divergent session row in state.db (the moennxml duplicate).
+  // — the audio bridge passes it as body.conversation when dispatching
+  // to /api/hermes/responses so voice and text turns chain through one
+  // session row.
   //
-  // silence_sec + commit_phrase mirror classic-mode dictation tuning:
-  // commit word ("over") flushes immediately; silence_sec scopes the
-  // no-speech timeout (Deepgram's utterance_end_ms tops out at 5000ms;
-  // longer windows wrap with a manual asyncio timer server-side).
+  // No silence_sec / commit_phrase here: those decisions are PWA-side
+  // now (see dictation.ts). The bridge stays a thin transcript pipe
+  // and dispatches only when the PWA sends {type:'dispatch', text}
+  // over the data channel.
   const offerPayload = {
     sdp: pc.localDescription?.sdp ?? '',
     type: pc.localDescription?.type ?? 'offer',
     mode,
     conv_name: opts?.sessionId || null,
-    silence_sec: settings.get().silenceSec,
-    commit_phrase: settings.get().commitPhrase,
   };
 
   let answer: { peer_id: string; sdp: string; type: string } | null = null;

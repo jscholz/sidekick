@@ -20,6 +20,7 @@
  */
 
 import * as conn from './connection.ts';
+import * as dictation from './dictation.ts';
 import { log, diag } from '../../util/log.ts';
 
 export interface ControlsOpts {
@@ -60,6 +61,13 @@ export function init(o: ControlsOpts) {
   conn.setStateListener((state, mode) => {
     log('[webrtc-controls] state=', state, 'mode=', mode);
     setActive(mode, state);
+    // Reset the dictation state machine whenever a call ends so a
+    // pending utterance buffer or silence timer doesn't leak across
+    // calls. requesting-mic / connecting on a fresh open is also a
+    // safe place to clear (idempotent).
+    if (state === 'idle' || state === 'closing' || state === 'failed' || state === 'requesting-mic') {
+      dictation.reset();
+    }
     if (!opts?.onStatus) return;
     if (state === 'requesting-mic') opts.onStatus('Requesting mic…');
     else if (state === 'connecting') opts.onStatus(`Connecting (${mode})…`);

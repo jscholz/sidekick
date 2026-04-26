@@ -35,6 +35,7 @@ import * as draft from './draft.ts';
 import * as composer from './composer.ts';
 import * as webrtcControls from './pipelines/webrtc/controls.ts';
 import * as webrtcConnection from './pipelines/webrtc/connection.ts';
+import * as webrtcDictation from './pipelines/webrtc/dictation.ts';
 import * as bgTrace from './bgTrace.ts';
 import { stripReasoningLeak } from './backends/hermes.ts';
 
@@ -615,12 +616,18 @@ async function boot() {
 
   // WebRTC data-channel events: parallel text path that surfaces
   // user-speech transcripts and assistant reply deltas as the call
-  // proceeds. Each event maps to a chat bubble — interim user
-  // transcripts feed the composer-interim line, finals + assistant
-  // deltas land as their own bubbles. The same agent run also flows
-  // through the gateway WS path; a turn-id dedupe is left for a
-  // follow-up if it produces visible duplicates in practice.
+  // proceeds.
+  //
+  // User finals are NOT immediately rendered as bubbles any more — the
+  // bridge sends every is_final, but the PWA owns the dispatch trigger
+  // (silence timer + commit-phrase) via webrtcDictation. The user
+  // bubble renders once per dispatch (one utterance = one bubble), set
+  // up below via setUserBubbleHandler.
   let dcAssistantStreamingId: string | null = null;
+  webrtcDictation.setUserBubbleHandler((text) => {
+    chat.addLine('You', text, 's0', { source: 'voice' });
+    dcAssistantStreamingId = null;
+  });
   webrtcConnection.setDataChannelListener((ev) => {
     if (ev.type !== 'transcript' || typeof ev.text !== 'string') return;
     if (ev.role === 'user') {
@@ -630,13 +637,13 @@ async function boot() {
         if (interim) interim.textContent = ev.text;
         return;
       }
-      // Final user transcript: clear the interim, append a user bubble.
-      // Also reset the assistant streaming id so the next assistant
-      // delta starts a new bubble for the new turn.
+      // Final user transcript: clear the interim and feed the
+      // dictation state machine. webrtcDictation decides when to
+      // dispatch (silence timeout / commit-phrase); the user bubble
+      // renders only at dispatch time via the handler above.
       const interim = document.getElementById('composer-interim');
       if (interim) interim.textContent = '';
-      chat.addLine('You', ev.text, 's0', { source: 'voice' });
-      dcAssistantStreamingId = null;
+      webrtcDictation.handleUserFinal(ev.text);
       return;
     }
     if (ev.role === 'assistant') {
