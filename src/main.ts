@@ -435,6 +435,26 @@ async function boot() {
   const btnLock = document.getElementById('btn-lock');
   if (btnLock) btnLock.onclick = () => fakeLock.show();
 
+  // Voice transport toggle (dev kill-switch). Label reflects the current
+  // setting; click flips it and reloads so the new transport's wiring
+  // applies cleanly. Removed when classic pipeline is gutted.
+  const btnTransport = document.getElementById('btn-transport');
+  if (btnTransport) {
+    const sync = () => {
+      const t = settings.get().voiceTransport;
+      btnTransport.textContent = t === 'webrtc' ? 'RTC' : 'Classic';
+      btnTransport.classList.toggle('transport-classic', t === 'classic');
+    };
+    sync();
+    btnTransport.onclick = () => {
+      const cur = settings.get().voiceTransport;
+      const next = cur === 'webrtc' ? 'classic' : 'webrtc';
+      settings.set('voiceTransport', next);
+      log('voiceTransport flipped:', cur, '→', next, '(reloading)');
+      location.reload();
+    };
+  }
+
   // Sidebar — always visible (48px rail), expands on hamburger. Holds
   // new-chat, sessions list (if backend supports it), and info/settings
   // at the bottom. Desktop: expand state persists across reload and shifts

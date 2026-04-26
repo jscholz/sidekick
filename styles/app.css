@@ -275,6 +275,14 @@
   }
   .toolbar .toolbar-btn:hover { color: var(--fg); background: var(--surface); }
   .toolbar .toolbar-btn svg { width: 24px; height: 24px; }
+  /* Text-content variant for the dev transport toggle (RTC/Classic). */
+  .toolbar .toolbar-btn-text {
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.04em;
+    padding: 8px 10px; min-width: 0;
+  }
+  .toolbar .toolbar-btn-text.transport-classic {
+    color: var(--danger); /* red-ish so the kill-switch state is obvious */
+  }
   /* Stream icon — live/active state. A ring around the mic icon reacts
      to actual mic level via the --mic-peak CSS var (0..1), set from JS
      every worklet frame. When the var is 0 (silence) or unset, the ring
