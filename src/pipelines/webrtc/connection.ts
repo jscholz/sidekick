@@ -49,7 +49,16 @@ interface CallSession {
   mode: CallMode;
   micStream: MediaStream;
   peerId: string | null;
+  /** Hidden <audio> element playing the remote (TTS) audio track.
+   *  Chrome's WebRTC autoplay-exception keeps it audible without
+   *  explicit user-gesture context resumption. */
   remoteAudio: HTMLAudioElement | null;
+  /** AnalyserNode tapping a CLONED audio track (independent buffer
+   *  from the <audio>-consumed track) for smart-barge level
+   *  comparison. May read 0 in browsers that don't honor track-clone
+   *  independence — smart-barge degrades to "doesn't fire" in that
+   *  case but playback is unaffected. */
+  remoteAnalyser: AnalyserNode | null;
   /** Outbound data channel for transcript + reply text events. */
   dataChannel: RTCDataChannel | null;
   state: CallState;
@@ -82,6 +91,11 @@ export function setDataChannelListener(cb: (ev: DataChannelEvent) => void) {
 
 let active: CallSession | null = null;
 let onStateChange: ((s: CallState, mode: CallMode | null) => void) | null = null;
+/** Shared AudioContext for the analyser tap. Reused across calls. */
+let sharedAudioCtx: AudioContext | null = null;
+/** Hold-overs when ontrack fires before `active` is populated. */
+let pendingRemoteAudio: HTMLAudioElement | null = null;
+let pendingRemoteAnalyser: AnalyserNode | null = null;
 
 export function setStateListener(cb: (state: CallState, mode: CallMode | null) => void) {
   onStateChange = cb;
@@ -121,6 +135,40 @@ export function currentMode(): CallMode | null {
  * WHEN to call this — silence-timer fire, commit-phrase match, or any
  * future trigger.
  */
+/** Read-only access to the live mic MediaStream — needed by the
+ *  half-duplex (barge-in) controller in duplex.ts to attach an
+ *  AnalyserNode for volume monitoring during agent reply. Returns
+ *  null when no call is open. */
+export function getMicStream(): MediaStream | null {
+  return active?.micStream ?? null;
+}
+
+/** Direct read-only access to the remote-audio AnalyserNode that
+ *  connection.ts builds at ontrack time. duplex.ts uses this for
+ *  smart-barge level comparison. Returns null when no remote track
+ *  has arrived yet (or no call open). */
+export function getRemoteAnalyser(): AnalyserNode | null {
+  return active?.remoteAnalyser ?? null;
+}
+
+/** The shared AudioContext that was created + resumed synchronously
+ *  inside the click-handler chain at open() time. duplex.ts uses this
+ *  for the mic analyser so that BOTH analysers share one running
+ *  context — its own ctx would be created later (inside startBargePoll
+ *  via setInterval) and resume() would silently no-op outside the
+ *  user-gesture window, leaving the mic analyser reading silence. */
+export function getSharedAudioContext(): AudioContext | null {
+  return sharedAudioCtx;
+}
+
+/** Cancel local TTS playback by pausing + clearing the audio
+ *  element. Idempotent and safe when no call is open. */
+export function cancelRemotePlayback(): void {
+  if (!active?.remoteAudio) return;
+  try { active.remoteAudio.pause(); } catch { /* ignore */ }
+  try { active.remoteAudio.srcObject = null; } catch { /* ignore */ }
+}
+
 export function dispatch(text: string): boolean {
   if (!active || !active.dataChannel) return false;
   if (active.dataChannel.readyState !== 'open') return false;
@@ -139,14 +187,36 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     await close();
   }
 
+  // Create + resume the shared AudioContext SYNCHRONOUSLY, before any
+  // await. AudioContext.resume() only succeeds inside a user-gesture
+  // activation window; by the time ontrack fires the activation flag
+  // has expired and the ctx stays suspended, leaving the analyser
+  // reading 0.000 (smart-barge breaks). Doing it here — same task as
+  // the click that called open() — keeps it in the gesture window.
+  try {
+    const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (Ctx) {
+      if (!sharedAudioCtx) sharedAudioCtx = new Ctx();
+      if (sharedAudioCtx.state === 'suspended') {
+        sharedAudioCtx.resume().catch((e) => diag('[webrtc] ctx.resume err', e?.message));
+      }
+    }
+  } catch (e: any) {
+    diag('[webrtc] AudioContext init failed', e?.message);
+  }
+
   setState('requesting-mic');
   let micStream: MediaStream;
   try {
+    // No autoGainControl — on iOS Safari it amplifies remote-audio
+    // echo above the AEC threshold and we lose echo cancellation on
+    // speakerphone. Production WebRTC voice apps (Discord web, Meet)
+    // typically leave AGC off in voice-call constraints. echoCancellation
+    // and noiseSuppression stay on.
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
-        autoGainControl: true,
       },
     });
   } catch (e: any) {
@@ -171,27 +241,75 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
   // we tell the server "recvonly" by adding a recvonly transceiver.
   // Practically, aiortc's answer will include or omit a sending track
   // based on the mode parameter we POST, so we simply bind ontrack.
+  //
+  // Playback path: standard <audio srcObject> element. This is
+  // Chrome's WebRTC-exception to its autoplay policy — peer-connection
+  // audio plays without an explicit user-gesture-tied AudioContext
+  // resume. Going via Web Audio destination requires
+  // ctx.resume() to land within the gesture window, which by ontrack
+  // time has expired, so the AudioContext stays suspended and no
+  // audio reaches the speakers.
+  //
+  // Smart-barge analyser known-limitation: createMediaStreamSource
+  // on the same stream the <audio> element consumes returns 0.000
+  // (the element captures the stream's audio output). We try anyway
+  // via track.clone() — that gives the Web Audio source an
+  // independent track buffer to read from. Some browsers honor it,
+  // some don't.
   let remoteAudio: HTMLAudioElement | null = null;
   pc.addEventListener('track', (ev: RTCTrackEvent) => {
     log('[webrtc] ontrack kind=', ev.track.kind);
     if (ev.track.kind !== 'audio') return;
+    const stream = ev.streams && ev.streams[0]
+      ? ev.streams[0]
+      : (() => { const ms = new MediaStream(); ms.addTrack(ev.track); return ms; })();
     if (!remoteAudio) {
       remoteAudio = document.createElement('audio');
       remoteAudio.autoplay = true;
-      // playsinline lets iOS Safari render the audio without showing
-      // a fullscreen playback UI.
       remoteAudio.setAttribute('playsinline', '');
-      remoteAudio.style.display = 'none';
+      (remoteAudio as any).playsInline = true;
+      remoteAudio.style.position = 'absolute';
+      remoteAudio.style.left = '-9999px';
+      remoteAudio.style.width = '1px';
+      remoteAudio.style.height = '1px';
       document.body.appendChild(remoteAudio);
+      if (active) {
+        active.remoteAudio = remoteAudio;
+      } else {
+        pendingRemoteAudio = remoteAudio;
+      }
     }
-    if (ev.streams && ev.streams[0]) {
-      remoteAudio.srcObject = ev.streams[0];
-    } else {
-      const ms = new MediaStream();
-      ms.addTrack(ev.track);
-      remoteAudio.srcObject = ms;
-    }
+    remoteAudio.srcObject = stream;
     remoteAudio.play().catch((e) => diag('[webrtc] remoteAudio.play err', e?.message));
+
+    // Build Web Audio analyser from a CLONED audio track. The
+    // clone gets its own track buffer independent of what the
+    // <audio> element consumes — Web Audio source on the cloned
+    // track reads real samples (in browsers that honor the clone
+    // semantics). If this returns 0 anyway, smart-barge silently
+    // remains broken; at least playback works.
+    try {
+      const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (Ctx) {
+        if (!sharedAudioCtx) sharedAudioCtx = new Ctx();
+        const ctx = sharedAudioCtx;
+        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+        const audioTrack = ev.track;
+        const clonedTrack = audioTrack.clone();
+        const clonedStream = new MediaStream([clonedTrack]);
+        const src = ctx.createMediaStreamSource(clonedStream);
+        const an = ctx.createAnalyser();
+        an.fftSize = 256;
+        src.connect(an);
+        if (active) {
+          active.remoteAnalyser = an;
+        } else {
+          pendingRemoteAnalyser = an;
+        }
+      }
+    } catch (e: any) {
+      diag('[webrtc] remote analyser via clone failed:', e?.message);
+    }
   });
 
   // Open a data channel BEFORE createOffer so the SDP includes the
@@ -222,11 +340,14 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     mode,
     micStream,
     peerId: null,
-    remoteAudio,
+    remoteAudio: pendingRemoteAudio ?? remoteAudio,
+    remoteAnalyser: pendingRemoteAnalyser,
     dataChannel,
     state: 'connecting',
     pendingCandidates: [],
   };
+  pendingRemoteAudio = null;
+  pendingRemoteAnalyser = null;
 
   // Trickle ICE: queue candidates until we have a peer_id, then POST each.
   pc.addEventListener('icecandidate', (ev) => {
@@ -366,9 +487,13 @@ export async function close(): Promise<void> {
   try { session.pc.close(); } catch { /* ignore */ }
   if (session.remoteAudio) {
     try {
+      session.remoteAudio.pause();
       session.remoteAudio.srcObject = null;
       session.remoteAudio.remove();
     } catch { /* ignore */ }
+  }
+  if (session.remoteAnalyser) {
+    try { session.remoteAnalyser.disconnect(); } catch { /* ignore */ }
   }
   if (session.peerId) {
     try {

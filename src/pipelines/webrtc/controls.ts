@@ -3,24 +3,27 @@
  * to the connection module.
  *
  * UX:
- *   #btn-mic   = Stream mode (mic in, transcripts via SSE, no TTS audio)
- *                Toggle: tap to open, tap to close.
- *   #btn-speak = Talk mode (mic in + TTS out — full-duplex call)
- *                Toggle: tap to open, tap to close.
- *
- * Mutual exclusion: only one mode is active at a time. Tapping the other
- * button while a session is open closes the current one and opens the
- * new one.  We don't try to "upgrade" stream→talk in place; the cost of
- * a fresh PC handshake on tailnet is tens of milliseconds.
+ *   #btn-mic   = master on/off for the call. Tap to open, tap to close.
+ *                Mode (stream vs talk) is derived at open time from the
+ *                #btn-speak preference: speak-unmuted → talk; muted →
+ *                stream. Once a call is open, tapping #btn-speak changes
+ *                the *next* call's mode but does NOT cycle the current
+ *                connection — that was the old wiring and it killed
+ *                in-progress utterances on every preference flip.
+ *   #btn-speak = TTS-reply preference. Tap to mute / unmute. Persists
+ *                via settings.tts (default false = muted = stream
+ *                mode).
  *
  * State surface: `setStateListener` registers a single callback that
- * fires on every CallState transition.  We use it to flip the visual
- * `.active` class on whichever button owns the current session.  The
- * status bar is owned by main.ts; we forward via a callback prop.
+ * fires on every CallState transition. We use it to flip the visual
+ * `.active` class on #btn-mic only — #btn-speak's visual is the
+ * `.muted` class driven independently by user preference.
  */
 
 import * as conn from './connection.ts';
 import * as dictation from './dictation.ts';
+import * as duplex from './duplex.ts';
+import * as settings from '../../settings.ts';
 import { log, diag } from '../../util/log.ts';
 
 export interface ControlsOpts {
@@ -36,23 +39,16 @@ function btnEl(id: string): HTMLButtonElement | null {
 
 function setActive(mode: conn.CallMode | null, state: conn.CallState | null) {
   const mic = btnEl('btn-mic');
-  const speak = btnEl('btn-speak');
-  // Stickiness: a button keeps its .active class while it owns the
-  // current mode AND the connection is open, regardless of intermediate
-  // states.  The .connecting class signals work in flight and is purely
-  // additive.  This stops the visual flicker when ICE renegotiates or
-  // a transient 'disconnected' bubble fires mid-call.
-  const ownsActive = (which: 'stream' | 'talk') =>
-    conn.currentMode() === which && conn.isOpen();
-
-  const applyState = (el: HTMLButtonElement | null, which: 'stream' | 'talk') => {
-    if (!el) return;
-    el.classList.toggle('active', ownsActive(which));
-    const isThisModeWorkingNow = mode === which && (state === 'requesting-mic' || state === 'connecting');
-    el.classList.toggle('connecting', isThisModeWorkingNow);
-  };
-  applyState(mic, 'stream');
-  applyState(speak, 'talk');
+  if (!mic) return;
+  // .active reflects whether the call is open in EITHER mode (mic is
+  // the master on/off button — the choice of stream vs talk is a
+  // separate preference). .connecting is purely additive while a new
+  // call is mid-handshake.
+  mic.classList.toggle('active', conn.isOpen());
+  mic.classList.toggle(
+    'connecting',
+    state === 'requesting-mic' || state === 'connecting',
+  );
 }
 
 export function init(o: ControlsOpts) {
@@ -67,6 +63,10 @@ export function init(o: ControlsOpts) {
     // safe place to clear (idempotent).
     if (state === 'idle' || state === 'closing' || state === 'failed' || state === 'requesting-mic') {
       dictation.reset();
+      duplex.onCallClose();
+    }
+    if (state === 'connected') {
+      duplex.onCallOpen();
     }
     if (!opts?.onStatus) return;
     if (state === 'requesting-mic') opts.onStatus('Requesting mic…');
@@ -78,25 +78,47 @@ export function init(o: ControlsOpts) {
   });
 
   const mic = btnEl('btn-mic');
-  if (mic) mic.onclick = () => void toggle('stream');
+  if (mic) mic.onclick = () => void toggleCall();
 
   const speak = btnEl('btn-speak');
-  if (speak) speak.onclick = () => void toggle('talk');
+  if (speak) {
+    // Apply persisted preference at boot. settings.tts === true means
+    // TTS replies are unmuted; false (default) means muted.
+    applySpeakMuted(speak, !settings.get().tts);
+    speak.onclick = () => {
+      const nowMuted = !speak.classList.contains('muted');
+      applySpeakMuted(speak, nowMuted);
+      settings.set('tts', !nowMuted);
+      // Mid-call clicks update preference for the NEXT call only.
+      // We deliberately don't cycle the connection — the old wiring
+      // did, and it tore down the user's in-progress utterance every
+      // time. If a call is open, hint at this so it isn't surprising.
+      if (conn.isOpen() && opts?.onStatus) {
+        opts.onStatus(
+          nowMuted ? 'TTS muted (next call)' : 'TTS on (next call)',
+        );
+      }
+    };
+  }
 }
 
-async function toggle(mode: conn.CallMode) {
-  const cur = conn.currentMode();
-  // Already in this mode — close.
-  if (cur === mode && conn.isOpen()) {
-    log('[webrtc-controls] toggle close', mode);
+function applySpeakMuted(el: HTMLButtonElement, muted: boolean): void {
+  el.classList.toggle('muted', muted);
+  el.title = muted
+    ? 'TTS reply — currently muted; tap to unmute · ⌥T'
+    : 'TTS reply — currently on; tap to mute · ⌥T';
+}
+
+async function toggleCall() {
+  // Master on/off. If a call is open, close it. Otherwise open one,
+  // choosing the mode from the persisted #btn-speak preference.
+  if (conn.isOpen()) {
+    log('[webrtc-controls] toggleCall close (currentMode=', conn.currentMode(), ')');
     await conn.close();
     return;
   }
-  // Different mode active — close it first, then open the new one.
-  if (cur && cur !== mode) {
-    log('[webrtc-controls] switch', cur, '→', mode);
-    await conn.close();
-  }
+  const mode: conn.CallMode = settings.get().tts ? 'talk' : 'stream';
+  log('[webrtc-controls] toggleCall open mode=', mode);
   try {
     await conn.open(mode, { sessionId: opts?.getSessionId() ?? null });
   } catch (e: any) {

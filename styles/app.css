@@ -83,6 +83,18 @@
    * overlaying anything. Mobile re-adds the shadow below since it overlays. */
   #sidebar.expanded { width: 300px; }
   .sidebar-top { display: flex; flex-direction: column; padding: 10px 8px 6px; gap: 4px; }
+  /* Top header row: hamburger left, search right (Gemini-style). When the
+   * sidebar is collapsed (rail), the row collapses to just the hamburger
+   * — see #sidebar.collapsed .sb-search-btn rule below. justify-content
+   * defaults to space-between in expanded mode so the search button hugs
+   * the right edge regardless of sidebar width. */
+  .sidebar-top-row {
+    display: flex; flex-direction: row; align-items: center;
+    justify-content: space-between; gap: 4px;
+  }
+  /* Hide the search button in collapsed rail — only the hamburger needs to
+   * be tappable in the 48px-wide rail. Mirrors how .sb-label hides. */
+  #sidebar.collapsed .sb-search-btn { display: none; }
   .sidebar-content {
     flex: 1; overflow-y: auto; padding: 8px;
     opacity: 0; pointer-events: none; transition: opacity 0.12s ease 0.06s;
@@ -396,31 +408,39 @@
   .sess-menu button.danger { color: #e66; }
   .sess-menu button.danger:hover { background: rgba(230, 102, 102, 0.12); }
 
-  /* ── Sessions section header (title + inline filter input on the right) ── */
+  /* ── Sessions section header (full-width filter input row) ──
+   * The "Sessions" label was dropped per the Gemini-style redesign;
+   * the magnifier moved to the sidebar-top header (#sb-search). The
+   * filter is now the dominant interaction in this row — block layout
+   * so the input fills the full sidebar width. */
   .sb-sessions-header {
-    display: flex; align-items: center; gap: 8px;
-    margin: 6px 0 2px;
+    display: block;
+    margin: 6px 0 8px;
   }
-  .sb-sessions-header .sb-section-title { flex-shrink: 0; margin: 0; }
 
-  /* ── Inline session filter (lives inside .sb-sessions-header) ── */
+  /* ── Full-width session filter (lives inside .sb-sessions-header) ──
+   * Visually differentiated from the session-row "content" below:
+   * --surface-2 fill + --border-strong border so it reads as a control,
+   * not a free-floating text field. Focus brightens to --primary. */
   .sess-filter {
-    flex: 1; min-width: 0;
+    display: block;
+    width: 100%;
     box-sizing: border-box;
-    padding: 4px 8px;
-    background: var(--bg);
+    padding: 6px 10px;
+    background: var(--surface-2);
     color: var(--fg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    font: inherit; font-size: 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    font: inherit; font-size: 13px;
     line-height: 1.3;
     outline: none;
   }
   .sess-filter::placeholder { color: var(--muted); }
-  .sess-filter:focus { border-color: var(--primary); }
+  .sess-filter:focus { border-color: var(--primary); background: var(--surface); }
   /* Hide the input when the sidebar is collapsed (mirrors .sessions-list
      hide rule above) so the rail stays clean. */
   #sidebar.collapsed .sess-filter { display: none; }
+  #sidebar.collapsed .sb-sessions-header { display: none; }
 
   /* ── Cmd+K palette ── */
   .cmdk-dialog {
@@ -491,16 +511,18 @@
   .cmdk-close-row button:hover { background: var(--border-strong); }
 
   /* ── Fast tooltips (replace slow native HTML title=) ──
-     Native browser tooltips fire after ~1.5-3s. We want Claude.ai-ish ~600ms.
-     The JS in main.ts moves `title` → `data-tip` on hover (suppresses native)
-     and restores on leave (preserves a11y when keyboard-focused, etc). */
-  [data-tip] { position: relative; }
-  [data-tip]::after {
-    content: attr(data-tip);
-    position: absolute;
-    bottom: 100%; left: 50%;
-    transform: translateX(-50%);
-    margin-bottom: 6px;
+     Native browser tooltips fire after ~1.5-3s. We render our own at
+     ~600ms via JS in main.ts. Tooltip element is appended to <body>
+     (portal-style) so no ancestor stacking-context / overflow /
+     transform can clip it — z-index is sufficient because the parent
+     IS body, the top of the stack. The JS computes position from
+     each target's bounding rect and auto-flips between above/below
+     when near the viewport edge.
+
+     Show-delay is the JS const TOOLTIP_DELAY_MS in main.ts. */
+  .app-tooltip {
+    position: fixed;
+    z-index: 99999;
     padding: 4px 8px;
     background: var(--surface-2);
     color: var(--fg);
@@ -508,14 +530,55 @@
     border-radius: 4px;
     font-size: 12px;
     white-space: nowrap;
-    z-index: 9999;
     pointer-events: none;
-    animation: tip-fadein 120ms ease-out 600ms both;
+    animation: app-tip-fadein 120ms ease-out;
   }
-  @keyframes tip-fadein {
-    from { opacity: 0; transform: translateX(-50%) translateY(2px); }
-    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  @keyframes app-tip-fadein {
+    from { opacity: 0; transform: translateY(2px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
+  .app-tooltip.below { animation-name: app-tip-fadein-below; }
+  @keyframes app-tip-fadein-below {
+    from { opacity: 0; transform: translateY(-2px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Duplex debug overlay (?duplex-debug=1) ──
+     Floating top-right panel with live mic/remote peaks + barge state
+     for tuning the smart-barge thresholds. Hidden in production —
+     only mounts when the URL flag is set. */
+  .duplex-debug-overlay {
+    position: fixed;
+    top: 12px; right: 12px;
+    z-index: 99998;
+    padding: 8px 10px;
+    min-width: 240px;
+    background: rgba(0, 0, 0, 0.78);
+    color: #ddd;
+    border: 1px solid #444;
+    border-radius: 6px;
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    pointer-events: none;
+  }
+  .duplex-debug-overlay .ddb-header {
+    color: #888; margin-bottom: 6px;
+    text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px;
+  }
+  .duplex-debug-overlay .ddb-row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  .duplex-debug-overlay .ddb-label { width: 44px; color: #aaa; }
+  .duplex-debug-overlay .ddb-bar {
+    flex: 1; height: 6px; background: #1a1a1a;
+    border: 1px solid #333; border-radius: 2px;
+    overflow: hidden; min-width: 80px;
+  }
+  .duplex-debug-overlay .ddb-fill {
+    height: 100%; transition: width 30ms linear;
+  }
+  .duplex-debug-overlay .ddb-local  { background: #5af; }
+  .duplex-debug-overlay .ddb-remote { background: #fa5; }
+  .duplex-debug-overlay .ddb-val { width: 44px; text-align: right; color: #ccc; font-variant-numeric: tabular-nums; }
+  .duplex-debug-overlay .ddb-summary { display: block; margin-top: 6px; color: #999; }
+  .duplex-debug-overlay .ddb-fire { font-weight: 600; }
 
   /* ── Session info dialog (replaces alert() so text stays selectable) ── */
   .session-info-dialog {

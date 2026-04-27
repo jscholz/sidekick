@@ -19,9 +19,18 @@
      Overlays main content (doesn't reflow) so the chat stays put. -->
 <aside id="sidebar" class="collapsed" aria-expanded="false">
   <div class="sidebar-top">
-    <button id="sb-toggle" class="sb-icon-btn" title="Menu" aria-label="Menu">
-      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
-    </button>
+    <!-- Top row: hamburger left, search right (Gemini-style header).
+         Search opens the cmd+K palette; same handler as the old inline
+         magnifier next to the filter input. Hidden when sidebar is
+         collapsed (rail shows only hamburger). -->
+    <div class="sidebar-top-row">
+      <button id="sb-toggle" class="sb-icon-btn" title="Menu" aria-label="Menu">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
+      </button>
+      <button id="sb-search" class="sb-icon-btn sb-search-btn" title="Search · ⌘K" aria-label="Search sessions">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </button>
+    </div>
     <button id="sb-new-chat" class="sb-icon-btn" title="New chat">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
       <span class="sb-label">New chat</span>
@@ -31,8 +40,9 @@
     <!-- Sessions section only populated when active backend supports browsing. -->
     <div id="sb-sessions-section" style="display:none">
       <div class="sb-sessions-header">
-        <span class="sb-section-title">Sessions</span>
-        <!-- .sess-filter input is injected here by sessionDrawer.ts -->
+        <!-- .sess-filter input is injected here by sessionDrawer.ts.
+             Full-width filter row — the "Sessions" label was removed and
+             the magnifier moved to the sidebar top header. -->
       </div>
       <ul id="sessions-list" class="sessions-list"></ul>
     </div>
@@ -253,7 +263,7 @@
     <div class="row">
       <label for="set-sessions-filter">Sessions filter <span style="opacity:0.6;font-size:11px;">(deprecated)</span></label>
       <input type="text" id="set-sessions-filter" placeholder="sidekick-*,*whatsapp*,*telegram*" style="flex:1">
-      <span class="hint">Saved drawer filter — open the sidebar and use the inline filter input next to the &ldquo;Sessions&rdquo; header instead. This field will be removed in a future release.</span>
+      <span class="hint">Saved drawer filter — open the sidebar and use the inline &ldquo;Filter Sessions&rdquo; input at the top of the sessions list instead. This field will be removed in a future release.</span>
     </div>
     <div class="row">
       <label for="set-tts-engine">TTS engine</label>

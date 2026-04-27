@@ -36,6 +36,7 @@ import * as composer from './composer.ts';
 import * as webrtcControls from './pipelines/webrtc/controls.ts';
 import * as webrtcConnection from './pipelines/webrtc/connection.ts';
 import * as webrtcDictation from './pipelines/webrtc/dictation.ts';
+import * as webrtcDuplex from './pipelines/webrtc/duplex.ts';
 import * as bgTrace from './bgTrace.ts';
 import { stripReasoningLeak } from './backends/hermes.ts';
 
@@ -304,6 +305,12 @@ async function boot() {
   // search. Resume hits funnel through replaySessionMessages so behavior
   // matches a normal drawer tap.
   cmdkPalette.init({ onResume: replaySessionMessages });
+  // Sidebar-top search button → opens the cmd+K palette. Lives next to
+  // the hamburger as the rightmost icon in .sidebar-top-row (Gemini-style
+  // header). Replaces the old inline magnifier that used to sit beside
+  // the filter input.
+  const sbSearch = document.getElementById('sb-search');
+  if (sbSearch) sbSearch.onclick = (e) => { e.preventDefault(); cmdkPalette.open(); };
 
   // Info popup — triggered from the sidebar-bottom button.
   const btnInfo = document.getElementById('sb-info');
@@ -491,22 +498,81 @@ async function boot() {
   ambient.init();
 
   // Fast tooltips: native HTML `title` triggers a slow ~1.5-3s browser
-  // tooltip. We swap `title` → `data-tip` on hover so the CSS-driven
-  // fade-in (600ms delay) shows first, and the native tooltip is
-  // suppressed because the title attribute is briefly absent. Restored
-  // on mouseleave so screen readers + keyboard focus still find it.
+  // tooltip. We render our own tooltip element directly under <body>
+  // (NOT as a pseudo-element of the target) so it can't be clipped by
+  // any ancestor stacking-context, transform, overflow:hidden, or
+  // z-index ceiling. Position is computed from getBoundingClientRect
+  // each time, with auto-flip above/below based on viewport edges.
+  //
+  // closest('[title]') matters: hovering over an SVG / path child of
+  // a button lands the event on the child, which has no `title`.
+  // Without the walk-up, those buttons fall back to the native
+  // ~1.5s tooltip. closest() finds the button up the tree.
+  const TOOLTIP_DELAY_MS = 300;
+  let tipEl: HTMLDivElement | null = null;
+  let tipTarget: HTMLElement | null = null;
+  let tipShowTimer: number | null = null;
+  function clearShowTimer() {
+    if (tipShowTimer != null) {
+      clearTimeout(tipShowTimer);
+      tipShowTimer = null;
+    }
+  }
+  function hideTip() {
+    clearShowTimer();
+    if (tipEl) { tipEl.remove(); tipEl = null; }
+    tipTarget = null;
+  }
+  function showTip(target: HTMLElement, text: string) {
+    if (tipEl) tipEl.remove();
+    const el = document.createElement('div');
+    el.className = 'app-tooltip';
+    el.textContent = text;
+    document.body.appendChild(el);
+    const r = target.getBoundingClientRect();
+    const er = el.getBoundingClientRect();
+    let top = r.top - er.height - 6;
+    if (top < 4) {
+      el.classList.add('below');
+      top = r.bottom + 6;
+    }
+    let left = r.left + r.width / 2 - er.width / 2;
+    if (left < 4) left = 4;
+    if (left + er.width > window.innerWidth - 4) {
+      left = window.innerWidth - 4 - er.width;
+    }
+    el.style.top = `${top}px`;
+    el.style.left = `${left}px`;
+    tipEl = el;
+    tipTarget = target;
+  }
   document.body.addEventListener('mouseover', (e) => {
-    const t = e.target as HTMLElement;
-    if (!t || !t.hasAttribute || !t.hasAttribute('title')) return;
+    const t = (e.target as HTMLElement | null)?.closest?.('[title]') as HTMLElement | null;
+    if (!t) return;
+    if (t === tipTarget) return;  // already scheduled / shown
     const v = t.getAttribute('title');
-    if (v) { t.setAttribute('data-tip', v); t.removeAttribute('title'); }
+    if (!v) return;
+    // Suppress native tooltip while ours pends.
+    t.setAttribute('data-tip', v);
+    t.removeAttribute('title');
+    clearShowTimer();
+    tipShowTimer = window.setTimeout(() => {
+      tipShowTimer = null;
+      showTip(t, v);
+    }, TOOLTIP_DELAY_MS) as unknown as number;
   }, true);
   document.body.addEventListener('mouseout', (e) => {
-    const t = e.target as HTMLElement;
-    if (!t || !t.hasAttribute || !t.hasAttribute('data-tip')) return;
+    const t = (e.target as HTMLElement | null)?.closest?.('[data-tip]') as HTMLElement | null;
+    if (!t) return;
+    const related = (e as MouseEvent).relatedTarget as Node | null;
+    if (related && t.contains(related)) return;  // moving within the same tipped element
     const v = t.getAttribute('data-tip');
     if (v) { t.setAttribute('title', v); t.removeAttribute('data-tip'); }
+    if (tipTarget === t || tipShowTimer != null) hideTip();
   }, true);
+  // Hide tip on scroll/resize since the bounding rect we computed is stale.
+  window.addEventListener('scroll', hideTip, true);
+  window.addEventListener('resize', hideTip);
 
   // Drive the mic-button peak indicator. Smooth the raw worklet peaks
   // with a light exponential filter so the CSS var eases between frames.
@@ -624,25 +690,99 @@ async function boot() {
   // bubble renders once per dispatch (one utterance = one bubble), set
   // up below via setUserBubbleHandler.
   let dcAssistantStreamingId: string | null = null;
+  // Streaming user bubble for live dictation. Created on first interim
+  // of a new utterance; updated as interims/finals arrive; finalized
+  // on dispatch (drop streaming class, set text to dispatched utterance).
+  // Replaces the old composer-interim caption strip — the bubble lives
+  // inline in chat so the user sees their words land in the conversation
+  // surface as they speak.
+  let dcUserStreamingId: string | null = null;
+  // Joined is_final segments for the in-progress utterance. Mirrors
+  // dictation.ts's buffer; we keep our own copy so the bubble can show
+  // bufferedFinals + currentInterim without poking dictation internals.
+  let dcUserBufferedFinals = '';
+  function userBubbleEl(): HTMLElement | null {
+    if (!dcUserStreamingId) return null;
+    return document.querySelector(
+      `.line[data-reply-id="${CSS.escape(dcUserStreamingId)}"]`,
+    ) as HTMLElement | null;
+  }
+  function ensureUserBubble(initial: string): HTMLElement | null {
+    if (!dcUserStreamingId) {
+      dcUserStreamingId = `dc-u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      chat.addLine('You', initial, 's0 streaming', {
+        source: 'voice',
+        replyId: dcUserStreamingId,
+      });
+    }
+    return userBubbleEl();
+  }
+  function setUserBubbleText(text: string): void {
+    const el = userBubbleEl();
+    if (!el) return;
+    const span = el.querySelector('.text') as HTMLElement | null;
+    if (span) span.textContent = text;
+  }
+  webrtcDictation.setOnResetHandler(() => {
+    // Call closed (or reopened) — drop any in-flight streaming state so
+    // the next utterance starts a fresh bubble. If a streaming bubble
+    // is still around at reset time, it means dispatch never fired for
+    // it (otherwise setUserBubbleHandler would have cleared the id) —
+    // i.e. the user toggled stream off mid-utterance. Remove the orphan
+    // entirely; no agent reply is coming for it. Dispatched bubbles
+    // already have dcUserStreamingId=null and are unaffected.
+    const el = userBubbleEl();
+    if (el) el.remove();
+    dcUserStreamingId = null;
+    dcUserBufferedFinals = '';
+  });
   webrtcDictation.setUserBubbleHandler((text) => {
-    chat.addLine('You', text, 's0', { source: 'voice' });
+    // Dispatch fired — finalize whichever streaming bubble is in flight.
+    // dictation gives us the post-commit-phrase-stripped utterance, which
+    // may differ from our running display (which still includes the
+    // commit word); use dictation's value as the source of truth.
+    const el = userBubbleEl();
+    if (el) {
+      const span = el.querySelector('.text') as HTMLElement | null;
+      if (span) span.textContent = text;
+      el.classList.remove('streaming');
+    } else {
+      // No streaming bubble (e.g. dispatch fired with no preceding interim
+      // — defensive). Render a plain user bubble so the utterance still
+      // shows up in chat.
+      chat.addLine('You', text, 's0', { source: 'voice' });
+    }
+    dcUserStreamingId = null;
+    dcUserBufferedFinals = '';
     dcAssistantStreamingId = null;
   });
   webrtcConnection.setDataChannelListener((ev) => {
     if (ev.type !== 'transcript' || typeof ev.text !== 'string') return;
     if (ev.role === 'user') {
+      // Half-duplex: while the agent is speaking, the iOS speakerphone
+      // re-captures TTS output as mic input and Deepgram transcribes
+      // it. We can't tell the difference between that and real user
+      // speech from the transcript alone, so drop user transcripts
+      // entirely while suppressing. The barge-in path in
+      // webrtcDuplex watches mic VOLUME (separate from transcripts)
+      // to release suppression when the user actually wants to
+      // interrupt.
+      if (webrtcDuplex.isSuppressing()) return;
       if (!ev.is_final) {
-        // Interim: render into composer-interim (lightweight live caption).
-        const interim = document.getElementById('composer-interim');
-        if (interim) interim.textContent = ev.text;
+        // Interim: upsert the streaming user bubble. Display = previously
+        // is_finalized segments for this utterance + current interim.
+        const display = (dcUserBufferedFinals + ' ' + ev.text).trim();
+        if (!display) return;
+        ensureUserBubble(display);
+        setUserBubbleText(display);
         return;
       }
-      // Final user transcript: clear the interim and feed the
-      // dictation state machine. webrtcDictation decides when to
-      // dispatch (silence timeout / commit-phrase); the user bubble
-      // renders only at dispatch time via the handler above.
-      const interim = document.getElementById('composer-interim');
-      if (interim) interim.textContent = '';
+      // Final segment: append to our buffered-finals copy, update the
+      // bubble to reflect the locked-in text, then feed the dictation
+      // state machine so it can buffer for dispatch (silence/commit).
+      dcUserBufferedFinals = (dcUserBufferedFinals + ' ' + ev.text).trim();
+      ensureUserBubble(dcUserBufferedFinals);
+      setUserBubbleText(dcUserBufferedFinals);
       webrtcDictation.handleUserFinal(ev.text);
       return;
     }
@@ -653,6 +793,10 @@ async function boot() {
       // run completes — that's the signal to drop the streaming class
       // (and its thinking-cursor) so the bubble stops blinking once
       // the reply is actually done.
+      //
+      // Duplex hooks: notify webrtcDuplex so it can suppress user
+      // transcripts during the reply (kills iOS speakerphone-feedback
+      // re-transcription) and start the barge-in volume watcher.
       if (ev.is_final) {
         if (dcAssistantStreamingId) {
           const el = document.querySelector(
@@ -661,8 +805,10 @@ async function boot() {
           if (el) el.classList.remove('streaming', 'pending');
         }
         dcAssistantStreamingId = null;
+        webrtcDuplex.onAssistantFinal();
         return;
       }
+      webrtcDuplex.onAssistantDelta();
       if (!dcAssistantStreamingId) {
         dcAssistantStreamingId = `dc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         chat.addLine(getAgentLabel(), ev.text, 'agent streaming', {

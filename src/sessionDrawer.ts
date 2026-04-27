@@ -45,6 +45,27 @@ const lastSeenIds = new Set<string>();
  *  successfully resolves the server list. */
 let cachedSessions: any[] = [];
 
+/** Sessions announced via the SSE `session-started` event but not yet
+ *  reflected in the server's listSessions response. These survive across
+ *  refresh() cycles (which would otherwise wipe them when cachedSessions
+ *  is replaced by the server fetch) so the row stays visible even when
+ *  the user switches to a different session mid-flight. Drained when the
+ *  server's listSessions catches up (id appears in cachedSessions). */
+const pendingSessions = new Map<string, any>();
+
+/** Merge pending sessions into a base list, prepended, deduped by id.
+ *  Used by every render path so the synthesized rows are always present
+ *  alongside the server-canonical ones. */
+function mergePending(base: any[]): any[] {
+  if (pendingSessions.size === 0) return base;
+  const baseIds = new Set(base.map(s => s.id));
+  const extras: any[] = [];
+  for (const [id, row] of pendingSessions) {
+    if (!baseIds.has(id)) extras.push(row);
+  }
+  return extras.length ? [...extras, ...base] : base;
+}
+
 /** Current filter input value. Empty = no filter. Persisted to IDB so a
  *  page reload restores the same filter. */
 let currentFilter: string = '';
@@ -128,6 +149,13 @@ export async function refresh() {
     const sessions = await backend.listSessions(50);
     await sessionCache.putListCache(sessions);
     cachedSessions = sessions;
+    // Drain pending sessions whose ids the server now knows about.
+    // Persisted server row supersedes the synthesized one.
+    if (pendingSessions.size) {
+      for (const id of Array.from(pendingSessions.keys())) {
+        if (sessions.some(s => s.id === id)) pendingSessions.delete(id);
+      }
+    }
     renderListFiltered(listEl, active);
 
     // Stale-foreground guard: if the chat pane is showing a session
@@ -208,22 +236,26 @@ async function runServerFilterReconcile(q: string) {
 
 /** Re-render the visible session list with the current filter applied. */
 function renderListFiltered(listEl: HTMLElement, activeId: string) {
+  // Merge pending (SSE-announced, not-yet-persisted) sessions into the
+  // base list before filtering. They survive refresh() cycles so the row
+  // stays visible across session-switch even when cachedSessions gets
+  // overwritten by the server fetch.
+  const merged = mergePending(cachedSessions);
   const filtered = currentFilter
-    ? applyFilter(cachedSessions, parseQuery(currentFilter))
-    : cachedSessions;
+    ? applyFilter(merged, parseQuery(currentFilter))
+    : merged;
   // Empty list under a non-empty filter shows "No matches." instead of
   // the generic "No past sessions yet." so the user knows it's the filter
   // (not an empty server) hiding everything.
-  if (filtered.length === 0 && currentFilter && cachedSessions.length > 0) {
+  if (filtered.length === 0 && currentFilter && merged.length > 0) {
     listEl.innerHTML = '<li class="sess-empty">No matches.</li>';
     return;
   }
   // Only show the "new conversation" placeholder when the active session
-  // is genuinely missing from the full cached list (= brand-new chat,
-  // not yet persisted server-side). When the active session IS in the
-  // cached list but got filtered out by the filter input, that's just
-  // narrowing — don't surface a misleading "not yet started" row.
-  const isFresh = !!activeId && !cachedSessions.some(s => s.id === activeId);
+  // is genuinely missing from the merged list (= brand-new chat that
+  // hasn't even hit /v1/responses yet, so no SSE row either). Once the
+  // user sends a message, the pending row covers them.
+  const isFresh = !!activeId && !merged.some(s => s.id === activeId);
   renderList(listEl, filtered, activeId, isFresh);
 }
 
@@ -532,20 +564,16 @@ function ensureFilterInput(): HTMLInputElement | null {
   input.id = 'sess-filter-input';
   input.type = 'text';
   input.className = 'sess-filter';
-  input.placeholder = 'Filter (* wildcard)';
+  input.placeholder = 'Filter Sessions';
+  // Wildcard hint moved out of placeholder into the tooltip so the
+  // placeholder reads cleanly. The cmd+K palette button (in the sidebar
+  // top header) covers richer cross-message search.
+  input.title = 'Wildcards: * matches any text. Filter matches against session title, snippet, and id.';
   input.spellcheck = false;
   input.autocomplete = 'off';
   input.setAttribute('aria-label', 'Filter sessions');
   input.value = currentFilter;
-  // Insert inline alongside the "Sessions" label in the header. Section
-  // markup is:
-  //   <div id="sb-sessions-section">
-  //     <div class="sb-sessions-header">
-  //       <span class="sb-section-title">Sessions</span>
-  //       <input class="sess-filter">  ← injected here
-  //     </div>
-  //     <ul id="sessions-list">…</ul>
-  //   </div>
+  // Insert as the only child of the (now full-width) sessions header.
   header.appendChild(input);
 
   input.addEventListener('input', () => {
@@ -629,6 +657,61 @@ export function init(opts: {
       renderListFiltered(listEl, active);
     }
   });
+  attachDrawerEvents();
+}
+
+/** SSE subscription for `session-started` (and future drawer events).
+ *  Browser auto-reconnects via the `retry:` hint set by the server, so we
+ *  attach once and let EventSource handle network blips. Idempotent. */
+let drawerEventsSrc: EventSource | null = null;
+function attachDrawerEvents() {
+  if (drawerEventsSrc) return;
+  if (typeof EventSource === 'undefined') return;  // older non-browser contexts
+  try {
+    const src = new EventSource('/api/hermes/drawer-events');
+    src.addEventListener('session-started', (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data);
+        handleSessionStarted(data);
+      } catch (e: any) { diag(`drawer-events: parse failed: ${e?.message}`); }
+    });
+    src.onerror = () => {
+      // EventSource auto-reconnects on its own. Log once when it transitions
+      // to closed so we know if it gave up entirely.
+      if (src.readyState === EventSource.CLOSED) {
+        diag('drawer-events: SSE closed (will not auto-reconnect)');
+      }
+    };
+    drawerEventsSrc = src;
+    log('drawer-events: subscribed');
+  } catch (e: any) {
+    diag(`drawer-events: subscribe failed: ${e?.message}`);
+  }
+}
+
+function handleSessionStarted(ev: { id?: string; snippet?: string; source?: string; started_at?: string }) {
+  if (!ev?.id) return;
+  // Race guards: skip if the persisted row already exists OR we've already
+  // got a pending entry. Both ways the same row is already in the merged
+  // render output; firing again would just re-render needlessly.
+  if (cachedSessions.some(s => s.id === ev.id)) return;
+  if (pendingSessions.has(ev.id)) return;
+  // Synthesize a row matching listSessions shape. messageCount defaults
+  // to 1 (the user's first turn — the agent reply hasn't persisted yet).
+  // lastMessageAt is in seconds (the same epoch unit fmtRelativeTime uses).
+  const startedSec = ev.started_at ? Math.floor(Date.parse(ev.started_at) / 1000) : Math.floor(Date.now() / 1000);
+  pendingSessions.set(ev.id, {
+    id: ev.id,
+    title: null,
+    snippet: typeof ev.snippet === 'string' ? ev.snippet : '',
+    source: ev.source || 'api_server',
+    messageCount: 1,
+    lastMessageAt: startedSec,
+  });
+  const listEl = document.getElementById('sessions-list');
+  if (!listEl) return;
+  const active = viewedSessionId || optimisticActiveId || backend.getCurrentSessionId?.() || '';
+  renderListFiltered(listEl, active);
 }
 
 /** Called after the user changes the sessions-filter setting. Drops the

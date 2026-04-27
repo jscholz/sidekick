@@ -27,16 +27,27 @@
 
 import * as conn from './connection.ts';
 import * as settings from '../../settings.ts';
+import { playFeedback } from '../../audio/feedback.ts';
 import { log, diag } from '../../util/log.ts';
 
 let buffer: string[] = [];
 let silenceTimer: ReturnType<typeof setTimeout> | null = null;
 let onUserBubble: ((text: string) => void) | null = null;
+let onReset: (() => void) | null = null;
 
 /** Caller registers a handler that renders the user bubble (and any
  *  other "utterance committed" UI) at dispatch time. */
 export function setUserBubbleHandler(cb: (text: string) => void): void {
   onUserBubble = cb;
+}
+
+/** Caller registers a handler that fires from inside reset() so any
+ *  out-of-tree state mirroring the dictation buffer (e.g. main.ts's
+ *  streaming user bubble id) can clear in lockstep. Lets us keep
+ *  controls.ts as the single owner of when-to-reset (state listener)
+ *  while still notifying everyone who cares. */
+export function setOnResetHandler(cb: () => void): void {
+  onReset = cb;
 }
 
 /** Clear all per-call dictation state. Call on call open AND close. */
@@ -45,6 +56,9 @@ export function reset(): void {
   if (silenceTimer !== null) {
     clearTimeout(silenceTimer);
     silenceTimer = null;
+  }
+  if (onReset) {
+    try { onReset(); } catch { /* swallow — out-of-tree listener */ }
   }
 }
 
@@ -79,7 +93,11 @@ function dispatchNow(): void {
     try { onUserBubble(utterance); } catch (e: any) { diag('[dictation] bubble handler err', e?.message); }
   }
   const ok = conn.dispatch(utterance);
-  if (!ok) diag('[dictation] dispatch send failed (channel not open?)');
+  if (!ok) {
+    diag('[dictation] dispatch send failed (channel not open?)');
+    return;
+  }
+  try { playFeedback('send'); } catch { /* feedback is best-effort */ }
 }
 
 function armSilenceTimer(): void {
@@ -113,7 +131,10 @@ export function handleUserFinal(text: string): void {
   const cleaned = checkCommitPhrase(joined);
   if (cleaned !== null) {
     // Match: replace whatever's buffered with the cleaned prefix and
-    // dispatch immediately.
+    // dispatch immediately. The 'commit' chime fires the moment the
+    // send-word lands so the user gets feedback BEFORE the dispatch
+    // round-trips — pairs with the 'send' chime in dispatchNow().
+    try { playFeedback('commit'); } catch { /* feedback is best-effort */ }
     buffer = cleaned ? [cleaned] : [];
     dispatchNow();
     return;
