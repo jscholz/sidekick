@@ -894,10 +894,12 @@ async function boot() {
       const bar = document.querySelector('.memo-bar');
       if (bar) bar.remove();
       memoActive = false;
-      const composerInputEl = document.getElementById('composer-input') as HTMLElement | null;
-      const btnMicEl = document.getElementById('btn-mic') as HTMLElement | null;
-      if (composerInputEl) composerInputEl.style.display = '';
-      if (btnMicEl) btnMicEl.style.display = '';
+      // Textarea + btnMic stay visible during memo (bottom-row-only
+      // memo bar UX), so no display:'' to reset here. Restore the
+      // composer-actions row in case it was hidden during memo.
+      const composerEl3 = document.querySelector('.composer') as HTMLElement | null;
+      const actionsEl = composerEl3?.querySelector('.composer-actions') as HTMLElement | null;
+      if (actionsEl) actionsEl.style.display = '';
     }
     if (capture.hasActive()) capture.release();
   };
@@ -1112,12 +1114,12 @@ async function boot() {
 
   function exitMemoMode() {
     memoActive = false;
-    composerInput.style.display = '';
-    if (btnMic) btnMic.style.display = '';
     // Restore the composer-actions row + put the send button back in its
     // original DOM home (last child of .composer-actions-right). The bar
     // itself is removed by memo.cleanup(). Re-query each time since the
     // composer DOM is stable but the const lived in the onclick scope.
+    // Note: textarea + btnMic stay visible during memo (bottom-row-only
+    // memo bar UX), so no display:'' to reset here.
     const composerEl2 = composerInput.parentElement;
     const actionsEl = composerEl2?.querySelector('.composer-actions') as HTMLElement | null;
     const actionsRightEl = composerEl2?.querySelector('.composer-actions-right') as HTMLElement | null;
@@ -1206,17 +1208,16 @@ async function boot() {
 
         // Routing depends on the per-memo autoSend flag captured at
         // record time (settings.micAutoSend at the moment startMemo()
-        // was called). autoSend=true → ship as a chat message + drop
-        // the placeholder card; autoSend=false → land in the composer
-        // textarea for review/edit/manual send.
+        // was called). autoSend=true → append to composer (so any
+        // already-typed text is preserved) and immediately submit;
+        // autoSend=false → just append, leaving the user to review +
+        // send manually. Both paths converge through composer.appendText
+        // → composer.submit, which is the same codepath as clicking Send.
         if (card) card.remove();
         await voiceMemos.remove(id);
+        composer.appendText(text);
         if (autoSend) {
-          chat.addLine('You', text, 's0', { source: 'voice' });
-          backend.sendMessage(text, { voice: true });
-          playFeedback('send');
-        } else {
-          composer.appendText(text);
+          composer.submit();
         }
       }
     );
@@ -1326,7 +1327,12 @@ async function boot() {
     return { id, card };
   }
 
-  async function handleMemoResult(audioBlob: Blob, durationMs?: number, autoSend = false) {
+  async function handleMemoResult(audioBlob: Blob, durationMs?: number, autoSend = false, path = 'unknown') {
+    // Diagnostic for the iOS PTT auto-send bug — echoes the captured
+    // autoSend flag + which release path triggered this finish, so
+    // future regressions are debuggable from the JS console without
+    // having to instrument startMemo from scratch.
+    log(`memo finish: path=${path} autoSend=${autoSend} blob=${audioBlob ? Math.round(audioBlob.size/1024)+'KB' : 'null'} live-setting=${settings.get().micAutoSend}`);
     if (!audioBlob) return;
     // Always render the placeholder card + enqueue the blob, regardless
     // of connectivity. Matches the "user gets immediate visual feedback"
@@ -1393,7 +1399,13 @@ async function boot() {
   /** Start memo mode (recording bar + MediaRecorder → blob).
    *  Returns false if mic acquisition fails. autoSend determines whether
    *  the resulting transcript routes via composer or auto-dispatches —
-   *  threaded into handleMemoResult / flushOutbox. */
+   *  threaded into handleMemoResult / flushOutbox.
+   *
+   *  UI shape: only the BOTTOM row of the composer swaps to the waveform
+   *  bar. The textarea above stays visible (existing typed text remains
+   *  in view; on memo completion the transcript appends at the cursor
+   *  for autoSend=false, or appends + sends together for autoSend=true).
+   *  The send button is moved into the memo bar so it stays right-anchored. */
   async function startMemo(autoSend: boolean): Promise<void> {
     if (memoActive) return;
     if (dictateActive) await webrtcDictate.stop();
@@ -1402,8 +1414,6 @@ async function boot() {
     unlock(player);
     audioSession.prepareForCapture();
     memoActive = true;
-    composerInput.style.display = 'none';
-    if (btnMic) btnMic.style.display = 'none';
     updateSendButtonState();
     composerSend.onclick = async () => {
       if (composerSend.disabled) return;
@@ -1411,7 +1421,7 @@ async function boot() {
       try {
         const { audioBlob, durationMs } = await memo.stop();
         exitMemoMode();
-        await handleMemoResult(audioBlob, durationMs, autoSend);
+        await handleMemoResult(audioBlob, durationMs, autoSend, 'composerSend.click');
       } finally {
         composerSend.disabled = false;
       }
@@ -1425,7 +1435,7 @@ async function boot() {
       sendBtn: composerSend,
       onDone: (audioBlob) => {
         exitMemoMode();
-        handleMemoResult(audioBlob, undefined, autoSend);
+        handleMemoResult(audioBlob, undefined, autoSend, 'memo.onDone');
       },
       onCancel: () => {
         exitMemoMode();
@@ -1523,19 +1533,63 @@ async function boot() {
     }
   }
 
-  // ── Mic button — click + PTT dispatch ──────────────────────────────
+  // ── Mic button — click + PTT-as-button gesture ─────────────────────
   if (btnMic) {
-    // Tap: toggle. PTT: pointerdown=start, pointerup=stop. The chosen
-    // gesture is determined by settings.micPTT at the moment of the
-    // gesture so a mid-session flip in the menu takes effect cleanly.
+    // Two gesture modes, controlled by settings.micPTT (read at gesture
+    // start so a mid-session flip in the menu takes effect cleanly):
+    //
+    //   PTT off → tap toggles start/stop (legacy click semantics).
+    //
+    //   PTT on  → pointerdown arms a 200ms hold timer. If the user
+    //             releases before the timer fires, NOTHING happens (the
+    //             tap is a no-op — we surface a transient hint so the
+    //             user understands PTT is active and they need to hold).
+    //             If the timer fires, startVoice() runs, the memo bar
+    //             swaps in for the actions row, and the mic button
+    //             takes pointer-capture so the rest of the gesture
+    //             routes here regardless of where the finger moves:
+    //               - Drag LEFT into the trash zone → bar paints red,
+    //                 label flips to "RELEASE TO DISCARD".
+    //               - Drag back over the bar → bar paints green,
+    //                 label flips back to "RELEASE TO SEND".
+    //               - Release in green → finalize via the existing
+    //                 send-on-stop path (respects autoSend).
+    //               - Release in red → discard the blob (memo.cancel +
+    //                 exitMemoMode).
+    //               - pointercancel (e.g. iOS interruption) → discard.
     const PTT_HOLD_MS = 200;
     let pttHoldTimer: ReturnType<typeof setTimeout> | null = null;
-    /** True while a PTT gesture is in progress (we own this start). */
+    /** True once the hold timer fired and we kicked off startVoice — the
+     *  rest of the gesture (move/up) belongs to PTT, not to a tap. */
     let pttArmed = false;
     /** True when we should swallow the synthesized click that
      *  pointerup fires after a PTT release (otherwise the click would
      *  re-toggle voice). */
     let pttSuppressClick = false;
+    /** Memo bar element — cached after the timer fires so pointermove
+     *  doesn't re-querySelector every frame. */
+    let pttMemoBar: HTMLElement | null = null;
+    /** True when the pointer is currently in the trash zone. Drives the
+     *  red-state class swap; only the transition writes to the DOM. */
+    let pttDiscardArmed = false;
+
+    /** Decide whether the pointer (in viewport coords) is over the
+     *  trash zone. We use the trash button's bounding rect plus a
+     *  generous left-side hit margin so the user doesn't have to be
+     *  pixel-precise — sliding finger leftward off the bar is a
+     *  natural "discard" gesture. */
+    function isOverTrashZone(clientX: number, clientY: number): boolean {
+      if (!pttMemoBar) return false;
+      const trash = pttMemoBar.querySelector('.memo-trash') as HTMLElement | null;
+      if (!trash) return false;
+      const r = trash.getBoundingClientRect();
+      // Vertical: anywhere within the bar's height. Horizontal: over
+      // the trash button OR to its LEFT (off-bar = still discard).
+      const barRect = pttMemoBar.getBoundingClientRect();
+      const inV = clientY >= barRect.top - 8 && clientY <= barRect.bottom + 8;
+      const inH = clientX <= r.right + 8;
+      return inV && inH;
+    }
 
     btnMic.onclick = async (e) => {
       if (pttSuppressClick) {
@@ -1545,7 +1599,17 @@ async function boot() {
         e.stopImmediatePropagation();
         return;
       }
-      // Plain tap. Toggle: stop if active, start if idle.
+      // Quick tap with PTT enabled — surface a hint so the user
+      // understands why nothing happened. The actual no-op behavior
+      // falls out for free: the hold timer was cleared on pointerup
+      // before reaching the threshold, so pttArmed stayed false and
+      // no startVoice was kicked off.
+      if (settings.get().micPTT && !voiceActive()) {
+        status.setStatus('Hold to record (push-to-talk is on)');
+        return;
+      }
+      // Plain tap (PTT off, or already-active toggle). Toggle: stop if
+      // active, start if idle.
       if (voiceActive()) {
         await stopVoice();
       } else {
@@ -1553,7 +1617,7 @@ async function boot() {
       }
     };
 
-    btnMic.addEventListener('pointerdown', (_e) => {
+    btnMic.addEventListener('pointerdown', (e: PointerEvent) => {
       // Only arm PTT if the user has it enabled AND nothing is already
       // running. If memoActive / dictateActive / call open, treat the
       // press as a tap (let the click handler stop it).
@@ -1561,26 +1625,60 @@ async function boot() {
       if (voiceActive()) return;
       pttArmed = false;
       pttSuppressClick = false;
+      pttDiscardArmed = false;
+      pttMemoBar = null;
+      const pointerId = e.pointerId;
       pttHoldTimer = setTimeout(() => {
         pttHoldTimer = null;
         pttArmed = true;
+        // Capture the pointer so subsequent move/up events route here
+        // even when the finger drifts off the mic button (the user
+        // will be dragging leftward toward the trash zone). Without
+        // capture, leaving btnMic during the drag would fire
+        // pointerleave + lose track of the pointer until pointerup
+        // somewhere else in the document.
+        try { btnMic.setPointerCapture(pointerId); } catch {}
         // Kick off the appropriate start path. Don't synthesize a click
         // — the click would also fire on pointerup which we explicitly
-        // want to handle as the "release = stop" signal, not "release =
-        // toggle off via click".
+        // want to handle as the "release = finalize" signal, not
+        // "release = toggle off via click".
         void startVoice();
         // Visual cue for memo mode (existing CSS handles the styling).
+        // Cache the bar ref for the move handler. The bar is created
+        // synchronously inside memo.start → renderBar, but startVoice
+        // is async (mic permission, audio context resume) so we poll
+        // briefly until the DOM lands.
         if (settings.get().micCall === false) {
-          // Memo path will shortly render the bar; tag it.
-          setTimeout(() => {
-            const bar = document.querySelector('.memo-bar');
-            if (bar) bar.classList.add('memo-bar-ptt');
-          }, 50);
+          const findBar = (tries: number) => {
+            const bar = document.querySelector('.memo-bar') as HTMLElement | null;
+            if (bar) {
+              bar.classList.add('memo-bar-ptt');
+              pttMemoBar = bar;
+            } else if (tries > 0) {
+              setTimeout(() => findBar(tries - 1), 30);
+            }
+          };
+          findBar(10);  // up to ~300ms — covers iOS getUserMedia delay
         }
       }, PTT_HOLD_MS);
     });
 
-    const pttRelease = (e: Event) => {
+    btnMic.addEventListener('pointermove', (e: PointerEvent) => {
+      if (!pttArmed) return;
+      if (!pttMemoBar) {
+        // Bar might not have rendered yet (mic permission still
+        // resolving). Try once.
+        pttMemoBar = document.querySelector('.memo-bar') as HTMLElement | null;
+        if (!pttMemoBar) return;
+      }
+      const overTrash = isOverTrashZone(e.clientX, e.clientY);
+      if (overTrash !== pttDiscardArmed) {
+        pttDiscardArmed = overTrash;
+        pttMemoBar.classList.toggle('discard-armed', overTrash);
+      }
+    });
+
+    const pttRelease = (e: PointerEvent) => {
       if (pttHoldTimer) { clearTimeout(pttHoldTimer); pttHoldTimer = null; }
       if (!pttArmed) return;
       pttArmed = false;
@@ -1589,15 +1687,43 @@ async function boot() {
       pttSuppressClick = true;
       e.preventDefault();
       e.stopPropagation();
+      try { btnMic.releasePointerCapture(e.pointerId); } catch {}
+      const wasDiscard = pttDiscardArmed || e.type === 'pointercancel';
+      pttDiscardArmed = false;
+      pttMemoBar = null;
       // Defer one tick so any async startVoice() initialization (e.g.
       // memo's MediaRecorder, WebRTC handshake) settles before we ask
       // it to stop. stopVoice() handles the case where start hasn't
       // fully completed yet (each primitive's stop is idempotent).
-      setTimeout(() => { void stopVoice(); }, 0);
+      setTimeout(() => {
+        if (wasDiscard && memoActive) {
+          // User dragged to trash zone (or iOS interrupted) — discard
+          // the blob. memo.cancel + exitMemoMode skip the transcribe
+          // path entirely so the user gets nothing in the composer
+          // and nothing sent.
+          log('memo finish: path=ptt-discard (gesture released over trash zone)');
+          memo.cancel();
+          exitMemoMode();
+        } else {
+          // Normal release — same path as composerSend.click(): stop
+          // memo, run handleMemoResult with the captured autoSend.
+          void stopVoice();
+        }
+      }, 0);
     };
     btnMic.addEventListener('pointerup', pttRelease);
     btnMic.addEventListener('pointercancel', pttRelease);
-    btnMic.addEventListener('pointerleave', pttRelease);
+    // pointerleave: NOT a release trigger once the gesture is armed
+    // (pointer-capture guarantees move/up route here regardless of
+    // where the finger goes). But if the user drags off the button
+    // BEFORE the hold timer fires, we abort — otherwise the timer
+    // would expire and start a memo with no way to end it (pointerup
+    // would happen elsewhere without capture). This preserves the
+    // pre-PTT-as-button cancel-on-quick-drag behavior.
+    btnMic.addEventListener('pointerleave', () => {
+      if (pttArmed) return;  // gesture already armed; capture handles it
+      if (pttHoldTimer) { clearTimeout(pttHoldTimer); pttHoldTimer = null; }
+    });
 
     // Esc / Enter while memo bar is up.
     document.addEventListener('keydown', (e) => {
