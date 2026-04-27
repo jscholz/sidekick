@@ -179,8 +179,10 @@ async function boot() {
   // these toggle the active call (mic stream / talk) on or off.
   audioSession.init({
     onPlay: () => {
-      // BT play: open or resume the most-recent WebRTC mode. If a call is
-      // already open, no-op. Otherwise default to stream mode (mic in).
+      // BT play: open or resume a call. If one is already open, no-op.
+      // We click the unified composer mic so the BT gesture goes through
+      // the same dispatch path as a tap (respects the user's three
+      // toggles — call/PTT/auto-send).
       if (webrtcControls.isOpen()) return;
       const btnMicEl = document.getElementById('btn-mic');
       if (btnMicEl) btnMicEl.click();
@@ -439,9 +441,10 @@ async function boot() {
       return;
     }
 
-    // Alt+M: toggle mic. `e.code` survives Mac's Alt+key → µ remapping.
-    // Fires even from within text inputs — the intent to start streaming
-    // is explicit enough that composer focus shouldn't eat it.
+    // Alt+M: toggle the unified composer mic. `e.code` survives Mac's
+    // Alt+key → µ remapping. Fires even from within text inputs — the
+    // intent to start voice input is explicit enough that composer
+    // focus shouldn't eat it.
     if (e.altKey && e.code === 'KeyM') {
       e.preventDefault();
       document.getElementById('btn-mic')?.click();
@@ -575,8 +578,10 @@ async function boot() {
   window.addEventListener('scroll', hideTip, true);
   window.addEventListener('resize', hideTip);
 
-  // Drive the mic-button peak indicator. Smooth the raw worklet peaks
-  // with a light exponential filter so the CSS var eases between frames.
+  // Drive the mic-button peak indicator on the composer mic (the
+  // toolbar #btn-mic is gone; the composer mic is now the single
+  // voice-input affordance). Smooth raw worklet peaks with a light
+  // exponential filter so the CSS var eases between frames.
   const btnMicForPulse = document.getElementById('btn-mic');
   if (btnMicForPulse) {
     let smoothed = 0;
@@ -667,13 +672,15 @@ async function boot() {
     if (rowModel) rowModel.style.display = 'none';
   }
 
-  // ── Mic + Speak buttons (WebRTC) ──────────────────────────────────────
-  //   btn-mic   = stream-mode call (mic in, transcripts via data channel)
-  //   btn-speak = talk-mode call (mic in + TTS out)
+  // ── Speak button (WebRTC TTS preference) ──────────────────────────────
+  //   btn-speak = TTS-reply preference (settings.tts). Drives whether
+  //               an open call ships TTS audio (talk mode) or just
+  //               STT-only (stream mode).
   //
-  // webrtcControls.init wires the click handlers; the connection module
-  // owns the lifecycle. No transport toggle, no classic fallback.
-  const btnMic = document.getElementById('btn-mic');
+  // The unified composer mic owns the call open/close lifecycle —
+  // see the composer-mic dispatch wiring further down. controls.ts
+  // exports toggleCall / openCall / closeIfOpen for the dispatcher
+  // to invoke.
   const btnSpeak = document.getElementById('btn-speak');
 
   webrtcControls.init({
@@ -870,9 +877,9 @@ async function boot() {
       if (bar) bar.remove();
       memoActive = false;
       const composerInputEl = document.getElementById('composer-input') as HTMLElement | null;
-      const btnMemoEl = document.getElementById('btn-memo') as HTMLElement | null;
+      const btnMicEl = document.getElementById('btn-mic') as HTMLElement | null;
       if (composerInputEl) composerInputEl.style.display = '';
-      if (btnMemoEl) btnMemoEl.style.display = '';
+      if (btnMicEl) btnMicEl.style.display = '';
     }
     if (capture.hasActive()) capture.release();
   };
@@ -1078,15 +1085,17 @@ async function boot() {
 
   updateSendButtonState();  // initial state
 
-  // ── Voice memo button ──────────────────────────────────────────────────
-  // Tap mic → textarea becomes recording bar; send-button action swaps to
-  // stop+send. Visual icon is always the paper-airplane (no label swap).
-  const btnMemo = document.getElementById('btn-memo');
+  // ── Voice input — unified composer mic ────────────────────────────────
+  // ONE button (#btn-mic) drives all four voice modes. The chevron menu
+  // exposes three orthogonal toggles (PTT / call / auto-send) that
+  // determine what happens when the user taps or holds the mic. See
+  // the mic-mode dropdown wiring further down.
+  const btnMic = document.getElementById('btn-mic');
 
   function exitMemoMode() {
     memoActive = false;
     composerInput.style.display = '';
-    btnMemo.style.display = '';
+    if (btnMic) btnMic.style.display = '';
     // Restore the composer-actions row + put the send button back in its
     // original DOM home (last child of .composer-actions-right). The bar
     // itself is removed by memo.cleanup(). Re-query each time since the
@@ -1108,7 +1117,7 @@ async function boot() {
   async function flushOutbox() {
     const result = await queue.flush(
       async (text) => { backend.sendMessage(text); },
-      async (blob, mimeType, id) => {
+      async (blob, mimeType, id, autoSend) => {
         // Timeout scales with blob size: small memos under 1MB ≈ minute or
         // less of audio (Deepgram batch returns in 1-3s) get the snappy
         // 15s budget. Larger blobs get 60s — the upload alone for a 5MB
@@ -1177,13 +1186,20 @@ async function boot() {
           return;
         }
 
-        // Compose-only: per webrtc-plan.md §11, memo never auto-sends —
-        // the transcript always lands in the composer textarea so the
-        // user can review, append more, or scrub before shipping. Drop
-        // the placeholder card; matches the live path.
+        // Routing depends on the per-memo autoSend flag captured at
+        // record time (settings.micAutoSend at the moment startMemo()
+        // was called). autoSend=true → ship as a chat message + drop
+        // the placeholder card; autoSend=false → land in the composer
+        // textarea for review/edit/manual send.
         if (card) card.remove();
         await voiceMemos.remove(id);
-        composer.appendText(text);
+        if (autoSend) {
+          chat.addLine('You', text, 's0', { source: 'voice' });
+          backend.sendMessage(text, { voice: true });
+          playFeedback('send');
+        } else {
+          composer.appendText(text);
+        }
       }
     );
     if (result.skipped) diag('outbox: flush skipped (already flushing)');
@@ -1236,8 +1252,10 @@ async function boot() {
   /** Save blob to IDB + enqueue for retry + render a placeholder memo card
    *  in chat. Always runs on record stop, regardless of online/offline —
    *  gives the user immediate visual feedback during the quiet
-   *  transcription window. Returns {id, card, rec}. */
-  async function renderMemoCard(audioBlob, durationMs) {
+   *  transcription window. Returns {id, card, rec}. autoSend is stored
+   *  on the queue item so flushOutbox can route correctly even when the
+   *  flush happens minutes later (periodic retry / reconnect). */
+  async function renderMemoCard(audioBlob, durationMs, autoSend = false) {
     // Hard ceiling: the bridge accepts up to 25MB at /v1/transcribe and
     // the proxy mirrors that. webm voice is ~30KB/s so 25MB ≈ 14 min.
     // Anything larger gets DROPPED here with a status warning rather
@@ -1275,8 +1293,8 @@ async function boot() {
     }
 
     await voiceMemos.save(rec);
-    await queue.enqueue({ id, type: 'audio', blob: audioBlob, mimeType: audioBlob.type, durationMs });
-    log('memo: queued audio blob (' + Math.round(audioBlob.size / 1024) + 'KB)');
+    await queue.enqueue({ id, type: 'audio', blob: audioBlob, mimeType: audioBlob.type, durationMs, autoSend });
+    log('memo: queued audio blob (' + Math.round(audioBlob.size / 1024) + 'KB) autoSend=' + autoSend);
 
     // Background waveform extraction
     voiceMemos.extractWaveform(audioBlob).then(bars => {
@@ -1290,13 +1308,13 @@ async function boot() {
     return { id, card };
   }
 
-  async function handleMemoResult(audioBlob: Blob, durationMs?: number) {
+  async function handleMemoResult(audioBlob: Blob, durationMs?: number, autoSend = false) {
     if (!audioBlob) return;
     // Always render the placeholder card + enqueue the blob, regardless
     // of connectivity. Matches the "user gets immediate visual feedback"
     // UX spec and keeps ONE processing path (flushOutbox) whether we're
     // online or offline.
-    const { card } = await renderMemoCard(audioBlob, durationMs);
+    const { card } = await renderMemoCard(audioBlob, durationMs, autoSend);
 
     const offline = navigator.onLine === false || !backend.isConnected();
     if (offline) {
@@ -1318,55 +1336,56 @@ async function boot() {
     flushOutbox().catch(() => {});
   }
 
-  // Dictate-mode wiring — initialise once so the module knows which
-  // textarea to target. Independent of memo; either is exclusive at
-  // any moment but they share the same #btn-memo entry point with a
-  // dropdown chevron switching between them.
+  // ── Cursor-aware dictation (call=true, autoSend=false) ─────────────
+  // webrtcDictate is the live-streaming + cursor-aware injection module.
+  // init() binds the textarea + wires its user-input/cursor listeners.
   webrtcDictate.init(composerInput);
   let dictateActive = false;
   webrtcDictate.setStateListener((opening, error) => {
     dictateActive = opening;
-    const btnMemoForState = document.getElementById('btn-memo') as HTMLElement | null;
-    if (btnMemoForState) btnMemoForState.classList.toggle('active', opening);
+    if (btnMic) btnMic.classList.toggle('active', opening);
     if (error) {
       status.setStatus(`Dictate error: ${error}`, 'err');
     } else if (opening) {
-      status.setStatus('Dictating — speak; tap mic / Send / Esc to stop', 'live');
+      status.setStatus('Listening — speak; tap mic / Send / Esc to stop', 'live');
     } else {
       status.setStatus('');
     }
     updateSendButtonState();
   });
 
-  // Tracks the WebRTC call mode that was active when memo/dictate
-  // started, so we can re-open it once the mode completes. Mic is
-  // exclusive: any open call must close before getUserMedia is acquired.
-  let resumeCallMode: 'stream' | 'talk' | null = null;
-  const resumeCall = () => {
-    const mode = resumeCallMode;
-    resumeCallMode = null;
-    if (!mode) return;
-    const target = mode === 'stream' ? document.getElementById('btn-mic')
-      : document.getElementById('btn-speak');
-    if (target) (target as HTMLElement).click();
-  };
+  // ── Unified composer-mic state + dispatch ──────────────────────────
+  //
+  // Three orthogonal toggles drive the four modes:
+  //   settings.micPTT      false=click-toggle, true=press-and-hold
+  //   settings.micCall     false=memo (offline-first), true=live WebRTC
+  //   settings.micAutoSend false=land in composer, true=auto-dispatch
+  //
+  // Decision matrix:
+  //   call=false autoSend=false → memo → composer (current legacy)
+  //   call=false autoSend=true  → memo → fire-and-forget on stop (NEW)
+  //   call=true  autoSend=true  → live chat-bubble streaming (today's call)
+  //   call=true  autoSend=false → cursor-aware dictation (NEW)
+  //
+  // Each primitive operation is idempotent: startVoice waits for the
+  // state to settle before flipping. The unified click handler reads
+  // toggles AT TAP TIME (not at boot) so flipping the menu mid-session
+  // takes effect on the next tap without requiring a teardown.
 
-  /** Start memo mode (the long-standing mic-button behavior). Extracted
-   *  into a named function so the dropdown's "Memo" item, the offline
-   *  fallback path, and the ⌘⇧M hotkey can all call it. */
-  async function startMemo(): Promise<void> {
+  /** Start memo mode (recording bar + MediaRecorder → blob).
+   *  Returns false if mic acquisition fails. autoSend determines whether
+   *  the resulting transcript routes via composer or auto-dispatches —
+   *  threaded into handleMemoResult / flushOutbox. */
+  async function startMemo(autoSend: boolean): Promise<void> {
     if (memoActive) return;
     if (dictateActive) await webrtcDictate.stop();
-    resumeCallMode = webrtcControls.isOpen() ? webrtcControls.currentMode() : null;
     if (webrtcControls.isOpen()) await webrtcControls.closeIfOpen();
     // iOS AVAudioSession prep: prepareForCapture before getUserMedia.
-    // unlock(player) keeps the legacy <audio id="player"> element warm
-    // so the session category settles correctly.
     unlock(player);
     audioSession.prepareForCapture();
     memoActive = true;
     composerInput.style.display = 'none';
-    if (btnMemo) btnMemo.style.display = 'none';
+    if (btnMic) btnMic.style.display = 'none';
     updateSendButtonState();
     composerSend.onclick = async () => {
       if (composerSend.disabled) return;
@@ -1374,8 +1393,7 @@ async function boot() {
       try {
         const { audioBlob, durationMs } = await memo.stop();
         exitMemoMode();
-        await handleMemoResult(audioBlob, durationMs);
-        resumeCall();
+        await handleMemoResult(audioBlob, durationMs, autoSend);
       } finally {
         composerSend.disabled = false;
       }
@@ -1389,33 +1407,27 @@ async function boot() {
       sendBtn: composerSend,
       onDone: (audioBlob) => {
         exitMemoMode();
-        handleMemoResult(audioBlob);
-        resumeCall();
+        handleMemoResult(audioBlob, undefined, autoSend);
       },
       onCancel: () => {
         exitMemoMode();
-        resumeCall();
       },
     });
     if (!ok) {
       exitMemoMode();
       status.setStatus('Mic not available', 'err');
-      resumeCallMode = null;
     }
   }
 
-  /** Start dictate mode (or fall back to memo if offline). No-op if
-   *  dictate is already active or memo is recording (memo owns the
-   *  mic — defer until it's done). */
+  /** Start cursor-aware live dictation (call=true, autoSend=false). */
   async function startDictate(): Promise<void> {
     if (dictateActive) return;
     if (memoActive) return;
     if (!navigator.onLine) {
       status.setStatus('Offline — using memo mode', null);
-      await startMemo();
+      await startMemo(false);
       return;
     }
-    if (webrtcControls.isOpen()) await webrtcControls.closeIfOpen();
     unlock(player);
     audioSession.prepareForCapture();
     try {
@@ -1428,35 +1440,153 @@ async function boot() {
     }
   }
 
-  /** Stop dictate if it's running. Idempotent. */
   async function stopDictate(): Promise<void> {
     if (!dictateActive) return;
     await webrtcDictate.stop();
   }
 
+  /** Start live chat-bubble streaming (call=true, autoSend=true). The
+   *  existing webrtcControls + dictation.ts wiring handles the rest:
+   *  silence/commit-phrase auto-dispatch, user/agent bubble rendering. */
+  async function startCallStream(): Promise<void> {
+    if (memoActive) return;
+    if (dictateActive) await webrtcDictate.stop();
+    if (webrtcControls.isOpen()) return;
+    // openCall picks the mode per the user's #btn-speak preference at
+    // open time — same behavior as the old toolbar mic, just invoked
+    // from the composer.
+    const mode: 'stream' | 'talk' = settings.get().tts ? 'talk' : 'stream';
+    try {
+      await webrtcControls.openCall(mode);
+    } catch (e: any) {
+      diag('call open failed', e?.message);
+    }
+  }
 
-  if (btnMemo) {
-    btnMemo.onclick = async () => {
-      // Tap behavior: if dictate is active, stop it (button is the
-      // toggle). Otherwise dispatch by the persisted mic-mode setting,
-      // defaulting to memo. Hotkeys bypass the dropdown — the click
-      // handler is the only path that consults micMode.
-      if (dictateActive) {
-        await stopDictate();
+  async function stopCallStream(): Promise<void> {
+    if (!webrtcControls.isOpen()) return;
+    await webrtcControls.closeIfOpen();
+  }
+
+  /** Whether some voice path is currently active. Used by the click
+   *  toggle to decide start vs stop. */
+  function voiceActive(): boolean {
+    return memoActive || dictateActive || webrtcControls.isOpen();
+  }
+
+  /** Stop whichever voice path is active. Idempotent / safe to call
+   *  when nothing is running. */
+  async function stopVoice(): Promise<void> {
+    if (memoActive) {
+      // Mid-memo stop fires send (release-to-send PTT semantics) by
+      // clicking the composer-send. If the user wants to discard, they
+      // hit the trash button or Esc.
+      composerSend.click();
+      return;
+    }
+    if (dictateActive) {
+      await stopDictate();
+      return;
+    }
+    if (webrtcControls.isOpen()) {
+      await stopCallStream();
+      return;
+    }
+  }
+
+  /** Start whichever voice path matches the current toggles. */
+  async function startVoice(): Promise<void> {
+    const s = settings.get();
+    if (s.micCall) {
+      if (s.micAutoSend) await startCallStream();
+      else await startDictate();
+    } else {
+      await startMemo(!!s.micAutoSend);
+    }
+  }
+
+  // ── Mic button — click + PTT dispatch ──────────────────────────────
+  if (btnMic) {
+    // Tap: toggle. PTT: pointerdown=start, pointerup=stop. The chosen
+    // gesture is determined by settings.micPTT at the moment of the
+    // gesture so a mid-session flip in the menu takes effect cleanly.
+    const PTT_HOLD_MS = 200;
+    let pttHoldTimer: ReturnType<typeof setTimeout> | null = null;
+    /** True while a PTT gesture is in progress (we own this start). */
+    let pttArmed = false;
+    /** True when we should swallow the synthesized click that
+     *  pointerup fires after a PTT release (otherwise the click would
+     *  re-toggle voice). */
+    let pttSuppressClick = false;
+
+    btnMic.onclick = async (e) => {
+      if (pttSuppressClick) {
+        // Synthesized post-PTT click — eat it.
+        pttSuppressClick = false;
+        e.preventDefault();
+        e.stopImmediatePropagation();
         return;
       }
-      if (memoActive) return;
-      const mode = settings.get().micMode || 'memo';
-      if (mode === 'dictate') await startDictate();
-      else await startMemo();
+      // Plain tap. Toggle: stop if active, start if idle.
+      if (voiceActive()) {
+        await stopVoice();
+      } else {
+        await startVoice();
+      }
     };
-    // Esc to cancel, Enter to send memo on desktop
+
+    btnMic.addEventListener('pointerdown', (_e) => {
+      // Only arm PTT if the user has it enabled AND nothing is already
+      // running. If memoActive / dictateActive / call open, treat the
+      // press as a tap (let the click handler stop it).
+      if (!settings.get().micPTT) return;
+      if (voiceActive()) return;
+      pttArmed = false;
+      pttSuppressClick = false;
+      pttHoldTimer = setTimeout(() => {
+        pttHoldTimer = null;
+        pttArmed = true;
+        // Kick off the appropriate start path. Don't synthesize a click
+        // — the click would also fire on pointerup which we explicitly
+        // want to handle as the "release = stop" signal, not "release =
+        // toggle off via click".
+        void startVoice();
+        // Visual cue for memo mode (existing CSS handles the styling).
+        if (settings.get().micCall === false) {
+          // Memo path will shortly render the bar; tag it.
+          setTimeout(() => {
+            const bar = document.querySelector('.memo-bar');
+            if (bar) bar.classList.add('memo-bar-ptt');
+          }, 50);
+        }
+      }, PTT_HOLD_MS);
+    });
+
+    const pttRelease = (e: Event) => {
+      if (pttHoldTimer) { clearTimeout(pttHoldTimer); pttHoldTimer = null; }
+      if (!pttArmed) return;
+      pttArmed = false;
+      // Eat the click that pointerup synthesizes — otherwise it'd fire
+      // the toggle and stop voice via the click path.
+      pttSuppressClick = true;
+      e.preventDefault();
+      e.stopPropagation();
+      // Defer one tick so any async startVoice() initialization (e.g.
+      // memo's MediaRecorder, WebRTC handshake) settles before we ask
+      // it to stop. stopVoice() handles the case where start hasn't
+      // fully completed yet (each primitive's stop is idempotent).
+      setTimeout(() => { void stopVoice(); }, 0);
+    };
+    btnMic.addEventListener('pointerup', pttRelease);
+    btnMic.addEventListener('pointercancel', pttRelease);
+    btnMic.addEventListener('pointerleave', pttRelease);
+
+    // Esc / Enter while memo bar is up.
     document.addEventListener('keydown', (e) => {
       if (!memoActive) return;
       if (e.key === 'Escape') {
         e.preventDefault();
         memo.stop();
-        // Click the trash button to properly clean up the bar
         const trash = document.querySelector('.memo-trash') as HTMLButtonElement | null;
         if (trash) trash.click();
         else exitMemoMode();
@@ -1465,94 +1595,40 @@ async function boot() {
         composerSend.click();
       }
     });
-
-    // Push-to-talk on the memo button. Press-and-hold past the threshold
-    // → enter memo mode (start recording). Release at any point after
-    // → auto-send (per the existing dictationAutoSend setting, which
-    // routes the transcript to composer or chat). Lets the user record
-    // a quick message without two distinct taps; lifting the finger is
-    // the send signal. A short tap (release before threshold) falls
-    // through to the existing click-to-toggle behavior.
-    const PTT_HOLD_MS = 250;
-    let pttHoldTimer: ReturnType<typeof setTimeout> | null = null;
-    let pttArmed = false;          // hold passed threshold → memo started by us
-    let pttSuppressClick = false;  // swallow the click that pointerup would synthesize
-    const pttRelease = (e: Event) => {
-      if (pttHoldTimer) { clearTimeout(pttHoldTimer); pttHoldTimer = null; }
-      if (!pttArmed) return;
-      pttArmed = false;
-      pttSuppressClick = true;
-      // Defer the send by one tick so any async memo.start() initialization
-      // queued from the threshold-fire has a chance to wire composerSend.onclick.
-      // composerSend.click() invokes whatever onclick btnMemo's async handler
-      // assigned (which awaits memo.stop() → handleMemoResult). If onclick
-      // isn't set yet (rare — memo.start barely begun), the click is a no-op
-      // and the user has to tap composerSend manually; not great but not lost.
-      e.preventDefault();
-      e.stopPropagation();
-      setTimeout(() => composerSend.click(), 0);
-    };
-    btnMemo.addEventListener('pointerdown', (e) => {
-      // Only arm PTT if memo isn't already active (avoids double-start
-      // if the user is mid tap-to-record session and presses again).
-      if (memoActive) return;
-      pttArmed = false;
-      pttSuppressClick = false;
-      pttHoldTimer = setTimeout(() => {
-        pttHoldTimer = null;
-        // Threshold passed and finger still down → start the memo by
-        // synthesizing a click. The existing onclick handler kicks off
-        // memo.start() and wires composerSend.onclick for the eventual
-        // stop-and-send. The flag tells pointerup to auto-send instead
-        // of treating the release as a tap.
-        pttArmed = true;
-        btnMemo.click();
-        // Add a class so we can style "PTT recording in progress"
-        // distinctly from a tap-started recording — useful so the
-        // user knows lifting the finger will send.
-        const bar = document.querySelector('.memo-bar');
-        if (bar) bar.classList.add('memo-bar-ptt');
-      }, PTT_HOLD_MS);
-    });
-    btnMemo.addEventListener('pointerup', pttRelease);
-    btnMemo.addEventListener('pointercancel', pttRelease);
-    btnMemo.addEventListener('pointerleave', pttRelease);
-    // The pointerup synthesizes a click. If we already triggered a click
-    // at threshold (PTT path), the second click would re-fire the memo
-    // toggle handler. Eat it once.
-    btnMemo.addEventListener('click', (e) => {
-      if (pttSuppressClick) {
-        pttSuppressClick = false;
-        e.preventDefault();
-        e.stopImmediatePropagation();
-      }
-    }, true);  // capture phase to beat the existing onclick
   }
 
-  // ── Mic-mode dropdown (Memo / Dictate switcher) ─────────────────────
-  // Chevron sits flush with #btn-memo. Tap chevron → menu opens with
-  // both modes; tap a mode item → set settings.micMode + close menu.
-  // The mic button itself dispatches by settings.micMode (see
-  // btnMemo.onclick above). Selection persists across reloads.
+  // ── Mic-mode chevron menu (PTT / Call / Auto-send toggles) ─────────
+  // Three iOS-style toggle rows. State persists in settings; reads on
+  // every dispatch, writes on every flip. No teardown needed.
   const btnMicMode = document.getElementById('btn-mic-mode') as HTMLButtonElement | null;
   const micModeMenu = document.getElementById('mic-mode-menu') as HTMLElement | null;
   const micModeWrap = document.querySelector('.mic-mode-wrap') as HTMLElement | null;
 
   function applyMicModeUi(): void {
-    const mode = settings.get().micMode || 'memo';
-    if (micModeWrap) micModeWrap.dataset.mode = mode;
+    const s = settings.get();
     if (micModeMenu) {
-      micModeMenu.querySelectorAll<HTMLButtonElement>('button[data-mode]').forEach(b => {
-        if (b.dataset.mode === mode) b.setAttribute('aria-current', 'true');
-        else b.removeAttribute('aria-current');
+      micModeMenu.querySelectorAll<HTMLButtonElement>('button.mic-toggle-row').forEach(b => {
+        const key = b.dataset.toggle as 'micPTT' | 'micCall' | 'micAutoSend' | undefined;
+        if (!key) return;
+        const on = !!(s as any)[key];
+        b.setAttribute('aria-checked', on ? 'true' : 'false');
+        b.classList.toggle('on', on);
       });
     }
-    // Update the mic button title so the user can see which mode tap
-    // will activate without opening the menu.
-    if (btnMemo) {
-      btnMemo.title = mode === 'dictate'
-        ? 'Dictate — stream STT into the composer'
-        : 'Voice memo';
+    // Mic button tooltip + a data-mode attribute on the wrap so CSS can
+    // hint at the current mode (e.g. accent the chevron when call is on).
+    if (micModeWrap) {
+      const mode = s.micCall
+        ? (s.micAutoSend ? 'call-auto' : 'dictate')
+        : (s.micAutoSend ? 'memo-auto' : 'memo');
+      micModeWrap.dataset.mode = mode;
+    }
+    if (btnMic) {
+      const ptt = s.micPTT ? 'Hold' : 'Tap';
+      const what = s.micCall
+        ? (s.micAutoSend ? 'live chat' : 'live dictation')
+        : (s.micAutoSend ? 'memo (auto-send)' : 'voice memo');
+      btnMic.title = `${ptt} to ${s.micPTT && !voiceActive() ? 'record' : 'toggle'} — ${what}`;
     }
   }
   applyMicModeUi();
@@ -1576,13 +1652,17 @@ async function boot() {
       const open = btnMicMode.getAttribute('aria-expanded') === 'true';
       setMicModeMenuOpen(!open);
     };
-    micModeMenu.querySelectorAll<HTMLButtonElement>('button[data-mode]').forEach(b => {
+    micModeMenu.querySelectorAll<HTMLButtonElement>('button.mic-toggle-row').forEach(b => {
       b.onclick = (e) => {
         e.stopPropagation();
-        const mode = b.dataset.mode === 'dictate' ? 'dictate' : 'memo';
-        settings.set('micMode', mode);
+        const key = b.dataset.toggle as 'micPTT' | 'micCall' | 'micAutoSend' | undefined;
+        if (!key) return;
+        const cur = !!(settings.get() as any)[key];
+        settings.set(key, !cur);
         applyMicModeUi();
-        setMicModeMenuOpen(false);
+        // Keep menu open so the user can flip multiple toggles in one
+        // pass (matches iOS Control Center behavior). Tap outside to
+        // close.
       };
     });
     // Click outside closes the menu (capture so chat-bubble handlers
@@ -1595,45 +1675,10 @@ async function boot() {
     }, true);
   }
 
-  // ── Mic-mode hotkeys ────────────────────────────────────────────────
-  // Cmd+Shift+M / Ctrl+Shift+M → toggle memo (regardless of dropdown).
-  // Cmd+Shift+D / Ctrl+Shift+D → toggle dictate (regardless of dropdown).
-  // Capture phase + stopImmediatePropagation so we beat the existing
-  // Ctrl+Shift+D debug-toggle listener (which uses bubble phase).
-  document.addEventListener('keydown', (e) => {
-    const mod = e.metaKey || e.ctrlKey;
-    if (!mod || !e.shiftKey) return;
-    if (e.code === 'KeyM') {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      if (memoActive) {
-        // Mid-memo toggle = trash (cancel) — matches Esc semantics.
-        const trash = document.querySelector('.memo-trash') as HTMLButtonElement | null;
-        if (trash) trash.click();
-        else memo.cancel();
-      } else {
-        if (dictateActive) void stopDictate();
-        void startMemo();
-      }
-      return;
-    }
-    if (e.code === 'KeyD') {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      if (dictateActive) {
-        void stopDictate();
-      } else {
-        void startDictate();
-      }
-      return;
-    }
-  }, true);
-
   // Send-button intercept — when dictate is active, clicking Send (or
   // pressing Enter to fire it) should send whatever's in the composer
-  // AND close the dictate stream. The existing composerSend.onclick is
-  // sendTypedMessage; this capture-phase listener calls stopDictate()
-  // alongside, letting the underlying send proceed.
+  // AND close the dictate stream. Capture phase so we run alongside
+  // sendTypedMessage rather than racing it.
   composerSend.addEventListener('click', () => {
     if (dictateActive) void stopDictate();
   }, true);

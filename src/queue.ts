@@ -64,7 +64,11 @@ let isFlushing = false;
  * Concurrent calls skip (second caller returns skipped=true); the in-flight
  * flush will cover whatever was pending when it started.
  * @param {(text: string, source: string) => Promise<void>} sendTextFn
- * @param {(blob: Blob, mimeType: string, id: string) => Promise<void>} transcribeAndSendFn
+ * @param {(blob: Blob, mimeType: string, id: string, autoSend: boolean) => Promise<void>} transcribeAndSendFn
+ *   autoSend is the per-memo flag captured at record time — true means
+ *   transcribe-then-dispatch as a chat message, false means land in the
+ *   composer for review. Stored on the queue item so a periodic retry
+ *   long after recording still routes the way the user originally chose.
  * @returns {Promise<{ sent: number, remaining: number, skipped?: boolean }>}
  */
 export async function flush(sendTextFn, transcribeAndSendFn) {
@@ -91,7 +95,7 @@ export async function flush(sendTextFn, transcribeAndSendFn) {
       for (const item of items) {
         try {
           if (item.type === 'text') await sendTextFn(item.text, item.source);
-          else if (item.type === 'audio') await transcribeAndSendFn(item.blob, item.mimeType, item.id);
+          else if (item.type === 'audio') await transcribeAndSendFn(item.blob, item.mimeType, item.id, !!item.autoSend);
           await reqP(tx(db, 'readwrite').delete(item.id));
           sent++;
           processed = true;

@@ -317,8 +317,13 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     if (!active) return;
     if (pc.connectionState === 'connected') {
       setState('connected');
-      // Tone on connection — the plan calls for a short two-tone chime.
-      try { playFeedback('connect'); } catch { /* ignore */ }
+      // "Listening" chime — soft two-tone fade-in. Same audible cue the
+      // memo path plays at first audio frame captured; here it fires
+      // once the WebRTC peer is fully established (which is also when
+      // the bridge can hear us). Replaces the older 'connect' chime —
+      // for the unified mic UX both modes now share the same "ready
+      // for your voice" signal, just at the right per-mode moment.
+      try { playFeedback('listening'); } catch { /* ignore */ }
     } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
       setState('failed');
       void close();

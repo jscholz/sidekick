@@ -1,23 +1,22 @@
 /**
- * @fileoverview WebRTC button bindings — wires #btn-mic and #btn-speak
- * to the connection module.
+ * @fileoverview WebRTC speaker bindings + call lifecycle helpers.
  *
- * UX:
- *   #btn-mic   = master on/off for the call. Tap to open, tap to close.
- *                Mode (stream vs talk) is derived at open time from the
- *                #btn-speak preference: speak-unmuted → talk; muted →
- *                stream. Once a call is open, tapping #btn-speak changes
- *                the *next* call's mode but does NOT cycle the current
- *                connection — that was the old wiring and it killed
- *                in-progress utterances on every preference flip.
+ * The toolbar #btn-mic that used to live here is gone — the unified
+ * composer mic now drives all four voice modes (memo/call × auto/manual)
+ * and invokes `toggleCall` / `closeIfOpen` directly through this module's
+ * exports.  What remains:
+ *
  *   #btn-speak = TTS-reply preference. Tap to mute / unmute. Persists
  *                via settings.tts (default false = muted = stream
- *                mode).
+ *                mode at call open). Mid-call clicks update the
+ *                preference for the NEXT call only — we don't cycle
+ *                the connection (the old wiring did, and it killed
+ *                in-progress utterances on every flip).
  *
- * State surface: `setStateListener` registers a single callback that
- * fires on every CallState transition. We use it to flip the visual
- * `.active` class on #btn-mic only — #btn-speak's visual is the
- * `.muted` class driven independently by user preference.
+ *   toggleCall / closeIfOpen / isOpen / currentMode = exports the
+ *   composer-mic dispatch in main.ts uses to open/close a stream-mode
+ *   or talk-mode call. Mode (stream vs talk) derives from
+ *   settings.tts AT THE TIME OF CALL OPEN.
  */
 
 import * as conn from './connection.ts';
@@ -37,26 +36,23 @@ function btnEl(id: string): HTMLButtonElement | null {
   return document.getElementById(id) as HTMLButtonElement | null;
 }
 
-function setActive(mode: conn.CallMode | null, state: conn.CallState | null) {
-  const mic = btnEl('btn-mic');
-  if (!mic) return;
-  // .active reflects whether the call is open in EITHER mode (mic is
-  // the master on/off button — the choice of stream vs talk is a
-  // separate preference). .connecting is purely additive while a new
-  // call is mid-handshake.
-  mic.classList.toggle('active', conn.isOpen());
-  mic.classList.toggle(
-    'connecting',
-    state === 'requesting-mic' || state === 'connecting',
-  );
-}
-
 export function init(o: ControlsOpts) {
   opts = o;
 
   conn.setStateListener((state, mode) => {
     log('[webrtc-controls] state=', state, 'mode=', mode);
-    setActive(mode, state);
+    // Reflect call-open state on the unified composer mic so the user
+    // sees a visual cue that voice is live. Memo + dictate paths flip
+    // the same class via their own listeners — only one of the three
+    // is ever active at a time.
+    const mic = btnEl('btn-mic');
+    if (mic) {
+      mic.classList.toggle('active', conn.isOpen());
+      mic.classList.toggle(
+        'connecting',
+        state === 'requesting-mic' || state === 'connecting',
+      );
+    }
     // Reset the dictation state machine whenever a call ends so a
     // pending utterance buffer or silence timer doesn't leak across
     // calls. requesting-mic / connecting on a fresh open is also a
@@ -73,9 +69,6 @@ export function init(o: ControlsOpts) {
     else if (state === 'failed') opts.onStatus('Call failed', 'err');
     else if (state === 'idle') opts.onStatus('');
   });
-
-  const mic = btnEl('btn-mic');
-  if (mic) mic.onclick = () => void toggleCall();
 
   const speak = btnEl('btn-speak');
   if (speak) {
@@ -106,9 +99,11 @@ function applySpeakMuted(el: HTMLButtonElement, muted: boolean): void {
     : 'TTS reply — currently on; tap to mute · ⌥T';
 }
 
-async function toggleCall() {
-  // Master on/off. If a call is open, close it. Otherwise open one,
-  // choosing the mode from the persisted #btn-speak preference.
+/** Open a call (or close if one is open). Mode derives from
+ *  settings.tts at the time of open: tts=true → talk (TTS audio),
+ *  tts=false → stream (STT only, no TTS). Surfaces errors via the
+ *  onStatus callback. */
+export async function toggleCall(): Promise<void> {
   if (conn.isOpen()) {
     log('[webrtc-controls] toggleCall close (currentMode=', conn.currentMode(), ')');
     await conn.close();
@@ -121,6 +116,27 @@ async function toggleCall() {
   } catch (e: any) {
     diag('[webrtc-controls] open failed', e?.message);
     if (opts?.onStatus) opts.onStatus(`Call error: ${e?.message ?? e}`, 'err');
+  }
+}
+
+/** Open a call in a specific mode without consulting settings.tts.
+ *  Used by the composer mic when call-mode is requested — auto-send=true
+ *  needs the talk/stream choice driven by btn-speak preference (which is
+ *  stored in settings.tts), but the COMPOSER mic might want to force
+ *  stream regardless (e.g. for cursor-aware dictation, where TTS makes
+ *  no sense). Idempotent if a matching call is already open. */
+export async function openCall(mode: conn.CallMode): Promise<void> {
+  if (conn.isOpen()) {
+    if (conn.currentMode() === mode) return;  // already in the right mode
+    await conn.close();
+  }
+  log('[webrtc-controls] openCall mode=', mode);
+  try {
+    await conn.open(mode, { sessionId: opts?.getSessionId() ?? null });
+  } catch (e: any) {
+    diag('[webrtc-controls] openCall failed', e?.message);
+    if (opts?.onStatus) opts.onStatus(`Call error: ${e?.message ?? e}`, 'err');
+    throw e;
   }
 }
 

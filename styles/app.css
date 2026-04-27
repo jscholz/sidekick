@@ -1330,6 +1330,10 @@
   }
   .composer .icon-btn-plain:hover { color: var(--fg); }
   .composer .icon-btn-plain svg { width: 22px; height: 22px; }
+  /* Active = some voice path is live (memo bar showing, dictation
+     streaming, or call open). Sage tint matches the toolbar mic's
+     historical "live" color so the visual language is consistent. */
+  .composer #btn-mic.active { color: var(--primary); }
 
   /* Mic-mode dropdown — chevron sits flush right of the mic button to
      swap between Memo (default) and Dictate (streaming STT to composer).
@@ -1352,34 +1356,76 @@
   .composer .mic-mode-chevron:hover { color: var(--fg); }
   .composer .mic-mode-chevron svg { width: 10px; height: 10px; }
   .composer .mic-mode-chevron[aria-expanded="true"] { color: var(--primary); }
-  /* Indicator pill for the active mode (mode='dictate' shows a tiny dot
-     on the chevron so the user can see which mode the mic button is
-     currently in without opening the menu). */
-  .composer .mic-mode-wrap[data-mode="dictate"] .mic-mode-chevron {
+  /* Accent the chevron when the mic is in any "live channel" mode
+     (call=true) so the user can see at a glance that tapping the mic
+     opens a stream rather than starting a memo. data-mode is set by
+     applyMicModeUi() in main.ts based on the three toggles. */
+  .composer .mic-mode-wrap[data-mode="dictate"] .mic-mode-chevron,
+  .composer .mic-mode-wrap[data-mode="call-auto"] .mic-mode-chevron {
     color: var(--primary);
   }
   .mic-mode-menu {
     position: absolute;
-    bottom: calc(100% + 4px);
+    bottom: calc(100% + 6px);
     right: 0;
     z-index: 60;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 4px;
-    min-width: 120px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    border-radius: 8px;
+    padding: 6px;
+    min-width: 200px;
+    box-shadow: 0 6px 16px rgba(0,0,0,0.32);
     display: flex; flex-direction: column; gap: 2px;
   }
   .mic-mode-menu[hidden] { display: none; }
-  .mic-mode-menu button {
+  /* iOS-style toggle row — label on the left, sliding pill on the right.
+     Each row is a <button role="menuitemcheckbox"> so keyboard / screen
+     readers see it as a toggle. The pill is a span that we draw with
+     CSS; aria-checked drives the on/off styling. */
+  .mic-mode-menu .mic-toggle-row {
     background: transparent; border: none; color: var(--fg);
-    text-align: left; padding: 6px 10px; cursor: pointer;
-    font: inherit; border-radius: 4px;
+    cursor: pointer; font: inherit;
+    padding: 8px 10px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+    text-align: left;
+    -webkit-user-select: none; user-select: none;
   }
-  .mic-mode-menu button:hover { background: var(--surface-2); }
-  .mic-mode-menu button[aria-current="true"] {
-    color: var(--primary); font-weight: 600;
+  .mic-mode-menu .mic-toggle-row:hover { background: var(--surface-2); }
+  .mic-mode-menu .mic-toggle-label {
+    font-size: 13px; flex: 1;
+  }
+  .mic-mode-menu .mic-toggle-switch {
+    /* The pill. Same dimensions / colors as the Settings checkboxes
+       (44x24 with a 18px white thumb) so the visual language matches.
+       Drawn entirely on the span — no native checkbox underneath since
+       this row IS the button (role=menuitemcheckbox). */
+    position: relative;
+    width: 38px; height: 22px; flex-shrink: 0;
+    border-radius: 11px;
+    background: var(--border);
+    border: 1px solid var(--border-strong);
+    transition: background 0.18s ease, border-color 0.18s ease;
+  }
+  .mic-mode-menu .mic-toggle-thumb {
+    position: absolute;
+    top: 1px; left: 1px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    transition: transform 0.18s cubic-bezier(.4,2,.6,1);
+  }
+  .mic-mode-menu .mic-toggle-row[aria-checked="true"] .mic-toggle-switch {
+    background: var(--primary);
+    border-color: var(--primary);
+  }
+  .mic-mode-menu .mic-toggle-row[aria-checked="true"] .mic-toggle-thumb {
+    transform: translateX(16px);
+  }
+  .mic-mode-menu .mic-toggle-row:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 1px;
   }
 
   /* Send: circle, paper-airplane icon. Grey when idle, green when active. */
@@ -1454,11 +1500,11 @@
     -webkit-user-select: none; user-select: none;
     -webkit-touch-callout: none; touch-action: manipulation;
   }
-  /* Same disables on the toolbar mic button (btn-memo lives there too —
-   * the PTT entry-point). Without this, holding the mic to PTT can
-   * select text from the chat above, exactly the symptom Jonathan
-   * reported in the screenshot. */
-  #btn-memo, .toolbar-btn {
+  /* Same disables on the composer mic button (the unified PTT entry
+   * point) and toolbar buttons. Without this, holding the mic to PTT
+   * can select text from the chat above, exactly the symptom Jonathan
+   * reported in an earlier screenshot. */
+  #btn-mic, .toolbar-btn {
     -webkit-user-select: none; user-select: none;
     -webkit-touch-callout: none; touch-action: manipulation;
   }

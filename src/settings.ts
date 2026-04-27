@@ -150,7 +150,9 @@ const DEFAULTS = {
   autoFallback: true,
   ttsEngine: 'server',       // 'server' (Deepgram Aura /tts) or 'local' (Web Speech synthesis)
   ttsVoiceLocal: '',         // Web Speech voice name (empty = system default)
-  dictationAutoSend: true,   // send on stop, or put in composer to edit
+  // dictationAutoSend was the legacy "auto-send vs land in composer"
+  // toggle for memo+dictate. Replaced by micAutoSend (below) which
+  // applies uniformly across all four mic-mode combinations.
   wakeLock: true,
   commitPhrase: 'over',   // empty = commit-word disabled
   commitDelaySec: 1.5,
@@ -186,13 +188,29 @@ const DEFAULTS = {
   // id, or stored conversation name (tap ⋮ → Info on any row to see the
   // raw values). Empty → show ALL sessions. Non-empty → union of matches.
   sessionsFilter: 'sidekick-*,*whatsapp*,*telegram*',
-  // Mic-button default mode. Drives what the chevron-dropdown next to
-  // #btn-mic activates when the mic button is tapped. 'memo' is the
-  // historical default (offline-capable, batch transcribe on stop);
-  // 'dictate' opens a streaming WebRTC stream that lands transcripts in
-  // the composer for edit-and-send. Hotkeys (⌘⇧M / ⌘⇧D) bypass this
-  // setting and fire the corresponding mode directly.
-  micMode: 'memo' as 'memo' | 'dictate',
+  // Composer-mic behavior toggles. Three orthogonal flags control the
+  // four modes the unified mic button can run in (call=on/off ×
+  // autoSend=on/off), plus the input gesture (PTT vs click-toggle).
+  // Default is the historical "tap-to-record memo, land in composer"
+  // behavior — offline-capable, gives the user time to review before
+  // sending.
+  //
+  //   micPTT      false → click toggles (start on click, stop on click)
+  //               true  → press-and-hold (start on pointerdown, stop on up)
+  //   micCall     false → memo (MediaRecorder → /transcribe batch)
+  //               true  → live WebRTC stream (interim transcripts)
+  //   micAutoSend false → transcript lands in the composer for review
+  //               true  → transcript auto-dispatches (memo: on stop;
+  //                       call: via dictation.ts silence/commit-phrase)
+  //
+  // The four call/autoSend combos:
+  //   call=false autoSend=false → memo into composer
+  //   call=false autoSend=true  → memo, fire-and-forget on stop
+  //   call=true  autoSend=false → live cursor-aware dictation in composer
+  //   call=true  autoSend=true  → live chat-bubble streaming
+  micPTT: false,
+  micCall: false,
+  micAutoSend: false,
 };
 
 let current = { ...DEFAULTS };
@@ -269,7 +287,6 @@ export function hydrate(handlers: {
   const preferredModelsChips = document.getElementById('preferred-models-chips');
   const setSessionsFilter = $inp('set-sessions-filter');
   const setTtsEngine = $sel('set-tts-engine');
-  const setDictAutoSend = $inp('set-dictation-autosend');
   const setVoice = $sel('set-voice');
   const setWake = $inp('set-wake');
   const setCommitPhrase = $inp('set-commit-phrase');
@@ -293,7 +310,6 @@ export function hydrate(handlers: {
   if (setStreamEngine) setStreamEngine.value = current.streamingEngine;
   if (setAutoFallback) setAutoFallback.checked = current.autoFallback;
   if (setTtsEngine) setTtsEngine.value = current.ttsEngine;
-  if (setDictAutoSend) setDictAutoSend.checked = current.dictationAutoSend;
   if (setAudioFeedback) setAudioFeedback.value = String(Math.round(current.audioFeedbackVolume * 100));
   if (setAudioFeedbackVal) setAudioFeedbackVal.textContent = audioFeedbackLabel(current.audioFeedbackVolume);
   if (setVoice) setVoice.value = current.voice;
@@ -528,7 +544,6 @@ export function hydrate(handlers: {
     }
     if (current.ttsVoiceLocal) setTtsVoiceLocal.value = current.ttsVoiceLocal;
   }
-  if (setDictAutoSend) setDictAutoSend.onchange = () => { set('dictationAutoSend', setDictAutoSend.checked); };
   if (setMic) setMic.onchange = () => {
     set('micDevice', setMic.value);
     if (handlers.onMicChange) handlers.onMicChange();

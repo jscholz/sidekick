@@ -101,9 +101,11 @@ export async function start(opts) {
   mediaRecorder.start(1000);
 
   log('memo: recording (MediaRecorder → blob)');
-  // Subtle "mic is live" tick — seatbelt-style audible confirmation so
-  // the user knows capture started without looking at the screen.
-  playFeedback('start');
+  // "Listening" chime — soft two-tone fade-in confirming the mic path
+  // is actually live. Replaces the older 'start' tick; same role
+  // (audible "we're hearing you" signal) but slightly more distinct so
+  // it isn't confused with the 'commit' or 'send' chimes.
+  playFeedback('listening');
   return true;
 }
 

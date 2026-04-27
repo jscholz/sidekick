@@ -17,7 +17,7 @@ function getCtx() {
 
 /**
  * Play a short click/pop sound.
- * @param {'send'|'receive'|'error'|'start'|'commit'|'connect'} type
+ * @param {'send'|'receive'|'error'|'start'|'commit'|'connect'|'listening'} type
  *   - send:    short rising click, confirms outbound
  *   - receive: soft descending pop, confirms inbound
  *   - error:   two low descending tones — distinct from send/receive so
@@ -43,6 +43,13 @@ function getCtx() {
  *              channel open". Played slightly louder than send/receive
  *              because it's a once-per-call event — being noticed
  *              matters more than fading into background.
+ *   - listening: subtle two-tone fade-in (~150ms) — "system is ready
+ *              for your voice". Fires for memo at first audio frame
+ *              and for call once the WebRTC peer is connected. Sine
+ *              wave (smoother than triangle) at low gain so it doesn't
+ *              compete with the user starting to speak. Distinct from
+ *              'connect' which is the louder handshake notice; this
+ *              is the gentler "you can talk now" cue.
  */
 export function playFeedback(type) {
   // Volume is 0..1; 0.25 now matches the legacy "subtle" level after
@@ -130,6 +137,34 @@ export function playFeedback(type) {
       gain2.gain.exponentialRampToValueAtTime(0.001, t2 + 0.12);
       osc2.start(t2);
       osc2.stop(t2 + 0.12);
+    } else if (type === 'listening') {
+      // Two-tone fade-in chime — A4 (~440 Hz) → C5 (~523 Hz). Gentler
+      // than 'connect' (lower overall gain, sine instead of triangle,
+      // shorter total duration ~150ms). Reads as a soft "your turn" cue
+      // rather than a circuit-closed announcement. Used when the mic
+      // path is actually live and the user can start speaking.
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(440, now);
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.exponentialRampToValueAtTime(0.05 * scale, now + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+      osc.start(now);
+      osc.stop(now + 0.07);
+      // Second tone — C5, follows immediately for an upward lift. The
+      // brief gap reads as a deliberate two-step rather than a slur,
+      // keeping it distinct from the single-tick 'start' chime.
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+      osc2.type = 'sine';
+      const t2 = now + 0.08;
+      osc2.frequency.setValueAtTime(523, t2);
+      gain2.gain.setValueAtTime(0.001, t2);
+      gain2.gain.exponentialRampToValueAtTime(0.06 * scale, t2 + 0.03);
+      gain2.gain.exponentialRampToValueAtTime(0.001, t2 + 0.08);
+      osc2.start(t2);
+      osc2.stop(t2 + 0.08);
     } else if (type === 'error') {
       // Two short low-pitched descending tones — alert, not alarming.
       // Uses triangle wave for a fuller sound that carries over wind
