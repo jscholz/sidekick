@@ -660,76 +660,21 @@ export function hydrate(handlers: {
     if (e.key === 'Escape' && panel && panel.classList.contains('on')) closePanel();
   });
 
-  // Swipe-down to dismiss on mobile — telegraphed by the .settings-handle
-  // bar at the top of the sheet. Only listens on the handle (not the whole
-  // panel) so vertical scrolling inside the settings list isn't competing
-  // with the dismiss gesture. Snap-back if the drag is too short; close
-  // with a continuation animation if past threshold.
-  const handle = $any('settings-handle');
-  const inner = panel ? (panel.querySelector('.settings-inner') as HTMLElement | null) : null;
-  if (handle && inner) {
-    let startY = 0;
-    let currentY = 0;
-    let dragging = false;
-
-    const onTouchStart = (e: TouchEvent) => {
-      if (window.innerWidth > 699) return;  // bottom-sheet shape only on mobile
-      startY = e.touches[0].clientY;
-      currentY = startY;
-      dragging = true;
-      // Disable transition during the drag so transform tracks the
-      // finger directly. Restored on touchend either via inline-clear
-      // (snap-back) or by setting a fresh transition for the close
-      // animation (continuation).
-      inner.style.transition = 'none';
-    };
-    const onTouchMove = (e: TouchEvent) => {
-      if (!dragging) return;
-      currentY = e.touches[0].clientY;
-      const delta = currentY - startY;
-      // Only respond to downward drags. Upward drags do nothing
-      // (the sheet is already as far up as it goes).
-      if (delta > 0) {
-        inner.style.transform = `translateY(${delta}px)`;
-      } else {
-        inner.style.transform = '';
-      }
-    };
-    const onTouchEnd = () => {
-      if (!dragging) return;
-      dragging = false;
-      const delta = currentY - startY;
-      // Threshold: 80px past origin OR a fast flick (we'd need
-      // velocity tracking for the latter — keeping it simple for v1).
-      const DISMISS_THRESHOLD = 80;
-      if (delta > DISMISS_THRESHOLD) {
-        // Continuation animation: from the current dragged position
-        // straight to fully offscreen, same easing as the open.
-        inner.style.transition = 'transform 0.2s cubic-bezier(0.32, 0.72, 0, 1)';
-        inner.style.transform = 'translateY(100%)';
-        // Wait for the animation to finish before flipping .on off,
-        // otherwise the CSS rule for .on .settings-inner snaps it back
-        // to translateY(0) mid-flight.
-        const onEnd = () => {
-          inner.removeEventListener('transitionend', onEnd);
-          // Clear inline styles so next open uses the CSS-driven path.
-          inner.style.transition = '';
-          inner.style.transform = '';
-          closePanel();
-        };
-        inner.addEventListener('transitionend', onEnd);
-      } else {
-        // Snap back to the open position. Restore CSS-driven transition
-        // and clear inline transform so the .on rule wins.
-        inner.style.transition = '';
-        inner.style.transform = '';
-      }
-    };
-
-    handle.addEventListener('touchstart', onTouchStart, { passive: true });
-    handle.addEventListener('touchmove', onTouchMove, { passive: true });
-    handle.addEventListener('touchend', onTouchEnd, { passive: true });
-    handle.addEventListener('touchcancel', onTouchEnd, { passive: true });
+  // Swipe-down to dismiss on mobile — bottom-sheet shape only. Viewport
+  // guard kept here at the call-site so the desktop path doesn't even
+  // import the gesture module. See ./settings/mobile-bottomsheet.ts for
+  // the gesture impl and the rationale on why this is mobile-only.
+  if (window.innerWidth <= 699) {
+    const handle = $any('settings-handle');
+    const inner = panel ? (panel.querySelector('.settings-inner') as HTMLElement | null) : null;
+    if (handle && inner) {
+      // Dynamic import: keeps the gesture code out of the desktop bundle's
+      // hot path (the viewport check above already gates execution; this
+      // additionally defers the network fetch).
+      import('./settings/mobile-bottomsheet.ts').then(({ attachMobileBottomsheetDismiss }) => {
+        attachMobileBottomsheetDismiss(handle, inner, closePanel);
+      });
+    }
   }
 
   // Model selector: switch the session's active model via /model slash

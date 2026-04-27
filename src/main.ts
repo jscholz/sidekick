@@ -18,7 +18,7 @@ import * as gateway from './gateway.ts';
 import { unlock, getAudioCtx } from './audio/unlock.ts';
 import * as audioSession from './audio/session.ts';
 import * as capture from './audio/capture.ts';
-import * as fakeLock from './fakeLock.ts';
+import * as fakeLock from './ios/fakeLock.ts';
 import { setMicPeakListener } from './audio/micMeter.ts';
 import { attachCard } from './canvas/attach.ts';
 import { registerCard } from './canvas/registry.ts';

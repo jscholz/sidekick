@@ -1,13 +1,15 @@
 /**
- * @fileoverview Pocket-lock overlay — full-screen cover that eats touches
- * so pocket-dials can't send messages / toggle streams. Unlocked by
- * sliding the thumb left→right. The tab stays foreground so all the
- * iOS mic/TTS/barge-in paths keep working (none of the backgrounded-PWA
- * restrictions apply).
+ * @fileoverview iOS-specific pocket-lock overlay.
+ * No desktop equivalent — pocket-dial / shake-to-undo issues are iOS-only.
+ *
+ * Full-screen cover that eats touches so pocket-dials can't send messages
+ * / toggle streams. Unlocked by sliding the thumb left→right. The tab
+ * stays foreground so all the iOS mic/TTS/barge-in paths keep working
+ * (none of the backgrounded-PWA restrictions apply).
  */
 
-import { log } from './util/log.ts';
-import { getAudioCtx } from './audio/unlock.ts';
+import { log } from '../util/log.ts';
+import { getAudioCtx } from '../audio/unlock.ts';
 // Classic pipeline gone: getActiveStream + tts imports removed. Pocket-lock
 // keeps the cover overlay + status text + idle meter; per-turn player UI
 // is hidden via display:none in CSS while the WebRTC call surface owns

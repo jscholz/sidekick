@@ -2,7 +2,7 @@
  * Service worker — caches the app shell so iOS PWA survives app switches.
  * Strategy: cache-first for app shell assets, network-first for API calls.
  */
-const CACHE_NAME = 'v2.59';
+const CACHE_NAME = 'v2.60';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -33,6 +33,7 @@ const APP_SHELL = [
   '/build/audio/unlock.mjs',
   '/build/audio/micMeter.mjs',
   '/build/audio/session.mjs',
+  '/build/audio/ios-specific.mjs',
   '/build/audio/feedback.mjs',
   '/build/audio/memo.mjs',
   '/build/audio/audio-processor.js',
@@ -47,7 +48,8 @@ const APP_SHELL = [
   '/build/attachments.mjs',
   '/build/draft.mjs',
   '/build/composer.mjs',
-  '/build/fakeLock.mjs',
+  '/build/settings/mobile-bottomsheet.mjs',
+  '/build/ios/fakeLock.mjs',
   '/build/ambient.mjs',
   '/build/canvas/attach.mjs',
   '/build/canvas/registry.mjs',
