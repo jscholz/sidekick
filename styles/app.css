@@ -1249,7 +1249,11 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: calc(var(--radius) * 1.25);
-    overflow: hidden;
+    /* overflow: visible (default) — the mic-mode-menu pops upward
+       from inside .composer-actions, and overflow:hidden was clipping
+       all but its bottom row. The textarea + attachments inside have
+       their own bounding rects so they don't bleed past the rounded
+       corners; visible is safe here. */
     transition: border-color .15s ease;
   }
   .composer:focus-within { border-color: var(--primary); }
