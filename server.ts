@@ -870,6 +870,76 @@ async function handleOpenAICompatChat(req, res) {
 // /responses) straight through without buffering — SSE breaks if buffered.
 const HERMES_UPSTREAM = cfgVal('SIDEKICK_HERMES_URL', 'backend.hermes.url', 'http://127.0.0.1:8642') as string;
 const HERMES_TOKEN = process.env.SIDEKICK_HERMES_TOKEN || '';  // secret — env only
+
+// ─── Drawer events SSE broadcast ─────────────────────────────────────────────
+// Persistent SSE channel that pushes session-lifecycle events to all connected
+// drawers. Today: `session-started` fires when a new conversation name first
+// hits POST /v1/responses (sidekick-originated sessions). Drawers prepend a
+// synthesized row by id; the next listSessions reconcile replaces it with the
+// server-persisted version. Lets the drawer show a row BEFORE the agent's
+// first reply lands — fixes the "switch-away mid-flight loses the row" class
+// of bugs.
+const drawerSubscribers = new Set<http.ServerResponse>();
+// LRU of conversation names we've already announced. Bounded to keep memory
+// flat under unbounded-uptime; restart re-announces on next send (drawers
+// dedupe on id, so harmless).
+const ANNOUNCED_CAP = 200;
+const announcedConvs = new Map<string, number>();
+function rememberAnnounced(name: string) {
+  announcedConvs.set(name, Date.now());
+  if (announcedConvs.size > ANNOUNCED_CAP) {
+    const oldest = announcedConvs.keys().next().value;
+    if (oldest) announcedConvs.delete(oldest);
+  }
+}
+function broadcastDrawerEvent(eventName: string, payload: any) {
+  const frame = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const sub of drawerSubscribers) {
+    try { sub.write(frame); }
+    catch { drawerSubscribers.delete(sub); }
+  }
+}
+function handleDrawerEvents(req, res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',  // disable any reverse-proxy buffering
+  });
+  res.write('retry: 5000\n\n');  // EventSource auto-reconnect hint
+  drawerSubscribers.add(res);
+  const ka = setInterval(() => {
+    try { res.write(': ka\n\n'); }
+    catch { /* will be evicted on next broadcast */ }
+  }, 15_000);
+  const detach = () => {
+    clearInterval(ka);
+    drawerSubscribers.delete(res);
+  };
+  req.on('close', detach);
+  req.on('error', detach);
+}
+/** Pull the first user-supplied text out of a Responses-API POST body. The
+ *  shape we expect: `{ input: [{ role:'user', content:[{type:'text', text:'…'}]}, …] }`.
+ *  Older clients sometimes send `input` as a bare string. Returns '' if the
+ *  body doesn't match — empty snippet is fine, the drawer row still renders. */
+function extractFirstUserText(body: any): string {
+  if (!body) return '';
+  if (typeof body.input === 'string') return body.input;
+  if (!Array.isArray(body.input)) return '';
+  for (const turn of body.input) {
+    if (turn?.role !== 'user') continue;
+    if (typeof turn.content === 'string') return turn.content;
+    if (Array.isArray(turn.content)) {
+      for (const part of turn.content) {
+        if (part?.type === 'text' && typeof part.text === 'string') return part.text;
+        if (typeof part?.text === 'string') return part.text;
+      }
+    }
+  }
+  return '';
+}
+
 // Sidekick audio bridge — standalone Python aiortc service for WebRTC
 // signaling + STT + TTS. The proxy forwards /api/rtc/* to the bridge
 // rather than hermes; the bridge talks back to the proxy at
@@ -961,13 +1031,95 @@ async function handleHermesSessionsList(req, res) {
   }
 }
 
+// ─── Hermes session management — read this before touching anything below ──
+//
+// PROBLEM SHAPE
+//
+// Sidekick presents the user with one row per "logical conversation" in the
+// drawer. Hermes does not. Hermes maintains TWO independent identifier
+// spaces that don't fully agree on what a conversation is:
+//
+//   1. session_id (state.db.sessions)  — transport key. Generated per
+//      gateway "context window." Subject to rotation.
+//   2. conversation slug (response_store.db.conversations) — logical key.
+//      Stable across rotations from the client's point of view; sidekick
+//      always sends `conversation=sidekick-<slug>` on every POST.
+//
+// One conversation slug can map to N session rows. The drawer must collapse
+// these to one row, and delete must cascade across all members. That is what
+// this section of server.ts implements.
+//
+// HOW SESSIONS FORK (two independent mechanisms, both produce N rows from 1)
+//
+//   A) Compression rotation. When the agent's prompt context exceeds budget,
+//      hermes ends the current session (`end_reason='compression'`) and
+//      creates a NEW session with `parent_session_id` pointing at the old
+//      one. Reference: run_agent.py:7580. Forks are linked.
+//
+//   B) Cold-start fork. When the gateway restarts or its in-memory
+//      `_response_store` LRU-evicts the previous response_id, the next POST
+//      with the same conversation slug mints a fresh ROOT session with
+//      `parent_session_id=NULL` — there's no live response_id to link to.
+//      Forks are NOT linked. Filed upstream at NousResearch/hermes-agent#16517;
+//      they may fix it (use slug→session lookup on fallback) or document it as
+//      intentional. Either way, we dedup defensively until then.
+//
+// HOW WE COLLAPSE (two paths matching the two fork mechanisms)
+//
+//   1) SQL recursive CTE in searchSessionsImpl walks `parent_session_id`,
+//      returns one row per root with chain-aggregated message counts.
+//      Catches mechanism (A).
+//
+//   2) JS post-pass in mergeForkRows merges rows that share the same id
+//      (which is the slug for api_server sessions, set by the SELECT's
+//      CASE WHEN). Catches mechanism (B). SQL inner-LIMIT is bumped to
+//      limit*4 so we have enough pre-merge rows to fill the window.
+//
+// HOW DELETE CASCADES (lookupAllSessionUuids)
+//
+//   - Slug ids ('sidekick-*' / 'sideclaw-*') → enumerate all session_ids
+//     ever attached to the slug via response_store.db. Every fork of a slug
+//     has at least one row in `responses` whose data.session_id points at it.
+//   - Non-slug ids → walk parent_session_id up to the root, then back down
+//     through descendants. Same CTE shape as listing.
+//   - Each member uuid gets its own `hermes sessions delete` CLI invocation
+//     plus a hindsight scrub. Then the slug's response_store rows are wiped.
+//   - Without the cascade, deleting a slug-row removed only the latest fork
+//     and the older forks would re-aggregate into the drawer on the next
+//     list call — looking like the row "came back" with stale counts.
+//
+// WHY HERE AND NOT IN HERMES
+//
+// Jonathan's stance: don't stack hermes patches for sidekick-specific UX.
+// All three mechanisms above are sidekick concerns: hermes can keep its own
+// internal model. The cost is this comment block plus mergeForkRows +
+// lookupAllSessionUuids — a price worth paying to keep hermes upgrades
+// clean. If upstream #16517 lands, mechanism (B) goes away and so can the
+// JS merge step (the SQL CTE alone covers (A)).
+//
+// IF YOU'RE EDITING ANYTHING IN THIS SECTION
+//
+//   - Anything that returns sessions to the drawer must run through
+//     mergeForkRows — drawer treats id as the conversation key.
+//   - Anything that deletes a session must use lookupAllSessionUuids, not
+//     lookupSessionUuid — the latter only finds the latest fork.
+//   - The slug join goes through response_store.db, not state.db. Both DBs
+//     are ATTACHed in the search query.
+//   - Tests in test/ exercise the merge directly — add a row to those when
+//     adding a new fork-producing scenario.
+//
+// ───────────────────────────────────────────────────────────────────────────
+
 /** Map an id used by the drawer to the canonical state.db session UUID.
  *  Sidekick webchat rows come in as conversation names ('sidekick-*') —
  *  we look those up via response_store.db → responses.data.session_id.
  *  Telegram / cli rows come in as the UUID already (they have no
  *  response_store conversations row), so we pass them through after a
  *  sanity check that state.db/sessions has that row. Returns null if
- *  the id doesn't resolve to a known session. */
+ *  the id doesn't resolve to a known session.
+ *
+ *  NOTE: returns the LATEST fork only. For cascade delete use
+ *  lookupAllSessionUuids instead. See header comment above. */
 async function lookupSessionUuid(name: string): Promise<string | null> {
   if (name.startsWith('sidekick-') || name.startsWith('sideclaw-')) {
     const sql = `SELECT json_extract(r.data, '$.session_id') AS uuid
@@ -980,6 +1132,48 @@ async function lookupSessionUuid(name: string): Promise<string | null> {
   const rows = await sqlQuery(HERMES_STATE_DB,
     `SELECT id FROM sessions WHERE id='${name}' LIMIT 1`);
   return rows[0]?.id || null;
+}
+
+/** Resolve a drawer id to ALL state.db session UUIDs that belong to its
+ *  logical conversation. Used by the delete handler to cascade across
+ *  forks; without this, deleting "sidekick-foo" only removed the latest
+ *  fork and orphaned earlier ones (the cause of "I deleted but the row
+ *  came back with stale messageCount" — the ghost was the older fork
+ *  that got re-aggregated by the dedup query).
+ *
+ *  Two fork mechanisms (see searchSessionsImpl comment):
+ *    - sidekick/sideclaw slugs → join through response_store; every
+ *      response carrying that slug is from one of the forks, so the set
+ *      of distinct session_ids in those responses IS the fork set.
+ *    - non-slug ids (whatsapp/cli/etc) → walk parent_session_id chain
+ *      both up to root and down through descendants. */
+async function lookupAllSessionUuids(name: string): Promise<string[]> {
+  if (name.startsWith('sidekick-') || name.startsWith('sideclaw-')) {
+    const sql = `SELECT DISTINCT json_extract(r.data, '$.session_id') AS uuid
+      FROM conversations c
+      LEFT JOIN responses r ON r.response_id = c.response_id
+      WHERE c.name='${name}' AND r.data IS NOT NULL`;
+    const rows = await sqlQuery(HERMES_STORE_DB, sql);
+    return rows.map((r: any) => r.uuid).filter(Boolean);
+  }
+  const sql = `
+    WITH RECURSIVE
+      up(id) AS (
+        SELECT id FROM sessions WHERE id='${name}'
+        UNION ALL
+        SELECT s.parent_session_id FROM sessions s JOIN up ON s.id = up.id
+          WHERE s.parent_session_id IS NOT NULL
+      ),
+      root(id) AS (SELECT id FROM up WHERE id IN (SELECT id FROM sessions WHERE parent_session_id IS NULL)),
+      chain(id) AS (
+        SELECT id FROM root
+        UNION ALL
+        SELECT s.id FROM sessions s JOIN chain ON s.parent_session_id = chain.id
+      )
+    SELECT DISTINCT id FROM chain
+  `;
+  const rows = await sqlQuery(HERMES_STATE_DB, sql);
+  return rows.map((r: any) => r.id).filter(Boolean);
 }
 
 async function handleHermesSessionRename(req, res, name: string) {
@@ -1122,17 +1316,27 @@ async function handleHermesSessionDelete(req, res, name: string) {
     return;
   }
   try {
-    const uuid = await lookupSessionUuid(name);
-    if (!uuid) {
+    const uuids = await lookupAllSessionUuids(name);
+    if (uuids.length === 0) {
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'session not found' }));
       return;
     }
-    // Step 1: hermes CLI removes the row from state.db/sessions + cascades
-    // to its messages table. --yes skips the confirmation prompt.
-    await execFileP(HERMES_CLI, ['sessions', 'delete', '--yes', uuid], {
-      env: { ...process.env, HERMES_ACCEPT_HOOKS: '1' },
-    });
+    // Step 1: hermes CLI delete for EACH fork uuid. The dedup query in
+    // searchSessionsImpl collapses cold-start forks into one drawer row,
+    // so a delete must fan out to all members or the older forks become
+    // orphaned (drawer reads them right back via the slug join).
+    let cliErrors = 0;
+    for (const uuid of uuids) {
+      try {
+        await execFileP(HERMES_CLI, ['sessions', 'delete', '--yes', uuid], {
+          env: { ...process.env, HERMES_ACCEPT_HOOKS: '1' },
+        });
+      } catch (e: any) {
+        cliErrors++;
+        console.error(`[hermes delete] CLI failed for ${uuid}:`, e.message);
+      }
+    }
     // Step 2: hermes's CLI does NOT clean up response_store.db — conversation
     // name + response chain stay orphaned. Our list reads from conversations,
     // so without this cleanup the "deleted" row would still appear in the UI.
@@ -1145,12 +1349,18 @@ async function handleHermesSessionDelete(req, res, name: string) {
     // Step 3: scrub long-term memories the agent retained from this session.
     // Hindsight runs as a separate service and can be unreachable; treat as
     // best-effort so we don't strand the sqlite delete on a memory-service blip.
-    const purged = await purgeHindsightSession(uuid);
-    if (purged.docs > 0 || purged.errors > 0) {
-      console.log(`[hermes delete] hindsight purge for ${uuid}: ${purged.docs} docs, ${purged.units} memory units, ${purged.errors} errors`);
+    let totalDocs = 0, totalUnits = 0, totalErrors = 0;
+    for (const uuid of uuids) {
+      const purged = await purgeHindsightSession(uuid);
+      totalDocs += purged.docs;
+      totalUnits += purged.units;
+      totalErrors += purged.errors;
+    }
+    if (totalDocs > 0 || totalErrors > 0) {
+      console.log(`[hermes delete] hindsight purge across ${uuids.length} fork(s): ${totalDocs} docs, ${totalUnits} memory units, ${totalErrors} errors`);
     }
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, hindsightDocs: purged.docs, hindsightUnits: purged.units }));
+    res.end(JSON.stringify({ ok: true, forks: uuids.length, hindsightDocs: totalDocs, hindsightUnits: totalUnits, cliErrors }));
   } catch (e: any) {
     console.error('hermes sessions delete failed:', e.message);
     res.writeHead(500, { 'content-type': 'application/json' });
@@ -1515,7 +1725,31 @@ async function handleHermesSearch(req, res) {
  *  /api/hermes/sessions (title/source/id/snippet/messageCount/lastMessageAt)
  *  so callers can swap endpoints without re-mapping. Empty `rawQ` → all
  *  sessions (limit). Non-empty → glob-split (commas + whitespace), each
- *  token converted `*` → `%` and matched against title/source/id/conv-name. */
+ *  token converted `*` → `%` and matched against title/source/id/conv-name.
+ *
+ *  Fork dedup — TWO mechanisms work together:
+ *
+ *    1. SQL recursive CTE walks `parent_session_id`. Hermes' compression
+ *       rotation (`run_agent.py:7580` sets parent_session_id when context
+ *       budget is exceeded) creates a child session linked to its parent;
+ *       the CTE collapses the chain to one row per root and aggregates
+ *       message_count / lastMessageAt / snippet across the whole chain.
+ *
+ *    2. JS post-pass merges roots that share a `sidekick-*` / `sideclaw-*`
+ *       slug. This catches the SECOND fork mode: when the gateway restarts
+ *       or hermes' in-memory `_response_store` LRU-evicts, the next POST
+ *       with `conversation=sidekick-foo` mints a fresh ROOT session
+ *       (parent_session_id is null — there's nothing to link to) but the
+ *       slug is the same. Without (2), the sidebar would show "sidekick-foo"
+ *       twice. JS merge sums messageCount, takes max lastMessageAt, latest
+ *       snippet. (Discovered 2026-04-27: Jonathan saw "8 sessions with 730
+ *       messages" after a gateway restart cycle — that was case 2.)
+ *
+ *  Why JS merge instead of more SQL? The CTE already aggregates within a
+ *  chain; a second SQL grouping over the result requires another CTE
+ *  layer + GROUP BY, doubling query complexity. JS merge over ~hundreds
+ *  of rows is negligible. The SQL inner-LIMIT is bumped (limit * 4) so we
+ *  have enough pre-merge rows to fill the requested `limit` post-merge. */
 async function searchSessionsImpl(rawQ: string, limit: number): Promise<any[]> {
   // Tokenize on commas + whitespace. Sanitizer matches the legacy
   // /api/hermes/sessions semantics; `:` permitted because users may try
@@ -1591,14 +1825,37 @@ async function searchSessionsImpl(rawQ: string, limit: number): Promise<any[]> {
     WHERE (${whereClause})
       AND s.parent_session_id IS NULL
     ORDER BY lastMessageAt DESC NULLS LAST
-    LIMIT ${limit}
+    LIMIT ${limit * 4}
   `;
   try {
-    return await sqlQuery(HERMES_STATE_DB, sql);
+    const rows = await sqlQuery(HERMES_STATE_DB, sql);
+    return mergeForkRows(rows, limit);
   } catch (e: any) {
     console.error('hermes search (sessions) failed:', e.message);
     return [];
   }
+}
+
+/** Collapse rows that share the same id (slug for api_server sessions).
+ *  See the long comment on searchSessionsImpl for the why. */
+function mergeForkRows(rows: any[], limit: number): any[] {
+  const merged = new Map<string, any>();
+  for (const row of rows) {
+    const existing = merged.get(row.id);
+    if (!existing) {
+      merged.set(row.id, { ...row });
+      continue;
+    }
+    existing.messageCount = (existing.messageCount || 0) + (row.messageCount || 0);
+    if ((row.lastMessageAt || 0) > (existing.lastMessageAt || 0)) {
+      existing.lastMessageAt = row.lastMessageAt;
+      existing.snippet = row.snippet;
+    }
+    if (!existing.title && row.title) existing.title = row.title;
+  }
+  return [...merged.values()]
+    .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0))
+    .slice(0, limit);
 }
 
 /** Shared message-search implementation (FTS5). Empty `rawQ` or all-
@@ -1719,9 +1976,44 @@ function handleHermesProxy(req, res) {
     }
   });
 
-  // Forward client body (POST) or just end (GET).
-  if (req.method === 'POST' || req.method === 'PUT') req.pipe(upReq);
-  else upReq.end();
+  // Forward client body (POST) or just end (GET). For POST /v1/responses we
+  // tee the body into a side buffer so we can announce session-started on
+  // the first message of a new conversation. The forward stream is unchanged
+  // — bytes flow upstream as they arrive (no added forwarding latency); the
+  // tee parses on body-end and fires the SSE event a few ms later, well
+  // before the agent's first reply could possibly land.
+  if (req.method === 'POST' || req.method === 'PUT') {
+    const isResponsesPost = req.method === 'POST' && /^\/v1\/responses(?:\?|$)/.test(upstreamPath);
+    if (isResponsesPost) {
+      const sniff: Buffer[] = [];
+      let sniffBytes = 0;
+      const SNIFF_CAP = 512 * 1024;  // bound the side buffer; bodies are kB
+      req.on('data', (chunk: Buffer) => {
+        if (sniffBytes < SNIFF_CAP) {
+          sniff.push(chunk);
+          sniffBytes += chunk.length;
+        }
+      });
+      req.on('end', () => {
+        if (!sniff.length) return;
+        let body: any;
+        try { body = JSON.parse(Buffer.concat(sniff).toString('utf8')); }
+        catch { return; }
+        const conv = typeof body?.conversation === 'string' ? body.conversation : null;
+        if (!conv) return;
+        if (!/^(sidekick|sideclaw)-/.test(conv)) return;  // skip cli/test names
+        if (announcedConvs.has(conv)) return;
+        rememberAnnounced(conv);
+        broadcastDrawerEvent('session-started', {
+          id: conv,
+          snippet: extractFirstUserText(body).slice(0, 120),
+          source: 'api_server',
+          started_at: new Date().toISOString(),
+        });
+      });
+    }
+    req.pipe(upReq);
+  } else upReq.end();
 }
 
 // ── WebRTC voice transport proxy: /api/rtc/* → audio-bridge /v1/rtc/* ────────
@@ -1789,6 +2081,7 @@ const server = http.createServer(async (req, res) => {
     if (renameMatch) return handleHermesSessionRename(req, res, decodeURIComponent(renameMatch[1]));
     const deleteMatch = req.method === 'DELETE' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)(?:\?.*)?$/);
     if (deleteMatch) return handleHermesSessionDelete(req, res, decodeURIComponent(deleteMatch[1]));
+    if (req.method === 'GET' && req.url === '/api/hermes/drawer-events') return handleDrawerEvents(req, res);
     if (req.method === 'GET' && /^\/api\/hermes\/sessions(?:\?.*)?$/.test(req.url)) return handleHermesSessionsList(req, res);
     if (req.method === 'GET' && /^\/api\/hermes\/search(?:\?.*)?$/.test(req.url)) return handleHermesSearch(req, res);
     if (req.method === 'GET' && /^\/api\/hermes\/models-catalog(?:\?.*)?$/.test(req.url)) return handleHermesModelsCatalog(req, res);
