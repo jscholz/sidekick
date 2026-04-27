@@ -48,26 +48,11 @@ interface CallSession {
   pc: RTCPeerConnection;
   mode: CallMode;
   micStream: MediaStream;
-  /** Raw mic stream for the smart-barge analyser only — opened with
-   *  echoCancellation/noiseSuppression/autoGainControl all FALSE so
-   *  Web Audio sees pre-DSP samples. The PC's outbound mic uses the
-   *  AEC'd `micStream` for STT clarity; this second stream is never
-   *  added to the peer connection. Null if the second getUserMedia
-   *  call failed (rare; constraints are non-mandatory). When null,
-   *  duplex falls back to micStream and barge-in degrades to
-   *  "won't fire while TTS is playing" because AEC nukes the signal. */
-  rawMicStream: MediaStream | null;
   peerId: string | null;
   /** Hidden <audio> element playing the remote (TTS) audio track.
    *  Chrome's WebRTC autoplay-exception keeps it audible without
    *  explicit user-gesture context resumption. */
   remoteAudio: HTMLAudioElement | null;
-  /** AnalyserNode tapping a CLONED audio track (independent buffer
-   *  from the <audio>-consumed track) for smart-barge level
-   *  comparison. May read 0 in browsers that don't honor track-clone
-   *  independence — smart-barge degrades to "doesn't fire" in that
-   *  case but playback is unaffected. */
-  remoteAnalyser: AnalyserNode | null;
   /** Outbound data channel for transcript + reply text events. */
   dataChannel: RTCDataChannel | null;
   state: CallState;
@@ -79,8 +64,12 @@ interface CallSession {
 }
 
 /**
- * Wire-format envelopes from the server's data channel.  V1: transcript
- * events for both user-speech and assistant-reply text.
+ * Wire-format envelopes from the server's data channel.
+ *
+ *   - `transcript` — user/assistant text, both interim and final.
+ *   - `barge`      — server-side VAD detected user voice during TTS;
+ *                    client should cancel local playback. See
+ *                    docs/SIDEKICK_AUDIO_PROTOCOL.md.
  */
 interface TranscriptEvent {
   type: 'transcript';
@@ -88,7 +77,10 @@ interface TranscriptEvent {
   is_final: boolean;
   role: 'user' | 'assistant';
 }
-type DataChannelEvent = TranscriptEvent;
+interface BargeEvent {
+  type: 'barge';
+}
+type DataChannelEvent = TranscriptEvent | BargeEvent;
 
 let onDataChannelEvent: ((ev: DataChannelEvent) => void) | null = null;
 
@@ -109,11 +101,8 @@ export function getDataChannelListener(): ((ev: DataChannelEvent) => void) | nul
 
 let active: CallSession | null = null;
 let onStateChange: ((s: CallState, mode: CallMode | null) => void) | null = null;
-/** Shared AudioContext for the analyser tap. Reused across calls. */
-let sharedAudioCtx: AudioContext | null = null;
-/** Hold-overs when ontrack fires before `active` is populated. */
+/** Hold-over when ontrack fires before `active` is populated. */
 let pendingRemoteAudio: HTMLAudioElement | null = null;
-let pendingRemoteAnalyser: AnalyserNode | null = null;
 
 export function setStateListener(cb: (state: CallState, mode: CallMode | null) => void) {
   onStateChange = cb;
@@ -153,41 +142,17 @@ export function currentMode(): CallMode | null {
  * WHEN to call this — silence-timer fire, commit-phrase match, or any
  * future trigger.
  */
-/** Read-only access to the live mic MediaStream — needed by the
- *  half-duplex (barge-in) controller in duplex.ts to attach an
- *  AnalyserNode for volume monitoring during agent reply. Returns
- *  null when no call is open. */
+/** Read-only access to the live mic MediaStream. Currently unused by
+ *  application code (preserved as a small public surface in case a
+ *  future feature wants a tap on the local mic — e.g. mic-meter).
+ *  Returns null when no call is open. */
 export function getMicStream(): MediaStream | null {
   return active?.micStream ?? null;
 }
 
-/** RAW mic stream (no AEC / NS / AGC) for the smart-barge analyser.
- *  Falls back to the AEC'd micStream if the raw capture failed.
- *  See the long comment in open() for why this exists. */
-export function getRawMicStream(): MediaStream | null {
-  return active?.rawMicStream ?? active?.micStream ?? null;
-}
-
-/** Direct read-only access to the remote-audio AnalyserNode that
- *  connection.ts builds at ontrack time. duplex.ts uses this for
- *  smart-barge level comparison. Returns null when no remote track
- *  has arrived yet (or no call open). */
-export function getRemoteAnalyser(): AnalyserNode | null {
-  return active?.remoteAnalyser ?? null;
-}
-
-/** The shared AudioContext that was created + resumed synchronously
- *  inside the click-handler chain at open() time. duplex.ts uses this
- *  for the mic analyser so that BOTH analysers share one running
- *  context — its own ctx would be created later (inside startBargePoll
- *  via setInterval) and resume() would silently no-op outside the
- *  user-gesture window, leaving the mic analyser reading silence. */
-export function getSharedAudioContext(): AudioContext | null {
-  return sharedAudioCtx;
-}
-
 /** Cancel local TTS playback by pausing + clearing the audio
- *  element. Idempotent and safe when no call is open. */
+ *  element. Idempotent and safe when no call is open. Called by
+ *  main.ts when the bridge sends a server-side `barge` envelope. */
 export function cancelRemotePlayback(): void {
   if (!active?.remoteAudio) return;
   try { active.remoteAudio.pause(); } catch { /* ignore */ }
@@ -212,36 +177,23 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     await close();
   }
 
-  // Create + resume the shared AudioContext SYNCHRONOUSLY, before any
-  // await. AudioContext.resume() only succeeds inside a user-gesture
-  // activation window; by the time ontrack fires the activation flag
-  // has expired and the ctx stays suspended, leaving the analyser
-  // reading 0.000 (smart-barge breaks). Doing it here — same task as
-  // the click that called open() — keeps it in the gesture window.
-  try {
-    const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
-    if (Ctx) {
-      if (!sharedAudioCtx) sharedAudioCtx = new Ctx();
-      if (sharedAudioCtx.state === 'suspended') {
-        sharedAudioCtx.resume().catch((e) => diag('[webrtc] ctx.resume err', e?.message));
-      }
-    }
-  } catch (e: any) {
-    diag('[webrtc] AudioContext init failed', e?.message);
-  }
-
   setState('requesting-mic');
   let micStream: MediaStream;
   try {
-    // autoGainControl: false — on iOS Safari AGC amplifies remote-audio
-    // echo above the AEC threshold and we lose echo cancellation on
-    // speakerphone. On desktop Chrome AGC ducks the mic when system
-    // output is loud (TTS playback), suppressing user voice down to
-    // 0.04-0.06 peak (well below the 0.08 barge floor). Production
-    // WebRTC voice apps (Discord web, Meet) leave AGC off in voice-call
-    // constraints. echoCancellation and noiseSuppression stay on for
-    // STT clarity. Browser default may be true (was unspecified before),
-    // so set explicitly.
+    // echoCancellation/noiseSuppression on for STT clarity (the bridge
+    // sees AEC'd mic samples, which is what Deepgram wants). AGC off:
+    // on iOS Safari AGC amplifies remote-audio echo above the AEC
+    // threshold and we lose echo cancellation on speakerphone; on
+    // desktop Chrome AGC ducks the mic when system output is loud.
+    // Production WebRTC voice apps (Discord web, Meet) leave AGC off
+    // in voice-call constraints.
+    //
+    // Note: client-side barge detection is gone — the bridge runs an
+    // RMS VAD on raw pre-DSP PCM and sends `{type:'barge'}` over the
+    // data channel. Browser AEC ducks anything correlated with
+    // system output, so a client-side mic analyser cannot reliably
+    // see user voice during TTS regardless of constraints. See
+    // docs/SIDEKICK_AUDIO_PROTOCOL.md for the new envelope.
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -253,31 +205,6 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     diag('[webrtc] getUserMedia failed', e?.message);
     setState('failed');
     throw e;
-  }
-
-  // Second mic capture — RAW (no AEC, no NS, no AGC) — for the
-  // smart-barge analyser ONLY. Reason: Chrome's WebRTC capture pipeline
-  // applies echoCancellation as part of the capture path itself, BEFORE
-  // Web Audio sees the samples. So a createMediaStreamSource on the
-  // AEC'd mic reads pre-cancelled audio that's been actively ducked
-  // whenever system output (TTS) is loud — barge-in becomes physically
-  // impossible to detect, no matter the threshold tuning. Opening a
-  // second stream with all DSP off bypasses this; both streams share
-  // the underlying hardware capture (Chrome muxes), so there's no
-  // concurrent-mic conflict. If this call fails for any reason, we
-  // log + null and barge-in degrades but the call still works.
-  let rawMicStream: MediaStream | null = null;
-  try {
-    rawMicStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
-    });
-    log('[webrtc] raw mic stream acquired (analyser tap)');
-  } catch (e: any) {
-    diag('[webrtc] raw mic getUserMedia failed — barge-in will degrade:', e?.message);
   }
 
   setState('connecting');
@@ -300,17 +227,10 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
   // Playback path: standard <audio srcObject> element. This is
   // Chrome's WebRTC-exception to its autoplay policy — peer-connection
   // audio plays without an explicit user-gesture-tied AudioContext
-  // resume. Going via Web Audio destination requires
-  // ctx.resume() to land within the gesture window, which by ontrack
-  // time has expired, so the AudioContext stays suspended and no
-  // audio reaches the speakers.
-  //
-  // Smart-barge analyser known-limitation: createMediaStreamSource
-  // on the same stream the <audio> element consumes returns 0.000
-  // (the element captures the stream's audio output). We try anyway
-  // via track.clone() — that gives the Web Audio source an
-  // independent track buffer to read from. Some browsers honor it,
-  // some don't.
+  // resume. Going via Web Audio destination requires ctx.resume() to
+  // land within the gesture window, which by ontrack time has expired,
+  // so the AudioContext stays suspended and no audio reaches the
+  // speakers.
   let remoteAudio: HTMLAudioElement | null = null;
   pc.addEventListener('track', (ev: RTCTrackEvent) => {
     log('[webrtc] ontrack kind=', ev.track.kind);
@@ -336,35 +256,6 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     }
     remoteAudio.srcObject = stream;
     remoteAudio.play().catch((e) => diag('[webrtc] remoteAudio.play err', e?.message));
-
-    // Build Web Audio analyser from a CLONED audio track. The
-    // clone gets its own track buffer independent of what the
-    // <audio> element consumes — Web Audio source on the cloned
-    // track reads real samples (in browsers that honor the clone
-    // semantics). If this returns 0 anyway, smart-barge silently
-    // remains broken; at least playback works.
-    try {
-      const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
-      if (Ctx) {
-        if (!sharedAudioCtx) sharedAudioCtx = new Ctx();
-        const ctx = sharedAudioCtx;
-        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-        const audioTrack = ev.track;
-        const clonedTrack = audioTrack.clone();
-        const clonedStream = new MediaStream([clonedTrack]);
-        const src = ctx.createMediaStreamSource(clonedStream);
-        const an = ctx.createAnalyser();
-        an.fftSize = 256;
-        src.connect(an);
-        if (active) {
-          active.remoteAnalyser = an;
-        } else {
-          pendingRemoteAnalyser = an;
-        }
-      }
-    } catch (e: any) {
-      diag('[webrtc] remote analyser via clone failed:', e?.message);
-    }
   });
 
   // Open a data channel BEFORE createOffer so the SDP includes the
@@ -394,16 +285,13 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     pc,
     mode,
     micStream,
-    rawMicStream,
     peerId: null,
     remoteAudio: pendingRemoteAudio ?? remoteAudio,
-    remoteAnalyser: pendingRemoteAnalyser,
     dataChannel,
     state: 'connecting',
     pendingCandidates: [],
   };
   pendingRemoteAudio = null;
-  pendingRemoteAnalyser = null;
 
   // Trickle ICE: queue candidates until we have a peer_id, then POST each.
   pc.addEventListener('icecandidate', (ev) => {
@@ -537,13 +425,6 @@ export async function close(): Promise<void> {
       try { t.stop(); } catch { /* ignore */ }
     }
   } catch { /* ignore */ }
-  if (session.rawMicStream) {
-    try {
-      for (const t of session.rawMicStream.getTracks()) {
-        try { t.stop(); } catch { /* ignore */ }
-      }
-    } catch { /* ignore */ }
-  }
   if (session.dataChannel) {
     try { session.dataChannel.close(); } catch { /* ignore */ }
   }
@@ -554,9 +435,6 @@ export async function close(): Promise<void> {
       session.remoteAudio.srcObject = null;
       session.remoteAudio.remove();
     } catch { /* ignore */ }
-  }
-  if (session.remoteAnalyser) {
-    try { session.remoteAnalyser.disconnect(); } catch { /* ignore */ }
   }
   if (session.peerId) {
     try {

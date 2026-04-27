@@ -22,7 +22,7 @@
 
 import * as conn from './connection.ts';
 import * as dictation from './dictation.ts';
-import * as duplex from './duplex.ts';
+import * as suppress from './suppress.ts';
 import * as settings from '../../settings.ts';
 import { log, diag } from '../../util/log.ts';
 
@@ -63,10 +63,7 @@ export function init(o: ControlsOpts) {
     // safe place to clear (idempotent).
     if (state === 'idle' || state === 'closing' || state === 'failed' || state === 'requesting-mic') {
       dictation.reset();
-      duplex.onCallClose();
-    }
-    if (state === 'connected') {
-      duplex.onCallOpen();
+      suppress.reset();
     }
     if (!opts?.onStatus) return;
     if (state === 'requesting-mic') opts.onStatus('Requesting mic…');

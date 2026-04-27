@@ -543,43 +543,6 @@
     to   { opacity: 1; transform: translateY(0); }
   }
 
-  /* ── Duplex debug overlay (?duplex-debug=1) ──
-     Floating top-right panel with live mic/remote peaks + barge state
-     for tuning the smart-barge thresholds. Hidden in production —
-     only mounts when the URL flag is set. */
-  .duplex-debug-overlay {
-    position: fixed;
-    top: 12px; right: 12px;
-    z-index: 99998;
-    padding: 8px 10px;
-    min-width: 240px;
-    background: rgba(0, 0, 0, 0.78);
-    color: #ddd;
-    border: 1px solid #444;
-    border-radius: 6px;
-    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-    pointer-events: none;
-  }
-  .duplex-debug-overlay .ddb-header {
-    color: #888; margin-bottom: 6px;
-    text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px;
-  }
-  .duplex-debug-overlay .ddb-row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
-  .duplex-debug-overlay .ddb-label { width: 44px; color: #aaa; }
-  .duplex-debug-overlay .ddb-bar {
-    flex: 1; height: 6px; background: #1a1a1a;
-    border: 1px solid #333; border-radius: 2px;
-    overflow: hidden; min-width: 80px;
-  }
-  .duplex-debug-overlay .ddb-fill {
-    height: 100%; transition: width 30ms linear;
-  }
-  .duplex-debug-overlay .ddb-local  { background: #5af; }
-  .duplex-debug-overlay .ddb-remote { background: #fa5; }
-  .duplex-debug-overlay .ddb-val { width: 44px; text-align: right; color: #ccc; font-variant-numeric: tabular-nums; }
-  .duplex-debug-overlay .ddb-summary { display: block; margin-top: 6px; color: #999; }
-  .duplex-debug-overlay .ddb-fire { font-weight: 600; }
-
   /* ── Session info dialog (replaces alert() so text stays selectable) ── */
   .session-info-dialog {
     background: var(--surface); color: var(--fg);

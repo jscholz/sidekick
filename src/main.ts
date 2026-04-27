@@ -37,7 +37,7 @@ import * as webrtcControls from './pipelines/webrtc/controls.ts';
 import * as webrtcConnection from './pipelines/webrtc/connection.ts';
 import * as webrtcDictation from './pipelines/webrtc/dictation.ts';
 import * as webrtcDictate from './pipelines/webrtc/dictate.ts';
-import * as webrtcDuplex from './pipelines/webrtc/duplex.ts';
+import * as webrtcSuppress from './pipelines/webrtc/suppress.ts';
 import * as bgTrace from './bgTrace.ts';
 import { stripReasoningLeak } from './backends/hermes.ts';
 
@@ -758,17 +758,26 @@ async function boot() {
     dcAssistantStreamingId = null;
   });
   webrtcConnection.setDataChannelListener((ev) => {
+    if (ev.type === 'barge') {
+      // Server-side VAD detected user voice during TTS. Cancel local
+      // playback and clear the user-transcript suppression so the
+      // user's words flow through the rest of the data-channel
+      // pipeline. See docs/SIDEKICK_AUDIO_PROTOCOL.md.
+      log('[webrtc] server-side barge fired — cancelling TTS playback');
+      webrtcConnection.cancelRemotePlayback();
+      webrtcSuppress.onBarge();
+      return;
+    }
     if (ev.type !== 'transcript' || typeof ev.text !== 'string') return;
     if (ev.role === 'user') {
       // Half-duplex: while the agent is speaking, the iOS speakerphone
       // re-captures TTS output as mic input and Deepgram transcribes
       // it. We can't tell the difference between that and real user
       // speech from the transcript alone, so drop user transcripts
-      // entirely while suppressing. The barge-in path in
-      // webrtcDuplex watches mic VOLUME (separate from transcripts)
-      // to release suppression when the user actually wants to
-      // interrupt.
-      if (webrtcDuplex.isSuppressing()) return;
+      // entirely while suppressing. The bridge-side VAD fires
+      // {type:'barge'} when the user actually wants to interrupt; the
+      // handler above clears suppression in that case.
+      if (webrtcSuppress.isSuppressing()) return;
       if (!ev.is_final) {
         // Interim: upsert the streaming user bubble. Display = previously
         // is_finalized segments for this utterance + current interim.
@@ -795,9 +804,11 @@ async function boot() {
       // (and its thinking-cursor) so the bubble stops blinking once
       // the reply is actually done.
       //
-      // Duplex hooks: notify webrtcDuplex so it can suppress user
+      // Suppression hooks: notify webrtcSuppress so it drops user
       // transcripts during the reply (kills iOS speakerphone-feedback
-      // re-transcription) and start the barge-in volume watcher.
+      // re-transcription). Barge-in is server-side now — the bridge
+      // sends {type:'barge'} when its VAD detects user voice during
+      // TTS; the data-channel handler above clears suppression.
       if (ev.is_final) {
         if (dcAssistantStreamingId) {
           const el = document.querySelector(
@@ -806,10 +817,10 @@ async function boot() {
           if (el) el.classList.remove('streaming', 'pending');
         }
         dcAssistantStreamingId = null;
-        webrtcDuplex.onAssistantFinal();
+        webrtcSuppress.onAssistantFinal();
         return;
       }
-      webrtcDuplex.onAssistantDelta();
+      webrtcSuppress.onAssistantDelta();
       if (!dcAssistantStreamingId) {
         dcAssistantStreamingId = `dc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         chat.addLine(getAgentLabel(), ev.text, 'agent streaming', {
