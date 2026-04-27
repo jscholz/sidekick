@@ -36,6 +36,7 @@ import * as composer from './composer.ts';
 import * as webrtcControls from './pipelines/webrtc/controls.ts';
 import * as webrtcConnection from './pipelines/webrtc/connection.ts';
 import * as webrtcDictation from './pipelines/webrtc/dictation.ts';
+import * as webrtcDictate from './pipelines/webrtc/dictate.ts';
 import * as webrtcDuplex from './pipelines/webrtc/duplex.ts';
 import * as bgTrace from './bgTrace.ts';
 import { stripReasoningLeak } from './backends/hermes.ts';
@@ -843,6 +844,7 @@ async function boot() {
   // module-level handle so the closure references the right state.
   releaseCaptureIfActive = () => {
     if (webrtcControls.isOpen()) void webrtcControls.closeIfOpen();
+    if (webrtcDictate.isActive()) void webrtcDictate.stop();
     if (memoActive) {
       memo.cancel();
       const bar = document.querySelector('.memo-bar');
@@ -1272,68 +1274,136 @@ async function boot() {
     flushOutbox().catch(() => {});
   }
 
-  if (btnMemo) {
-    // Tracks the WebRTC call mode that was active when memo started, so
-    // we can re-open it once the memo completes. Mic is exclusive: any
-    // open call must close before getUserMedia is acquired by memo.
-    let resumeCallMode: 'stream' | 'talk' | null = null;
-    btnMemo.onclick = async () => {
-      if (memoActive) return;
-      // Snapshot the current call mode (if any), then close it so the mic
-      // is free for the memo recorder.
-      resumeCallMode = webrtcControls.isOpen() ? webrtcControls.currentMode() : null;
-      if (webrtcControls.isOpen()) await webrtcControls.closeIfOpen();
-      // iOS AVAudioSession prep: prepareForCapture before getUserMedia.
-      // unlock(player) keeps the legacy <audio id="player"> element warm
-      // so the session category settles correctly.
-      unlock(player);
-      audioSession.prepareForCapture();
-      memoActive = true;
-      composerInput.style.display = 'none';
-      btnMemo.style.display = 'none';
-      updateSendButtonState();
-      const resumeCall = () => {
-        const mode = resumeCallMode;
-        resumeCallMode = null;
-        if (!mode) return;
-        const target = mode === 'stream' ? document.getElementById('btn-mic')
-          : document.getElementById('btn-speak');
-        if (target) (target as HTMLElement).click();
-      };
-      composerSend.onclick = async () => {
-        if (composerSend.disabled) return;
-        composerSend.disabled = true;
-        try {
-          const { audioBlob, durationMs } = await memo.stop();
-          exitMemoMode();
-          await handleMemoResult(audioBlob, durationMs);
-          resumeCall();
-        } finally {
-          composerSend.disabled = false;
-        }
-      };
-      const composerEl = composerInput.parentElement;
-      const composerActionsEl = composerEl?.querySelector('.composer-actions') as HTMLElement | null;
-      if (composerActionsEl) composerActionsEl.style.display = 'none';
-      const ok = await memo.start({
-        container: composerEl,
-        insertBefore: composerActionsEl || composerSend,
-        sendBtn: composerSend,
-        onDone: (audioBlob) => {
-          exitMemoMode();
-          handleMemoResult(audioBlob);
-          resumeCall();
-        },
-        onCancel: () => {
-          exitMemoMode();
-          resumeCall();
-        },
-      });
-      if (!ok) {
+  // Dictate-mode wiring — initialise once so the module knows which
+  // textarea to target. Independent of memo; either is exclusive at
+  // any moment but they share the same #btn-memo entry point with a
+  // dropdown chevron switching between them.
+  webrtcDictate.init(composerInput);
+  let dictateActive = false;
+  webrtcDictate.setStateListener((opening, error) => {
+    dictateActive = opening;
+    const btnMemoForState = document.getElementById('btn-memo') as HTMLElement | null;
+    if (btnMemoForState) btnMemoForState.classList.toggle('active', opening);
+    if (error) {
+      status.setStatus(`Dictate error: ${error}`, 'err');
+    } else if (opening) {
+      status.setStatus('Dictating — speak; tap mic / Send / Esc to stop', 'live');
+    } else {
+      status.setStatus('');
+    }
+    updateSendButtonState();
+  });
+
+  // Tracks the WebRTC call mode that was active when memo/dictate
+  // started, so we can re-open it once the mode completes. Mic is
+  // exclusive: any open call must close before getUserMedia is acquired.
+  let resumeCallMode: 'stream' | 'talk' | null = null;
+  const resumeCall = () => {
+    const mode = resumeCallMode;
+    resumeCallMode = null;
+    if (!mode) return;
+    const target = mode === 'stream' ? document.getElementById('btn-mic')
+      : document.getElementById('btn-speak');
+    if (target) (target as HTMLElement).click();
+  };
+
+  /** Start memo mode (the long-standing mic-button behavior). Extracted
+   *  into a named function so the dropdown's "Memo" item, the offline
+   *  fallback path, and the ⌘⇧M hotkey can all call it. */
+  async function startMemo(): Promise<void> {
+    if (memoActive) return;
+    if (dictateActive) await webrtcDictate.stop();
+    resumeCallMode = webrtcControls.isOpen() ? webrtcControls.currentMode() : null;
+    if (webrtcControls.isOpen()) await webrtcControls.closeIfOpen();
+    // iOS AVAudioSession prep: prepareForCapture before getUserMedia.
+    // unlock(player) keeps the legacy <audio id="player"> element warm
+    // so the session category settles correctly.
+    unlock(player);
+    audioSession.prepareForCapture();
+    memoActive = true;
+    composerInput.style.display = 'none';
+    if (btnMemo) btnMemo.style.display = 'none';
+    updateSendButtonState();
+    composerSend.onclick = async () => {
+      if (composerSend.disabled) return;
+      composerSend.disabled = true;
+      try {
+        const { audioBlob, durationMs } = await memo.stop();
         exitMemoMode();
-        status.setStatus('Mic not available', 'err');
-        resumeCallMode = null;
+        await handleMemoResult(audioBlob, durationMs);
+        resumeCall();
+      } finally {
+        composerSend.disabled = false;
       }
+    };
+    const composerEl = composerInput.parentElement;
+    const composerActionsEl = composerEl?.querySelector('.composer-actions') as HTMLElement | null;
+    if (composerActionsEl) composerActionsEl.style.display = 'none';
+    const ok = await memo.start({
+      container: composerEl,
+      insertBefore: composerActionsEl || composerSend,
+      sendBtn: composerSend,
+      onDone: (audioBlob) => {
+        exitMemoMode();
+        handleMemoResult(audioBlob);
+        resumeCall();
+      },
+      onCancel: () => {
+        exitMemoMode();
+        resumeCall();
+      },
+    });
+    if (!ok) {
+      exitMemoMode();
+      status.setStatus('Mic not available', 'err');
+      resumeCallMode = null;
+    }
+  }
+
+  /** Start dictate mode (or fall back to memo if offline). No-op if
+   *  dictate is already active or memo is recording (memo owns the
+   *  mic — defer until it's done). */
+  async function startDictate(): Promise<void> {
+    if (dictateActive) return;
+    if (memoActive) return;
+    if (!navigator.onLine) {
+      status.setStatus('Offline — using memo mode', null);
+      await startMemo();
+      return;
+    }
+    if (webrtcControls.isOpen()) await webrtcControls.closeIfOpen();
+    unlock(player);
+    audioSession.prepareForCapture();
+    try {
+      await webrtcDictate.start({
+        sessionId: sessionDrawer.getViewed() || backend.getCurrentSessionId?.() || null,
+      });
+    } catch (e: any) {
+      diag('dictate start failed', e?.message);
+      status.setStatus(`Dictate failed: ${e?.message ?? e}`, 'err');
+    }
+  }
+
+  /** Stop dictate if it's running. Idempotent. */
+  async function stopDictate(): Promise<void> {
+    if (!dictateActive) return;
+    await webrtcDictate.stop();
+  }
+
+  if (btnMemo) {
+    btnMemo.onclick = async () => {
+      // Tap behavior: if dictate is active, stop it (button is the
+      // toggle). Otherwise dispatch by the persisted mic-mode setting,
+      // defaulting to memo. Hotkeys bypass the dropdown — the click
+      // handler is the only path that consults micMode.
+      if (dictateActive) {
+        await stopDictate();
+        return;
+      }
+      if (memoActive) return;
+      const mode = settings.get().micMode || 'memo';
+      if (mode === 'dictate') await startDictate();
+      else await startMemo();
     };
     // Esc to cancel, Enter to send memo on desktop
     document.addEventListener('keydown', (e) => {
@@ -1413,6 +1483,125 @@ async function boot() {
       }
     }, true);  // capture phase to beat the existing onclick
   }
+
+  // ── Mic-mode dropdown (Memo / Dictate switcher) ─────────────────────
+  // Chevron sits flush with #btn-memo. Tap chevron → menu opens with
+  // both modes; tap a mode item → set settings.micMode + close menu.
+  // The mic button itself dispatches by settings.micMode (see
+  // btnMemo.onclick above). Selection persists across reloads.
+  const btnMicMode = document.getElementById('btn-mic-mode') as HTMLButtonElement | null;
+  const micModeMenu = document.getElementById('mic-mode-menu') as HTMLElement | null;
+  const micModeWrap = document.querySelector('.mic-mode-wrap') as HTMLElement | null;
+
+  function applyMicModeUi(): void {
+    const mode = settings.get().micMode || 'memo';
+    if (micModeWrap) micModeWrap.dataset.mode = mode;
+    if (micModeMenu) {
+      micModeMenu.querySelectorAll<HTMLButtonElement>('button[data-mode]').forEach(b => {
+        if (b.dataset.mode === mode) b.setAttribute('aria-current', 'true');
+        else b.removeAttribute('aria-current');
+      });
+    }
+    // Update the mic button title so the user can see which mode tap
+    // will activate without opening the menu.
+    if (btnMemo) {
+      btnMemo.title = mode === 'dictate'
+        ? 'Dictate — stream STT into the composer'
+        : 'Voice memo';
+    }
+  }
+  applyMicModeUi();
+
+  function setMicModeMenuOpen(open: boolean): void {
+    if (!micModeMenu || !btnMicMode) return;
+    if (open) {
+      micModeMenu.removeAttribute('hidden');
+      micModeMenu.setAttribute('aria-hidden', 'false');
+      btnMicMode.setAttribute('aria-expanded', 'true');
+    } else {
+      micModeMenu.setAttribute('hidden', '');
+      micModeMenu.setAttribute('aria-hidden', 'true');
+      btnMicMode.setAttribute('aria-expanded', 'false');
+    }
+  }
+
+  if (btnMicMode && micModeMenu) {
+    btnMicMode.onclick = (e) => {
+      e.stopPropagation();
+      const open = btnMicMode.getAttribute('aria-expanded') === 'true';
+      setMicModeMenuOpen(!open);
+    };
+    micModeMenu.querySelectorAll<HTMLButtonElement>('button[data-mode]').forEach(b => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        const mode = b.dataset.mode === 'dictate' ? 'dictate' : 'memo';
+        settings.set('micMode', mode);
+        applyMicModeUi();
+        setMicModeMenuOpen(false);
+      };
+    });
+    // Click outside closes the menu (capture so chat-bubble handlers
+    // that stopPropagation can't strand us with a stuck-open menu).
+    document.addEventListener('click', (e) => {
+      if (!micModeMenu || micModeMenu.hasAttribute('hidden')) return;
+      const t = e.target as Node;
+      if (micModeWrap && micModeWrap.contains(t)) return;
+      setMicModeMenuOpen(false);
+    }, true);
+  }
+
+  // ── Mic-mode hotkeys ────────────────────────────────────────────────
+  // Cmd+Shift+M / Ctrl+Shift+M → toggle memo (regardless of dropdown).
+  // Cmd+Shift+D / Ctrl+Shift+D → toggle dictate (regardless of dropdown).
+  // Capture phase + stopImmediatePropagation so we beat the existing
+  // Ctrl+Shift+D debug-toggle listener (which uses bubble phase).
+  document.addEventListener('keydown', (e) => {
+    const mod = e.metaKey || e.ctrlKey;
+    if (!mod || !e.shiftKey) return;
+    if (e.code === 'KeyM') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (memoActive) {
+        // Mid-memo toggle = trash (cancel) — matches Esc semantics.
+        const trash = document.querySelector('.memo-trash') as HTMLButtonElement | null;
+        if (trash) trash.click();
+        else memo.cancel();
+      } else {
+        if (dictateActive) void stopDictate();
+        void startMemo();
+      }
+      return;
+    }
+    if (e.code === 'KeyD') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (dictateActive) {
+        void stopDictate();
+      } else {
+        void startDictate();
+      }
+      return;
+    }
+  }, true);
+
+  // Send-button intercept — when dictate is active, clicking Send (or
+  // pressing Enter to fire it) should send whatever's in the composer
+  // AND close the dictate stream. The existing composerSend.onclick is
+  // sendTypedMessage; this capture-phase listener calls stopDictate()
+  // alongside, letting the underlying send proceed.
+  composerSend.addEventListener('click', () => {
+    if (dictateActive) void stopDictate();
+  }, true);
+
+  // Esc closes dictate (matches the memo Esc-cancel UX). Doesn't
+  // interfere with the existing memoActive Esc handler — that only
+  // fires when memo is recording.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!dictateActive) return;
+    e.preventDefault();
+    void stopDictate();
+  });
 
   // ── Refresh button (full page reload for standalone PWA) ──
   // Previously did a transport-rebind which had a confusing mental model

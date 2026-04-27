@@ -1368,6 +1368,57 @@
   .composer .icon-btn-plain:hover { color: var(--fg); }
   .composer .icon-btn-plain svg { width: 22px; height: 22px; }
 
+  /* Mic-mode dropdown — chevron sits flush right of the mic button to
+     swap between Memo (default) and Dictate (streaming STT to composer).
+     Wrap is `position: relative` so the menu can absolute-anchor under
+     the chevron without depending on the wider composer layout.  */
+  .composer .mic-mode-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+  .composer .mic-mode-chevron {
+    background: none; border: none; cursor: pointer;
+    padding: 0; margin-left: -4px;
+    color: var(--muted);
+    width: 14px; height: 36px;
+    display: flex; align-items: center; justify-content: center;
+    transition: color .15s;
+  }
+  .composer .mic-mode-chevron:hover { color: var(--fg); }
+  .composer .mic-mode-chevron svg { width: 10px; height: 10px; }
+  .composer .mic-mode-chevron[aria-expanded="true"] { color: var(--primary); }
+  /* Indicator pill for the active mode (mode='dictate' shows a tiny dot
+     on the chevron so the user can see which mode the mic button is
+     currently in without opening the menu). */
+  .composer .mic-mode-wrap[data-mode="dictate"] .mic-mode-chevron {
+    color: var(--primary);
+  }
+  .mic-mode-menu {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    right: 0;
+    z-index: 60;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px;
+    min-width: 120px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .mic-mode-menu[hidden] { display: none; }
+  .mic-mode-menu button {
+    background: transparent; border: none; color: var(--fg);
+    text-align: left; padding: 6px 10px; cursor: pointer;
+    font: inherit; border-radius: 4px;
+  }
+  .mic-mode-menu button:hover { background: var(--surface-2); }
+  .mic-mode-menu button[aria-current="true"] {
+    color: var(--primary); font-weight: 600;
+  }
+
   /* Send: circle, paper-airplane icon. Grey when idle, green when active. */
   .composer .send-btn {
     padding: 0; border: none; cursor: pointer;

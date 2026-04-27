@@ -186,6 +186,13 @@ const DEFAULTS = {
   // id, or stored conversation name (tap ⋮ → Info on any row to see the
   // raw values). Empty → show ALL sessions. Non-empty → union of matches.
   sessionsFilter: 'sidekick-*,*whatsapp*,*telegram*',
+  // Mic-button default mode. Drives what the chevron-dropdown next to
+  // #btn-mic activates when the mic button is tapped. 'memo' is the
+  // historical default (offline-capable, batch transcribe on stop);
+  // 'dictate' opens a streaming WebRTC stream that lands transcripts in
+  // the composer for edit-and-send. Hotkeys (⌘⇧M / ⌘⇧D) bypass this
+  // setting and fire the corresponding mode directly.
+  micMode: 'memo' as 'memo' | 'dictate',
 };
 
 let current = { ...DEFAULTS };

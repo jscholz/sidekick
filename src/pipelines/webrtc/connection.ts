@@ -89,6 +89,15 @@ export function setDataChannelListener(cb: (ev: DataChannelEvent) => void) {
   onDataChannelEvent = cb;
 }
 
+/** Read the currently-registered data-channel listener (or null if
+ *  none).  Used by dictate.ts to save+restore the call-mode listener
+ *  across a dictate session — the registry is single-slot, so a
+ *  module that wants to temporarily override needs to remember what
+ *  it replaced. */
+export function getDataChannelListener(): ((ev: DataChannelEvent) => void) | null {
+  return onDataChannelEvent;
+}
+
 let active: CallSession | null = null;
 let onStateChange: ((s: CallState, mode: CallMode | null) => void) | null = null;
 /** Shared AudioContext for the analyser tap. Reused across calls. */
