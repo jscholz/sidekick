@@ -46,8 +46,15 @@ TTS_FRAME_BYTES = TTS_FRAME_SAMPLES * 2
 
 # Cap text queue so a runaway delta stream doesn't OOM us.
 MAX_TEXT_QUEUE = 1024
-# Cap PCM frame queue (~3 s of audio at 20 ms each).
-MAX_PCM_FRAME_QUEUE = 150
+# PCM frame queue cap. The producer (synth feed loop) blocks via
+# `await queue.put()` when the queue is full, so this cap is purely
+# a memory ceiling — not a correctness threshold. 200 frames = 4 s.
+# Was 150 with silent drops on overflow (rushed/garbled audio after
+# 5-6 s of long replies). True backpressure replaces the drops:
+# producer waits, consumer drains at 20 ms wall-clock, no frames
+# ever lost. Receiver always sees a continuous, properly-paced
+# stream.
+MAX_PCM_FRAME_QUEUE = 200
 
 
 def attach(peer, *, voice_config: VoiceConfig, api_server: Any) -> None:
@@ -130,10 +137,18 @@ async def _run_tts(peer, voice_config: VoiceConfig, text_queue, track) -> None:
                     while len(buf) >= TTS_FRAME_BYTES:
                         frame_bytes = bytes(buf[:TTS_FRAME_BYTES])
                         del buf[:TTS_FRAME_BYTES]
+                        # Backpressure-by-await: if PCMTrack's queue
+                        # is full, the synth loop blocks here until
+                        # recv() drains a slot. The upstream HTTP
+                        # connection from Aura idles for a few hundred
+                        # ms; that's fine — Aura tolerates pauses.
+                        # This is the structural alternative to the
+                        # old silent-drop-on-overflow which caused
+                        # rushed/garbled audio on long replies.
                         try:
-                            track.feed(frame_bytes)
+                            await track.feed_async(frame_bytes)
                         except Exception as e:  # pragma: no cover
-                            logger.warning("[tts-bridge] track.feed failed: %s", e)
+                            logger.warning("[tts-bridge] track.feed_async failed: %s", e)
                 # Flush tail (zero-pad to frame boundary so the encoder
                 # gets a clean last frame).
                 if buf:
@@ -144,7 +159,7 @@ async def _run_tts(peer, voice_config: VoiceConfig, text_queue, track) -> None:
                         frame_bytes = bytes(buf[:TTS_FRAME_BYTES])
                         del buf[:TTS_FRAME_BYTES]
                         try:
-                            track.feed(frame_bytes)
+                            await track.feed_async(frame_bytes)
                         except Exception:  # pragma: no cover
                             pass
             except asyncio.CancelledError:
@@ -202,18 +217,21 @@ class PCMTrack(MediaStreamTrack):  # type: ignore[misc]
         self._silence = bytes(TTS_FRAME_BYTES)
         self._next_send_time: Optional[float] = None
         self._closed = False
+        # Monotonic timestamp of the last non-silent frame emitted to
+        # the wire. The STT bridge consults this via is_active() to
+        # gate inbound transcription during TTS playback (kills the
+        # iOS speakerphone echo loop deterministically).
+        self._last_nonsilent_at: Optional[float] = None
 
     def feed(self, pcm_bytes: bytes) -> None:
-        """Push one 20 ms PCM frame into the outbound queue.
+        """Synchronous push, kept for any non-async caller.
 
-        Drops frames if the queue is full (the call is from a coroutine
-        but synchronous to it) — better to lose a frame than to block
-        the synth loop.
+        Drops on full queue rather than blocking. Prefer feed_async
+        from async producer code paths to get true backpressure.
         """
         if self._closed:
             return
         if len(pcm_bytes) != TTS_FRAME_BYTES:
-            # Caller didn't slice on a frame boundary; pad/truncate.
             if len(pcm_bytes) < TTS_FRAME_BYTES:
                 pcm_bytes = pcm_bytes + bytes(TTS_FRAME_BYTES - len(pcm_bytes))
             else:
@@ -223,20 +241,55 @@ class PCMTrack(MediaStreamTrack):  # type: ignore[misc]
         except asyncio.QueueFull:
             pass
 
+    async def feed_async(self, pcm_bytes: bytes) -> None:
+        """Async push that BLOCKS when the queue is full — true
+        backpressure to the producer.
+
+        When `recv()` (paced at 20 ms wall-clock) can't drain fast
+        enough to keep up with the synth feed rate, this await pauses
+        the producer until a slot frees. Receiver sees a continuous,
+        correctly-paced RTP stream regardless of upstream burstiness.
+        No frame drops, no buffer-overflow speedup symptoms.
+        """
+        if self._closed:
+            return
+        if len(pcm_bytes) != TTS_FRAME_BYTES:
+            if len(pcm_bytes) < TTS_FRAME_BYTES:
+                pcm_bytes = pcm_bytes + bytes(TTS_FRAME_BYTES - len(pcm_bytes))
+            else:
+                pcm_bytes = pcm_bytes[:TTS_FRAME_BYTES]
+        await self._frame_queue.put(pcm_bytes)
+
     async def recv(self):  # noqa: D401 — aiortc API
-        """Return the next AudioFrame, paced at 20 ms."""
-        # Pace
+        """Return the next AudioFrame, paced at 20 ms wall-clock.
+
+        Strict pacing: if the consumer is asking too fast (delay > 0)
+        we sleep until the next slot. If the consumer is asking too
+        SLOW (delay <= 0, we're past schedule), we DON'T catch up by
+        emitting fast — we resync to wall-clock so the next slot is
+        20 ms from `now`, not 20 ms from a stale past schedule.
+
+        The previous version (always `+= 20ms` regardless) accumulated
+        phase debt: a few ms of drift per call, no resync, eventually
+        bursting frames as fast as the consumer pulled them. Browser
+        plays the burst sped-up + garbled — empirically reproducible
+        ~5-6 s into a TTS reply across both desktop and mobile.
+        """
         now = time.monotonic()
         if self._next_send_time is None:
             self._next_send_time = now
         delay = self._next_send_time - now
         if delay > 0.001:
             await asyncio.sleep(delay)
-        self._next_send_time += TTS_FRAME_MS / 1000.0
+            self._next_send_time += TTS_FRAME_MS / 1000.0
+        else:
+            # Behind schedule — resync to wall-clock. No burst.
+            self._next_send_time = now + TTS_FRAME_MS / 1000.0
 
         # Pull a frame; fall back to silence to keep the track active.
         try:
             pcm = self._frame_queue.get_nowait()
+            self._last_nonsilent_at = now
         except asyncio.QueueEmpty:
             pcm = self._silence
 
@@ -248,6 +301,27 @@ class PCMTrack(MediaStreamTrack):  # type: ignore[misc]
         frame.time_base = fractions.Fraction(1, self._sample_rate)
         self._pts += self._samples_per_frame
         return frame
+
+    # Grace period after the last non-silent frame was put on the wire
+    # before the STT bridge resumes forwarding mic audio to Deepgram.
+    # Covers TTS audio still in transit (network buffer, decoder lag,
+    # speakerphone-driver latency) plus the room reverb tail. 1.2s
+    # mirrors the PWA-side duplex tail we used and gives a comfortable
+    # margin without making barge-in feel laggy.
+    TTS_TAIL_GRACE_S = 1.2
+
+    def is_active(self, grace_s: Optional[float] = None) -> bool:
+        """True if a non-silent TTS frame was emitted recently.
+
+        STT bridge calls this to decide whether to forward mic audio
+        to Deepgram. While True, mic frames are replaced with silence
+        — Deepgram sees a quiet input and produces no false transcripts
+        from the speakerphone echo of TTS playback.
+        """
+        if self._last_nonsilent_at is None:
+            return False
+        g = grace_s if grace_s is not None else PCMTrack.TTS_TAIL_GRACE_S
+        return (time.monotonic() - self._last_nonsilent_at) < g
 
     def stop(self) -> None:  # pragma: no cover — aiortc lifecycle
         self._closed = True

@@ -168,11 +168,36 @@ async def _run_stt(
     """Consume the PCM queue, drive the STT provider, forward transcripts to the data channel."""
     stt = get_stt_provider(voice_config.stt)
 
+    # Frame of pure silence at the same shape the mic produces (16 kHz
+    # mono int16, 20 ms = 640 bytes). Substituted for the real mic
+    # frame whenever TTS is currently playing on this peer's outbound
+    # track, so Deepgram sees clean silence instead of the speakerphone
+    # echo of our own TTS — kills the iOS Safari feedback loop without
+    # disconnecting the WSS or starving Deepgram of paced audio.
+    silence_frame = bytes(640)
+
     async def _pcm_iter() -> AsyncIterator[bytes]:
+        tts_track = peer.extra.get("tts_track")
+        was_active = False
         while True:
             chunk = await pcm_q.get()
             if chunk is None:
                 return
+            if tts_track is not None and tts_track.is_active():
+                if not was_active:
+                    logger.info(
+                        "[stt-bridge] peer %s: gating mic→Deepgram (TTS active)",
+                        peer.peer_id,
+                    )
+                    was_active = True
+                yield silence_frame
+                continue
+            if was_active:
+                logger.info(
+                    "[stt-bridge] peer %s: resuming mic→Deepgram (TTS done)",
+                    peer.peer_id,
+                )
+                was_active = False
             yield chunk
 
     try:

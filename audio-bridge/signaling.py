@@ -191,6 +191,20 @@ async def handle_offer(request: "web.Request") -> "web.Response":
             pass
         return _err(f"setup failed: {e}", status=500, code="rtc_setup_failed")
 
+    # Earlier experiment: munged the answer SDP to add voice-call-style
+    # Opus fmtp params (useinbandfec=1, usedtx=0, stereo=0,
+    # sprop-stereo=0) + transport-cc rtcp-fb. Hypothesis was that iOS
+    # Safari's voiceChat AEC engagement keys on those signals. It did
+    # NOT engage AEC (confirmed empirically) AND a TTS garble symptom
+    # appeared ~5-6s into agent replies — likely the stereo=0 fmtp
+    # contradicting the rtpmap's `/2` channel count, leaving the
+    # decoder interpreting frames inconsistently. The bridge-side
+    # mic→Deepgram gate (stt_bridge.py is_active() check) now solves
+    # the loop deterministically without touching codec negotiation,
+    # so the munge is reverted. Keeping the helper in case we want it
+    # for some future-proofing experiment.
+    munged_sdp = pc.localDescription.sdp
+
     await REGISTRY.add(peer)
 
     logger.info(
@@ -201,9 +215,64 @@ async def handle_offer(request: "web.Request") -> "web.Response":
     return web.json_response({
         "peer_id": peer_id,
         "type": pc.localDescription.type,
-        "sdp": pc.localDescription.sdp,
+        "sdp": munged_sdp,
         "mode": mode,
     })
+
+
+_OPUS_FMTP_PARAMS = (
+    "minptime=10;useinbandfec=1;usedtx=0;stereo=0;sprop-stereo=0"
+)
+
+
+def _add_opus_voice_params(sdp: str) -> str:
+    """Inject voice-call-friendly fmtp + rtcp-fb lines for the Opus codec.
+
+    Walks the SDP line-by-line looking for ``a=rtpmap:<pt> opus/48000/...``,
+    captures the payload type, and inserts the missing fmtp + feedback
+    lines immediately after it. Idempotent: skips insertion if the lines
+    are already present for that payload type. Leaves unrelated codecs
+    alone.
+    """
+    import re
+
+    lines = sdp.split("\r\n") if "\r\n" in sdp else sdp.split("\n")
+    sep = "\r\n" if "\r\n" in sdp else "\n"
+
+    rtpmap_re = re.compile(r"^a=rtpmap:(\d+)\s+opus/", re.IGNORECASE)
+    out: list[str] = []
+    seen_pts_with_fmtp: set[str] = set()
+    seen_pts_with_transportcc: set[str] = set()
+    seen_pts_with_nack: set[str] = set()
+
+    # First pass: note which payload types already have fmtp / rtcp-fb.
+    for ln in lines:
+        m = re.match(r"^a=fmtp:(\d+)\s+", ln)
+        if m:
+            seen_pts_with_fmtp.add(m.group(1))
+        m = re.match(r"^a=rtcp-fb:(\d+)\s+transport-cc\b", ln)
+        if m:
+            seen_pts_with_transportcc.add(m.group(1))
+        m = re.match(r"^a=rtcp-fb:(\d+)\s+nack\b", ln)
+        if m:
+            seen_pts_with_nack.add(m.group(1))
+
+    # Second pass: emit lines, inserting voice-call params after each
+    # opus rtpmap line that's missing them.
+    for ln in lines:
+        out.append(ln)
+        m = rtpmap_re.match(ln)
+        if not m:
+            continue
+        pt = m.group(1)
+        if pt not in seen_pts_with_fmtp:
+            out.append(f"a=fmtp:{pt} {_OPUS_FMTP_PARAMS}")
+        if pt not in seen_pts_with_transportcc:
+            out.append(f"a=rtcp-fb:{pt} transport-cc")
+        if pt not in seen_pts_with_nack:
+            out.append(f"a=rtcp-fb:{pt} nack")
+
+    return sep.join(out)
 
 
 async def handle_ice(request: "web.Request") -> "web.Response":
