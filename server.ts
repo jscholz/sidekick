@@ -923,6 +923,29 @@ initOpenAICompatConfig({
   OPENAI_COMPAT_KEY: process.env.SIDEKICK_OPENAI_COMPAT_KEY || '',  // secret — env only
 });
 
+// Cold-start initialization of the preferred-models matcher. Without
+// this, PREFERRED_MODELS_RAW stays at its module-default `[]` until
+// the first config-mtime change picks up the yaml value via
+// reloadConfigIfChanged() — which never happens on a stable deployment
+// where the yaml hasn't been edited since boot. Lost during the hermes
+// backend extraction (commit 860a6ad); restored 2026-04-27.
+//
+// Falls back to SIDEKICK_PREFERRED_MODELS env var (comma-sep) for
+// deployments that haven't switched to the yaml yet.
+(() => {
+  const cfg = DEPLOY_CFG?.models?.preferred;
+  if (Array.isArray(cfg)) {
+    rebuildPreferredModels(cfg.map((s: any) => String(s).trim()).filter(Boolean));
+    return;
+  }
+  const env = process.env.SIDEKICK_PREFERRED_MODELS;
+  if (env) {
+    rebuildPreferredModels(env.split(',').map(s => s.trim()).filter(Boolean));
+    return;
+  }
+  rebuildPreferredModels([]);
+})();
+
 // ── WebRTC voice transport proxy: /api/rtc/* → audio-bridge /v1/rtc/* ────────
 // The audio bridge (~/code/sidekick/audio-bridge/) is a standalone Python
 // aiortc service on :8643. The bridge owns WebRTC signaling, STT, and
