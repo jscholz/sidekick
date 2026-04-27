@@ -162,6 +162,25 @@ ignored.
   sends one final terminal envelope `{role:'assistant', text:'',
   is_final:true}` so the PWA can drop the streaming-cursor.
 
+#### `barge`
+
+```json
+{ "type": "barge" }
+```
+
+Sent by the bridge when its server-side VAD detects user voice while
+TTS is actively playing. The client should cancel local TTS playback
+in response (and clear any "drop user transcripts during reply"
+suppression). Sent at most once per TTS turn; the bridge resets its
+once-per-turn flag when `tts_track.is_active()` flips false.
+
+The decision lives on the bridge because the PWA's mic stream goes
+through browser-side AEC before Web Audio sees it, and AEC ducks any
+signal correlated with system output (the TTS we're playing). A
+client-side mic analyser cannot reliably detect user voice during
+TTS for that reason — the bridge sees raw pre-DSP PCM and is the
+only place the user's voice is actually visible.
+
 ### Client → server
 
 #### `dispatch`
@@ -187,14 +206,11 @@ The bridge:
 4. (Talk mode only) feeds deltas into the TTS provider; the resulting
    PCM is encoded as Opus on the outbound RTP track.
 
-#### `interrupt` (reserved)
-
-```json
-{ "type": "interrupt" }
-```
-
-Reserved for future barge-in support. The reference bridge logs and
-ignores this in V1.
+_(removed — barge-in is server-side now; see the `barge` envelope under
+"Server → client". An earlier draft of this protocol reserved a
+client-initiated `interrupt` envelope here, but the client is no
+longer in a position to make that decision because of browser AEC,
+so the field has been retired.)_
 
 ---
 

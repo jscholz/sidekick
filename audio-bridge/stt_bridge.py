@@ -21,6 +21,24 @@ Per peer:
                 owns all UX logic (utterance buffer, silence timeout,
                 commit-phrase, dispatch decision).
 
+    Server-side VAD / barge detection (Path B):
+
+        The same per-frame loop that gates mic→Deepgram on
+        tts_track.is_active() also runs a simple RMS VAD. When TTS is
+        active AND the frame's RMS clears VAD_RMS_THRESHOLD for
+        VAD_HOLD_FRAMES consecutive frames, the bridge sends a
+        {"type": "barge"} envelope over the data channel exactly once
+        per TTS turn, and the PWA cancels its local TTS playback.
+
+        Why server-side: the PWA's only handle on the mic is the
+        getUserMedia stream, which Chrome/Safari pipe through their
+        WebRTC capture-side AEC BEFORE Web Audio sees any samples.
+        AEC actively ducks anything correlated with system output
+        (the TTS we're playing), so a client-side analyser on the mic
+        reads near-silence during TTS and can't distinguish user voice.
+        Raw mic PCM arrives at the bridge pre-DSP, which is the only
+        place the user's voice is actually visible during TTS playback.
+
 Dispatch path:
 
     The PWA decides when to send an utterance to the agent and posts a
@@ -58,6 +76,20 @@ TARGET_FORMAT = "s16"
 # Cap the audio queue so a slow STT upstream doesn't grow memory
 # unboundedly.  20 ms frames * 100 = ~2 s of buffer.
 MAX_PCM_QUEUE = 100
+
+# ── Server-side VAD / barge detection thresholds ──────────────────────
+#
+# Frame energy (RMS over the 20 ms s16 PCM frame). int16 samples range
+# ±32767; ambient room noise on a Pi-attached USB mic tends to sit at
+# RMS 80-300, normal speech peaks 2000-8000, shouting 10k+. 800 is a
+# conservative "above ambient, below confused-with-loud-typing" floor —
+# tune in stt-bridge logs once Jonathan tests with his actual mic.
+VAD_RMS_THRESHOLD = 800
+
+# Consecutive 20 ms frames over threshold required to fire a barge.
+# 8 * 20 ms = 160 ms — long enough to filter cough/keypress transients,
+# short enough that a deliberate "stop" interrupts within ~one syllable.
+VAD_HOLD_FRAMES = 8
 
 
 def attach(peer, *, voice_config: VoiceConfig, api_server: Any = None) -> None:
@@ -179,17 +211,46 @@ async def _run_stt(
     async def _pcm_iter() -> AsyncIterator[bytes]:
         tts_track = peer.extra.get("tts_track")
         was_active = False
+        # VAD state — counts consecutive over-threshold frames while
+        # TTS is active. Reset on threshold-undershoot and on TTS-end
+        # (so the next turn starts fresh). barge_fired_this_turn lives
+        # on peer.extra so dispatch_to_agent can also see it if needed
+        # later, and so it survives generator restarts in error paths.
+        vad_hold = 0
         while True:
             chunk = await pcm_q.get()
             if chunk is None:
                 return
-            if tts_track is not None and tts_track.is_active():
+            tts_active = tts_track is not None and tts_track.is_active()
+            if tts_active:
                 if not was_active:
                     logger.info(
                         "[stt-bridge] peer %s: gating mic→Deepgram (TTS active)",
                         peer.peer_id,
                     )
                     was_active = True
+                # Simple VAD: RMS over the 20ms frame.
+                # Fires when:
+                #   1) tts_track is active (we're playing TTS),
+                #   2) RMS exceeds VAD_RMS_THRESHOLD (above ambient),
+                #   3) sustained for VAD_HOLD_FRAMES consecutive frames
+                #      (~160ms hold).
+                # Threshold values are constants at the top of the module
+                # so they can be tuned without rewiring.
+                if not peer.extra.get("barge_fired_this_turn"):
+                    rms = _frame_rms(chunk)
+                    if rms >= VAD_RMS_THRESHOLD:
+                        vad_hold += 1
+                        if vad_hold >= VAD_HOLD_FRAMES:
+                            logger.info(
+                                "[stt-bridge] peer %s: barge fired (rms=%d, hold=%d frames)",
+                                peer.peer_id, rms, vad_hold,
+                            )
+                            peer.extra["barge_fired_this_turn"] = True
+                            _send_data_channel(peer, {"type": "barge"})
+                            vad_hold = 0
+                    else:
+                        vad_hold = 0
                 yield silence_frame
                 continue
             if was_active:
@@ -198,6 +259,10 @@ async def _run_stt(
                     peer.peer_id,
                 )
                 was_active = False
+                # TTS turn ended — reset the once-per-turn barge gate
+                # and the hold counter so the NEXT turn can fire again.
+                peer.extra.pop("barge_fired_this_turn", None)
+                vad_hold = 0
             yield chunk
 
     try:
@@ -218,6 +283,34 @@ async def _run_stt(
                 await pump_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+
+def _frame_rms(pcm: bytes) -> int:
+    """RMS energy of a 16-bit-signed-LE mono PCM frame.
+
+    Used by the VAD path to decide whether the user is speaking during
+    a TTS turn (i.e. wants to barge). Returns 0 for an empty frame.
+
+    Implementation: pure Python int math via array.array, no numpy
+    dependency to keep the bridge slim. 20ms @ 16kHz = 320 samples,
+    cheap enough to run every frame even on the Pi.
+    """
+    if not pcm:
+        return 0
+    import array
+    samples = array.array("h")
+    samples.frombytes(pcm)
+    if not samples:
+        return 0
+    # Sum of squares; avoid float math for the inner loop.
+    acc = 0
+    for s in samples:
+        acc += s * s
+    mean_sq = acc // len(samples)
+    # int.isqrt avoids math.sqrt's float roundtrip — RMS as an int
+    # threshold is exactly what VAD_RMS_THRESHOLD compares against.
+    import math
+    return int(math.isqrt(mean_sq))
 
 
 def _send_data_channel(peer, payload: dict) -> None:
