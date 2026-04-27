@@ -1090,15 +1090,19 @@ async function boot() {
     const result = await queue.flush(
       async (text) => { backend.sendMessage(text); },
       async (blob, mimeType, id) => {
-        // 15s timeout: Deepgram REST typically returns in 1-3s even for
-        // minute-long clips. On dead network the browser would keep this
-        // hanging for ~minutes. 15s gives ample headroom while still
-        // freeing the queue loop to retry on the next reconnect.
+        // Timeout scales with blob size: small memos under 1MB ≈ minute or
+        // less of audio (Deepgram batch returns in 1-3s) get the snappy
+        // 15s budget. Larger blobs get 60s — the upload alone for a 5MB
+        // webm over Tailscale can take 5-10s, plus Deepgram batch latency
+        // grows roughly with audio length. Earlier 15s flat ceiling
+        // wedged 3-minute memos in permanent-retry: each attempt timed
+        // out before Deepgram could respond, queue never drained.
+        const timeoutMs = blob.size > 1_000_000 ? 60_000 : 15_000;
         let res;
         try {
           res = await fetchWithTimeout('/transcribe', {
             method: 'POST', headers: { 'Content-Type': mimeType }, body: blob,
-            timeoutMs: 15_000,
+            timeoutMs,
           });
         } catch (e) {
           if (e instanceof TimeoutError) {
@@ -1215,6 +1219,27 @@ async function boot() {
    *  gives the user immediate visual feedback during the quiet
    *  transcription window. Returns {id, card, rec}. */
   async function renderMemoCard(audioBlob, durationMs) {
+    // Hard ceiling: the bridge accepts up to 25MB at /v1/transcribe and
+    // the proxy mirrors that. webm voice is ~30KB/s so 25MB ≈ 14 min.
+    // Anything larger gets DROPPED here with a status warning rather
+    // than queued — a too-big blob in the outbox just retries forever
+    // and blocks the channel for smaller subsequent memos. User can
+    // re-record in shorter chunks. Threshold is intentionally a few
+    // hundred KB below the 25MB limit so an upload-time encoding bump
+    // doesn't push a borderline blob over.
+    const MEMO_MAX_BYTES = 24 * 1024 * 1024;
+    if (audioBlob.size > MEMO_MAX_BYTES) {
+      const mb = (audioBlob.size / (1024 * 1024)).toFixed(1);
+      const mins = Math.round((durationMs ?? 0) / 60000);
+      log(`memo: too big (${mb}MB ≈ ${mins}min) — dropped, would block the queue`);
+      status.setStatus(
+        `Memo too long (${mins}m) — dropped. Try shorter chunks.`,
+        'err',
+      );
+      try { playFeedback('error'); } catch {}
+      return { id: null, card: null, rec: null };
+    }
+
     const id = crypto.randomUUID();
     const transcriptEl = document.getElementById('transcript');
 
@@ -1389,6 +1414,7 @@ async function boot() {
     if (!dictateActive) return;
     await webrtcDictate.stop();
   }
+
 
   if (btnMemo) {
     btnMemo.onclick = async () => {

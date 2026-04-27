@@ -59,19 +59,29 @@ const BARGE_POLL_MS = 50;
 
 /** Minimum sustained-above-threshold duration to call a barge. Filters
  *  out single-frame mic spikes (cough, room thump) that aren't
- *  intentional speech. 200ms is roughly one syllable. */
-const BARGE_HOLD_MS = 200;
+ *  intentional speech. Browser AEC + AGC chop voice into 100-150ms
+ *  bursts during TTS, so a 200ms hold-time misses real barge-ins —
+ *  100ms (= 2 polls) trades stricter false-positive immunity for the
+ *  ability to fire on AEC'd speech. */
+const BARGE_HOLD_MS = 100;
 
 /** Minimum local-mic peak (0..1, deviation-from-128 in s8) below which
- *  we never fire barge regardless of remote level. Floor for
- *  ambient-noise immunity. */
-const BARGE_MIN_LOCAL = 0.08;
+ *  we never fire barge regardless of remote level. Sits just above the
+ *  silence/echo-bleed floor (~0.008 = 1/128 = single-bit DC offset on a
+ *  suspended-context analyser or AEC'd mic during TTS). 0.02 captures
+ *  AEC-suppressed user voice (peaks of 0.03-0.06 in real desktop+headset
+ *  testing) without firing on pure-silence ticks. */
+const BARGE_MIN_LOCAL = 0.02;
 
 /** Smart-barge ratio: local peak must exceed remote peak times this
- *  factor to count as an uncorrelated user-voice rise. Lowered from
- *  the original 2.5 — bench testing showed user voice on speakerphone
- *  rarely cleared 2.5×. Tunable from settings.bargeRatio if exposed. */
-const BARGE_RATIO_DEFAULT = 1.8;
+ *  factor. Calibrated against real desktop+headset AEC behavior:
+ *  during pure TTS the analyser reads local≈0.008 / remote≈0.18 (ratio
+ *  ≈0.04); when the user speaks the AEC ducks the user voice but it
+ *  still lands at ratios of 0.3-0.8 of the simultaneous TTS level.
+ *  0.2 splits these cases cleanly. (The original 1.8x assumption that
+ *  user voice would dominate TTS doesn't hold once browser AEC is in
+ *  the path — AEC inverts the relationship.) */
+const BARGE_RATIO_DEFAULT = 0.2;
 
 /** Verbose poll logging cadence while suppressing — prints local +
  *  remote peak + ratio every N polls (~1s at 50ms cadence). Useful
@@ -226,7 +236,13 @@ function startBargePoll(): void {
     return;
   }
   if (!micAnalyser) {
-    const mic = conn.getMicStream();
+    // Use the RAW mic stream (no AEC / NS / AGC). Reading the AEC'd
+    // mic puts the analyser downstream of Chrome's echo cancellation,
+    // which actively ducks the user's voice during TTS — local pegs
+    // at the silence floor (1/128 = 0.008) and barge-in becomes
+    // physically impossible regardless of threshold tuning. Raw stream
+    // is opened by connection.ts as a second getUserMedia call.
+    const mic = conn.getRawMicStream();
     if (!mic) {
       diag('[duplex] no mic stream; barge detection disabled this turn');
       return;

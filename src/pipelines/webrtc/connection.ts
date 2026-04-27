@@ -48,6 +48,15 @@ interface CallSession {
   pc: RTCPeerConnection;
   mode: CallMode;
   micStream: MediaStream;
+  /** Raw mic stream for the smart-barge analyser only — opened with
+   *  echoCancellation/noiseSuppression/autoGainControl all FALSE so
+   *  Web Audio sees pre-DSP samples. The PC's outbound mic uses the
+   *  AEC'd `micStream` for STT clarity; this second stream is never
+   *  added to the peer connection. Null if the second getUserMedia
+   *  call failed (rare; constraints are non-mandatory). When null,
+   *  duplex falls back to micStream and barge-in degrades to
+   *  "won't fire while TTS is playing" because AEC nukes the signal. */
+  rawMicStream: MediaStream | null;
   peerId: string | null;
   /** Hidden <audio> element playing the remote (TTS) audio track.
    *  Chrome's WebRTC autoplay-exception keeps it audible without
@@ -152,6 +161,13 @@ export function getMicStream(): MediaStream | null {
   return active?.micStream ?? null;
 }
 
+/** RAW mic stream (no AEC / NS / AGC) for the smart-barge analyser.
+ *  Falls back to the AEC'd micStream if the raw capture failed.
+ *  See the long comment in open() for why this exists. */
+export function getRawMicStream(): MediaStream | null {
+  return active?.rawMicStream ?? active?.micStream ?? null;
+}
+
 /** Direct read-only access to the remote-audio AnalyserNode that
  *  connection.ts builds at ontrack time. duplex.ts uses this for
  *  smart-barge level comparison. Returns null when no remote track
@@ -217,21 +233,51 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
   setState('requesting-mic');
   let micStream: MediaStream;
   try {
-    // No autoGainControl — on iOS Safari it amplifies remote-audio
+    // autoGainControl: false — on iOS Safari AGC amplifies remote-audio
     // echo above the AEC threshold and we lose echo cancellation on
-    // speakerphone. Production WebRTC voice apps (Discord web, Meet)
-    // typically leave AGC off in voice-call constraints. echoCancellation
-    // and noiseSuppression stay on.
+    // speakerphone. On desktop Chrome AGC ducks the mic when system
+    // output is loud (TTS playback), suppressing user voice down to
+    // 0.04-0.06 peak (well below the 0.08 barge floor). Production
+    // WebRTC voice apps (Discord web, Meet) leave AGC off in voice-call
+    // constraints. echoCancellation and noiseSuppression stay on for
+    // STT clarity. Browser default may be true (was unspecified before),
+    // so set explicitly.
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
+        autoGainControl: false,
       },
     });
   } catch (e: any) {
     diag('[webrtc] getUserMedia failed', e?.message);
     setState('failed');
     throw e;
+  }
+
+  // Second mic capture — RAW (no AEC, no NS, no AGC) — for the
+  // smart-barge analyser ONLY. Reason: Chrome's WebRTC capture pipeline
+  // applies echoCancellation as part of the capture path itself, BEFORE
+  // Web Audio sees the samples. So a createMediaStreamSource on the
+  // AEC'd mic reads pre-cancelled audio that's been actively ducked
+  // whenever system output (TTS) is loud — barge-in becomes physically
+  // impossible to detect, no matter the threshold tuning. Opening a
+  // second stream with all DSP off bypasses this; both streams share
+  // the underlying hardware capture (Chrome muxes), so there's no
+  // concurrent-mic conflict. If this call fails for any reason, we
+  // log + null and barge-in degrades but the call still works.
+  let rawMicStream: MediaStream | null = null;
+  try {
+    rawMicStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    });
+    log('[webrtc] raw mic stream acquired (analyser tap)');
+  } catch (e: any) {
+    diag('[webrtc] raw mic getUserMedia failed — barge-in will degrade:', e?.message);
   }
 
   setState('connecting');
@@ -348,6 +394,7 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     pc,
     mode,
     micStream,
+    rawMicStream,
     peerId: null,
     remoteAudio: pendingRemoteAudio ?? remoteAudio,
     remoteAnalyser: pendingRemoteAnalyser,
@@ -490,6 +537,13 @@ export async function close(): Promise<void> {
       try { t.stop(); } catch { /* ignore */ }
     }
   } catch { /* ignore */ }
+  if (session.rawMicStream) {
+    try {
+      for (const t of session.rawMicStream.getTracks()) {
+        try { t.stop(); } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+  }
   if (session.dataChannel) {
     try { session.dataChannel.close(); } catch { /* ignore */ }
   }
