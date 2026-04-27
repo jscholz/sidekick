@@ -87,19 +87,11 @@ Experimental. Set `SIDEKICK_BACKEND=zeroclaw`, `SIDEKICK_ZEROCLAW_WS`, and `SIDE
 
 ## Deepgram keyterm biasing
 
-Custom vocabulary — names, project codes, product terms — lives in `sidekick.config.yaml` under `stt.keyterms`. Manage via **Settings → STT keyterms** in the UI (type-Enter chips), or hand-edit the YAML:
+Custom vocabulary — names, project codes, product terms — is stored **per user** in the browser's IndexedDB. Manage via **Settings → STT keyterms** in the UI (type-Enter chips). Changes take effect on the next mic-stream start.
 
-```yaml
-stt:
-  keyterms:
-    - Sidekick
-    - Deepgram
-    - <your terms>
-```
+For multi-user / fork deployments, the seed list in `default_stt_keyterms.txt` (repo root) is copied into each user's IDB on first boot. Edit that file to change defaults for fresh installs; existing users keep whatever they've curated.
 
-UI edits preserve comments and formatting elsewhere in the file (round-tripped through the YAML Document model, not re-serialized from JSON). Refreshes without restart.
-
-> **Legacy note:** earlier versions stored keyterms in `keyterms.txt`. On first run after upgrade, the server migrates any existing `keyterms.txt` into the config's `stt.keyterms` section — the txt file is left in place so you can verify, then delete.
+> **Legacy note:** earlier versions stored keyterms in `keyterms.txt` and then `sidekick.config.yaml` under `stt.keyterms`. Both of those server-side stores are gone — the chip UI now writes to IndexedDB. Existing yaml entries are ignored; re-add them via the chip UI on first launch.
 
 ## Architecture
 

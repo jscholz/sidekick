@@ -137,6 +137,18 @@ async def handle_offer(request: "web.Request") -> "web.Response":
     # configured at startup (default 'hermes').
     peer.extra["proxy_url"] = _PROXY_URL
     peer.extra["backend"] = _BACKEND
+    # Per-peer STT vocabulary biasing. The PWA owns the canonical list
+    # (per-user IndexedDB) and ships it in the offer payload; we stash
+    # it on the peer so stt_bridge._run_stt can clone the configured
+    # ProviderSpec with peer-specific options. Empty / missing list →
+    # bridge falls back to whatever options were resolved at startup.
+    peer_keyterms = payload.get("keyterms") or []
+    if isinstance(peer_keyterms, list):
+        peer.extra["keyterms"] = [
+            str(t).strip() for t in peer_keyterms if isinstance(t, (str, int, float)) and str(t).strip()
+        ]
+    else:
+        peer.extra["keyterms"] = []
 
     # Defer to bridge modules to install ontrack / outbound track wiring.
     # The dispatch listener handles inbound DataChannel control messages

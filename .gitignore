@@ -2,7 +2,6 @@ node_modules/
 build/
 .env*
 *.log
-keyterms.txt
 sidekick.config.yaml
 config.yaml
 .DS_Store

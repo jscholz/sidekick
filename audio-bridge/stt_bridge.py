@@ -209,7 +209,35 @@ async def _run_stt(
     pump_task: asyncio.Task,
 ) -> None:
     """Consume the PCM queue, drive the STT provider, forward transcripts to the data channel."""
-    stt = get_stt_provider(voice_config.stt)
+    # Per-peer keyterm biasing: the PWA stashed its IDB-backed list onto
+    # peer.extra in signaling.handle_offer. Merge into the configured
+    # provider's options for THIS peer only, so two simultaneous users
+    # with different vocabularies don't clobber each other. Empty list
+    # → use the spec as-is (bridge defaults).
+    base_spec = voice_config.stt
+    peer_keyterms = peer.extra.get("keyterms") or []
+    if peer_keyterms:
+        from dataclasses import replace
+        merged_options = dict(base_spec.options)
+        # Dedup case-insensitive while preserving caller order; the PWA
+        # already dedups, but a user-edited config + PWA list could
+        # overlap.
+        existing_lc = {str(t).strip().lower() for t in merged_options.get("keyterms", []) or []}
+        existing = list(merged_options.get("keyterms", []) or [])
+        for t in peer_keyterms:
+            if t.lower() not in existing_lc:
+                existing.append(t)
+                existing_lc.add(t.lower())
+        merged_options["keyterms"] = existing
+        spec = replace(base_spec, options=merged_options)
+        logger.info(
+            "[stt-bridge] peer %s keyterms=%d (peer=%d, base=%d)",
+            peer.peer_id, len(existing), len(peer_keyterms),
+            len(base_spec.options.get("keyterms", []) or []),
+        )
+    else:
+        spec = base_spec
+    stt = get_stt_provider(spec)
 
     # Frame of pure silence at the same shape the mic produces (16 kHz
     # mono int16, 20 ms = 640 bytes). Substituted for the real mic

@@ -7,7 +7,6 @@
  * @typedef {Object} RuntimeConfig
  * @property {string} gwToken
  * @property {string} [mapsEmbedKey]
- * @property {string[]} [sttKeyterms] - Deepgram keyterm biasing hints.
  * @property {string} [appName]
  * @property {string} [agentLabel] - Prefix the agent uses (e.g. "Clawdian").
  * @property {string} [backend] - Which BackendAdapter to load ('openclaw', 'openai-compat', ...).

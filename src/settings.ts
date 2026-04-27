@@ -342,11 +342,11 @@ export function hydrate(handlers: {
     if (handlers.onStreamingEngineChange) handlers.onStreamingEngineChange();
   };
   if (setAutoFallback) setAutoFallback.onchange = () => { set('autoFallback', setAutoFallback.checked); };
-  // Keyterms: chip-based input, backed by keyterms.txt in the sidekick
-  // repo root on the server. Each chip is one keyterm — Enter or comma commits, × on
-  // a chip removes. File persists one term per line with '#' comments;
-  // we parse both newline and comma delimiters when loading so users
-  // editing the file directly can use either.
+  // Keyterms: chip-based input, persisted PER USER in IndexedDB
+  // (src/keyterms.ts). On first boot the list seeds from
+  // /api/keyterms (default_stt_keyterms.txt on the server); after
+  // that, all reads/writes are local. Each chip is one keyterm —
+  // Enter or comma commits, × on a chip removes.
   if (setSttKeyterms && keytermsChips) {
     let terms: string[] = [];
     const renderChips = () => {
@@ -365,38 +365,16 @@ export function hydrate(handlers: {
         keytermsChips.appendChild(chip);
       }
     };
-    const parseBody = (raw: string): string[] => {
-      // Strip comment lines (# prefix), then split on newline OR comma so
-      // users editing the file on disk can use either delimiter, and chip
-      // adds via comma on the input work through the same serializer.
-      const seen = new Set<string>();
-      const out: string[] = [];
-      for (const line of raw.split('\n')) {
-        const nocomment = line.replace(/#.*$/, '');
-        for (const part of nocomment.split(',')) {
-          const t = part.trim();
-          if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
-        }
-      }
-      return out;
-    };
     async function loadKeyterms() {
+      const { loadOrSeed } = await import('./keyterms.ts');
       try {
-        const { fetchWithTimeout } = await import('./util/fetchWithTimeout.ts');
-        const r = await fetchWithTimeout('/api/keyterms', { timeoutMs: 5_000 });
-        if (r.ok) { terms = parseBody(await r.text()); renderChips(); }
+        terms = await loadOrSeed();
+        renderChips();
       } catch {}
     }
     async function saveKeyterms() {
-      try {
-        const { fetchWithTimeout } = await import('./util/fetchWithTimeout.ts');
-        await fetchWithTimeout('/api/keyterms', {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain' },
-          body: terms.join('\n') + '\n',
-          timeoutMs: 5_000,
-        });
-      } catch {}
+      const { writeList } = await import('./keyterms.ts');
+      try { await writeList(terms); } catch {}
     }
     const commit = () => {
       const t = setSttKeyterms.value.trim().replace(/,$/, '').trim();

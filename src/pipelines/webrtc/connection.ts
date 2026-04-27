@@ -356,15 +356,29 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
   // to /api/hermes/responses so voice and text turns chain through one
   // session row.
   //
+  // keyterms: per-user STT vocabulary biasing, sourced from the PWA's
+  // IDB-backed list (src/keyterms.ts). The bridge merges this into the
+  // STT provider's options at peer setup so this user's terms reach
+  // Deepgram for THIS connection only — no shared server-side state.
+  // Fetched best-effort: an IDB error or empty list yields [] and the
+  // bridge falls back to its own defaults.
+  //
   // No silence_sec / commit_phrase here: those decisions are PWA-side
   // now (see dictation.ts). The bridge stays a thin transcript pipe
   // and dispatches only when the PWA sends {type:'dispatch', text}
   // over the data channel.
+  let keyterms: string[] = [];
+  try {
+    const { readList } = await import('../../keyterms.ts');
+    const saved = await readList();
+    if (saved && saved.length) keyterms = saved;
+  } catch {}
   const offerPayload = {
     sdp: pc.localDescription?.sdp ?? '',
     type: pc.localDescription?.type ?? 'offer',
     mode,
     conv_name: opts?.sessionId || null,
+    keyterms,
   };
 
   let answer: { peer_id: string; sdp: string; type: string } | null = null;

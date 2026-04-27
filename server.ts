@@ -669,73 +669,50 @@ async function handleTranscribe(req, res) {
 
 // Client config endpoint — serves runtime config from env vars so
 // secrets are not hardcoded in the HTML, and so per-deployment tuning
-// (keyterms, app name, default coords) can be set without a rebuild.
+// (app name, default coords) can be set without a rebuild.
 const GW_TOKEN = process.env.GW_TOKEN || '';
-// Default Deepgram key-term hints. Empty-fallback when config lists none
-// AND no env override — per-install terms live in sidekick.config.yaml's
-// `stt.keyterms:` section (managed via Settings UI) or the
-// SIDEKICK_STT_KEYTERMS env var. Defaults are intentionally minimal so
-// forks don't inherit vocabulary biases from another project's agent.
-const DEFAULT_KEYTERMS: string[] = ['Sidekick', 'Deepgram'];
 
-// Optional env-var override (useful for Docker / CI where a file mount
-// is awkward). Additive to whatever's in the config file.
-const ENV_KEYTERMS = process.env.SIDEKICK_STT_KEYTERMS
-  ? process.env.SIDEKICK_STT_KEYTERMS.split(',').map(s => s.trim()).filter(Boolean)
-  : [];
+// Default STT keyterm seed file. Read-only at runtime: the PWA fetches
+// it ONCE on first boot to seed each user's IndexedDB-backed list, then
+// reads/writes only IDB thereafter. Forks editing this file affect new
+// users only — existing installs keep their per-user IDB list. One term
+// per line; '#' comments and blank lines are ignored. Lives next to
+// server.ts so it ships with the repo.
+const DEFAULT_KEYTERMS_SEED_PATH = path.join(__dirname, 'default_stt_keyterms.txt');
 
-// One-time migration from the legacy keyterms.txt into sidekick.config.yaml.
-// If keyterms.txt still exists on disk and the config's stt.keyterms is
-// empty, import its contents into the yaml (comments dropped since they
-// weren't expressible in the list structure anyway). Leaves the txt file
-// in place so the user can delete it after verifying.
-const LEGACY_KEYTERMS_PATH = path.join(__dirname, 'keyterms.txt');
-function migrateLegacyKeyterms() {
-  if (!fsSync.existsSync(LEGACY_KEYTERMS_PATH)) return;
-  const current = DEPLOY_CFG?.stt?.keyterms;
-  if (Array.isArray(current) && current.length > 0) return;  // already migrated
-  let terms: string[] = [];
+// Final fallback when the seed file is missing or unreadable. Minimal so
+// forks don't inherit unrelated vocabulary biases.
+const FALLBACK_KEYTERMS: string[] = ['Sidekick', 'Deepgram'];
+
+/** Read + parse the keyterm seed file. Strips '#' comments, splits on
+ *  newlines and commas (matches the chip-UI parser). Falls back to
+ *  FALLBACK_KEYTERMS if the file is missing/unreadable. */
+function readSeedKeyterms(): string[] {
+  let raw = '';
   try {
-    const raw = fsSync.readFileSync(LEGACY_KEYTERMS_PATH, 'utf8');
-    terms = raw.split('\n').map(l => l.replace(/#.*$/, '').trim()).filter(Boolean);
-  } catch { return; }
-  if (!terms.length) return;
-  // Target a writable config file — existing one, or create a new
-  // sidekick.config.yaml next to server.ts so the user's keyterms
-  // survive the txt → yaml transition.
-  const target = CONFIG_PATH || path.join(__dirname, 'sidekick.config.yaml');
-  try {
-    if (!deployDoc) {
-      deployDoc = YAML.parseDocument('# sidekick deployment config — see example.config.yaml\nstt:\n  keyterms: []\n');
+    raw = fsSync.readFileSync(DEFAULT_KEYTERMS_SEED_PATH, 'utf8');
+  } catch {
+    return [...FALLBACK_KEYTERMS];
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const line of raw.split('\n')) {
+    const nocomment = line.replace(/#.*$/, '');
+    for (const part of nocomment.split(',')) {
+      const t = part.trim();
+      if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
     }
-    deployDoc.setIn(['stt', 'keyterms'], terms);
-    fsSync.writeFileSync(target, deployDoc.toString(), 'utf8');
-    DEPLOY_CFG = cfgAsJS();
-    console.log(`[config] migrated ${terms.length} keyterms from keyterms.txt → ${path.basename(target)} (txt file kept; delete when verified)`);
-  } catch (e: any) {
-    console.warn(`[config] keyterms migration failed: ${e.message}`);
   }
-}
-migrateLegacyKeyterms();
-
-/** Current keyterms list from the config file (or defaults if the section
- *  is empty/missing). Read on each request so edits take effect without
- *  service restart. */
-function readConfigKeyterms(): string[] {
-  const list = DEPLOY_CFG?.stt?.keyterms;
-  if (Array.isArray(list) && list.length > 0) {
-    return list.map((v: any) => String(v).trim()).filter(Boolean);
-  }
-  return [];
+  return out.length ? out : [...FALLBACK_KEYTERMS];
 }
 
-/** Serve the current keyterms as newline-separated text for the chip UI.
- *  When the config's stt.keyterms is empty/missing, seed with
- *  DEFAULT_KEYTERMS so the UI shows the active vocabulary rather than
- *  appearing blank. The first Save overwrites the config file. */
+/** Serve the seed keyterms as newline-separated text. Used by the PWA
+ *  ONLY for first-boot IDB seeding — subsequent reads/writes happen
+ *  entirely client-side. There is no POST companion: editing keyterms
+ *  via the chip UI mutates IndexedDB, not this file. */
 async function handleKeytermsGet(_req, res) {
-  const terms = readConfigKeyterms();
-  const body = (terms.length ? terms : DEFAULT_KEYTERMS).join('\n') + '\n';
+  const terms = readSeedKeyterms();
+  const body = terms.join('\n') + '\n';
   res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-cache' });
   res.end(body);
 }
@@ -785,55 +762,11 @@ async function handlePreferredModelsPost(req, res) {
   }
 }
 
-/** Write the request body (newline-separated, comments/commas tolerated)
- *  to the config file's stt.keyterms list. Uses the YAML Document model
- *  so comments and formatting elsewhere in the file are preserved on
- *  round-trip. If no config file exists, creates one at the default
- *  location. */
-async function handleKeytermsPost(req, res) {
-  const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c);
-  const body = Buffer.concat(chunks).toString('utf8');
-  // Parse the same way the UI does on load — newlines OR commas, comments stripped.
-  const parsed = new Set<string>();
-  const terms: string[] = [];
-  for (const line of body.split('\n')) {
-    const nocomment = line.replace(/#.*$/, '');
-    for (const part of nocomment.split(',')) {
-      const t = part.trim();
-      if (t && !parsed.has(t.toLowerCase())) { parsed.add(t.toLowerCase()); terms.push(t); }
-    }
-  }
-  try {
-    // Pick a path — existing config, or create sidekick.config.yaml next to server.ts
-    const target = CONFIG_PATH || path.join(__dirname, 'sidekick.config.yaml');
-    if (!deployDoc) {
-      deployDoc = YAML.parseDocument('stt:\n  keyterms: []\n');
-    }
-    deployDoc.setIn(['stt', 'keyterms'], terms);
-    await fs.writeFile(target, deployDoc.toString(), 'utf8');
-    DEPLOY_CFG = cfgAsJS();
-    res.writeHead(204); res.end();
-  } catch (e: any) {
-    console.error('keyterms write failed:', e.message);
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end(`write failed: ${e.message}`);
-  }
-}
-
 function handleConfig(_req, res) {
-  // If the config's stt.keyterms has content, it's authoritative — user
-  // has edited via UI (or hand-edited the yaml) and may have removed
-  // defaults on purpose. Otherwise seed with DEFAULT_KEYTERMS. ENV_KEYTERMS
-  // is always additive on top (Docker/CI override).
-  const cfgKeyterms = readConfigKeyterms();
-  const base = cfgKeyterms.length > 0 ? cfgKeyterms : DEFAULT_KEYTERMS;
-  const merged = [...new Set([...base, ...ENV_KEYTERMS])];
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
   res.end(JSON.stringify({
     gwToken: GW_TOKEN,
     mapsEmbedKey: process.env.MAPS_EMBED_KEY || '',
-    sttKeyterms: merged,
     // Skinning — per-install overrides for app name / agent label / primary
     // theme color. Resolved via sidekick.config.yaml (app.*) then env var
     // then default. See config.example.yaml.
@@ -1031,7 +964,6 @@ const server = http.createServer(async (req, res) => {
   if (req.url && req.url.startsWith('/api/hermes')) return handleHermesProxy(req, res);
   if (req.method === 'GET' && req.url === '/config') return handleConfig(req, res);
   if (req.method === 'GET' && req.url === '/api/keyterms') return handleKeytermsGet(req, res);
-  if (req.method === 'POST' && req.url === '/api/keyterms') return handleKeytermsPost(req, res);
   if (req.method === 'GET' && req.url === '/api/preferred-models') return handlePreferredModelsGet(req, res);
   if (req.method === 'POST' && req.url === '/api/preferred-models') return handlePreferredModelsPost(req, res);
   if (req.method === 'POST' && req.url === '/api/chat') return handleOpenAICompatChat(req, res);
