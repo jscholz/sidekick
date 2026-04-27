@@ -106,6 +106,10 @@ export async function start(opts) {
   // (audible "we're hearing you" signal) but slightly more distinct so
   // it isn't confused with the 'commit' or 'send' chimes.
   playFeedback('listening');
+  // Visual pulse — adds .listening to the mic button alongside .active
+  // so user sees "actually capturing" vs "got my touch" states. Cleared
+  // with .active on stopVoice.
+  try { document.getElementById('btn-mic')?.classList.add('listening'); } catch {}
   return true;
 }
 

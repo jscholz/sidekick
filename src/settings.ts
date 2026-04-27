@@ -183,11 +183,6 @@ const DEFAULTS = {
   // (e.g. bike rides). Mapped linearly to gain multiplier in feedback.ts.
   audioFeedbackVolume: 0.5,
   theme: 'dark',
-  // Session drawer filter — passed as `?prefix=` to /api/hermes/sessions.
-  // Comma-separated globs matched against the session's title, source,
-  // id, or stored conversation name (tap ⋮ → Info on any row to see the
-  // raw values). Empty → show ALL sessions. Non-empty → union of matches.
-  sessionsFilter: 'sidekick-*,*whatsapp*,*telegram*',
   // Composer-mic behavior toggles. Three orthogonal flags control the
   // four modes the unified mic button can run in (call=on/off ×
   // autoSend=on/off), plus the input gesture (PTT vs click-toggle).
@@ -211,6 +206,15 @@ const DEFAULTS = {
   micPTT: false,
   micCall: false,
   micAutoSend: false,
+  // Hotkey strings — modifier+key tokens joined by '+' in any order
+  // (case-insensitive). Modifiers: Cmd / Ctrl / Shift / Alt / Meta.
+  // Cmd matches metaKey (Mac convention); the parser also accepts Ctrl
+  // matching ctrlKey for Win/Linux deployments. Keys are KeyboardEvent.key
+  // values: single chars (case-insensitive) or named keys ('Space',
+  // 'Escape', etc.). User-editable via the settings panel.
+  hotkeyCallMode: 'Cmd+Shift+C',     // toggle settings.micCall
+  hotkeyAutoSend: 'Cmd+Shift+S',     // toggle settings.micAutoSend
+  hotkeyToggleMic: 'Cmd+Shift+D',    // start / stop the active voice path
 };
 
 let current = { ...DEFAULTS };
@@ -271,7 +275,6 @@ export function hydrate(handlers: {
   onMicChange?: () => void;
   onStreamingEngineChange?: () => void;
   onAutoSendChange?: () => void;
-  onSessionsFilterChange?: () => void;
 } = {}) {
   modelHandlers = { onModelChange: handlers.onModelChange };
   const $inp = (id: string) => document.getElementById(id) as HTMLInputElement | null;
@@ -285,7 +288,9 @@ export function hydrate(handlers: {
   const keytermsChips = document.getElementById('keyterms-chips');
   const setPreferredModels = document.getElementById('set-preferred-models') as HTMLInputElement | null;
   const preferredModelsChips = document.getElementById('preferred-models-chips');
-  const setSessionsFilter = $inp('set-sessions-filter');
+  const setHotkeyCall = $inp('set-hotkey-call');
+  const setHotkeyAutoSend = $inp('set-hotkey-autosend');
+  const setHotkeyMic = $inp('set-hotkey-mic');
   const setTtsEngine = $sel('set-tts-engine');
   const setVoice = $sel('set-voice');
   const setWake = $inp('set-wake');
@@ -330,7 +335,9 @@ export function hydrate(handlers: {
   if (setFontSize) setFontSize.value = String(current.contentSize);
   if (setFontSizeVal) setFontSizeVal.textContent = `${current.contentSize}px`;
   if (setTheme) setTheme.value = current.theme;
-  if (setSessionsFilter) setSessionsFilter.value = current.sessionsFilter;
+  if (setHotkeyCall) setHotkeyCall.value = current.hotkeyCallMode;
+  if (setHotkeyAutoSend) setHotkeyAutoSend.value = current.hotkeyAutoSend;
+  if (setHotkeyMic) setHotkeyMic.value = current.hotkeyToggleMic;
 
   // Change handlers
   if (setStreamEngine) setStreamEngine.onchange = () => {
@@ -489,12 +496,6 @@ export function hydrate(handlers: {
     loadPreferredModels();
   }
 
-  if (setSessionsFilter) {
-    setSessionsFilter.addEventListener('change', () => {
-      set('sessionsFilter', setSessionsFilter.value.trim());
-      if (handlers.onSessionsFilterChange) handlers.onSessionsFilterChange();
-    });
-  }
   if (setTtsEngine) setTtsEngine.onchange = () => {
     set('ttsEngine', setTtsEngine.value);
     applyTtsEngineVisibility();
@@ -593,6 +594,49 @@ export function hydrate(handlers: {
     if (setFontSizeVal) setFontSizeVal.textContent = `${current.contentSize}px`;
     applyVisuals();
   };
+  // Hotkey inputs — click-to-capture. Focus the field, press a key
+  // combination, and we format it as a string and save. Cmd is used as
+  // the conventional Mac modifier name; the matcher accepts either Cmd
+  // (metaKey) or Ctrl (ctrlKey) at runtime.
+  function attachHotkeyCapture(el: HTMLInputElement | null, settingsKey: 'hotkeyCallMode' | 'hotkeyAutoSend' | 'hotkeyToggleMic') {
+    if (!el) return;
+    el.addEventListener('keydown', (e: KeyboardEvent) => {
+      // Don't capture lone modifier keypresses; wait until a "real" key
+      // is also pressed so the combo means something.
+      if (e.key === 'Meta' || e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt') return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        // Cancel: restore prior value, blur.
+        el.value = (current as any)[settingsKey] || '';
+        el.blur();
+        return;
+      }
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        // Clear the binding entirely (user wants no hotkey for this action).
+        el.value = '';
+        set(settingsKey as any, '');
+        el.blur();
+        return;
+      }
+      const parts: string[] = [];
+      if (e.metaKey) parts.push('Cmd');
+      if (e.ctrlKey) parts.push('Ctrl');
+      if (e.altKey) parts.push('Alt');
+      if (e.shiftKey) parts.push('Shift');
+      // Normalize the key part: single chars uppercased; named keys passed through.
+      const key = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+      parts.push(key);
+      const combo = parts.join('+');
+      el.value = combo;
+      set(settingsKey as any, combo);
+      el.blur();
+    });
+  }
+  attachHotkeyCapture(setHotkeyCall, 'hotkeyCallMode');
+  attachHotkeyCapture(setHotkeyAutoSend, 'hotkeyAutoSend');
+  attachHotkeyCapture(setHotkeyMic, 'hotkeyToggleMic');
+
   if (setTheme) setTheme.onchange = () => {
     set('theme', setTheme.value);
     if (handlers.onThemeChange) handlers.onThemeChange();
@@ -627,11 +671,6 @@ export function hydrate(handlers: {
     document.body.classList.add('settings-just-closed');
     setTimeout(() => document.body.classList.remove('settings-just-closed'), 350);
     document.body.classList.remove('settings-modal-open');
-    // ORDER MATTERS: hide the panel FIRST, before any side-effect work.
-    // Previously a throw inside the sessions-filter commit (or any
-    // handler.onSessionsFilterChange chain) could leave the panel
-    // stuck open with the X button visibly registering :active but
-    // failing to dismiss — observed on iPhone 2026-04-25 (BUG 5).
     // Force-hide via inline style as a belt-and-braces against any
     // stylesheet override that might survive the class removal.
     if (panel) {
@@ -642,22 +681,6 @@ export function hydrate(handlers: {
       // class-add would race the inline 'none'. Defer the cleanup so
       // it doesn't fire mid-close-animation.
       setTimeout(() => { if (panel) panel.style.display = ''; }, 50);
-    }
-    // Commit pending sessions-filter edits AFTER the close — the text
-    // input's 'change' event only fires on blur/Enter, so tapping the X
-    // or backdrop would otherwise drop the typed value until the next
-    // page load. Wrapped in try/catch so a throw can't leave the panel
-    // visible (which is what was happening before the order swap above).
-    try {
-      if (setSessionsFilter) {
-        const typed = setSessionsFilter.value.trim();
-        if (typed !== current.sessionsFilter) {
-          set('sessionsFilter', typed);
-          if (handlers.onSessionsFilterChange) handlers.onSessionsFilterChange();
-        }
-      }
-    } catch (e) {
-      console.error('settings: closePanel filter-commit failed:', e);
     }
   };
   if (btnSet) btnSet.onclick = openPanel;

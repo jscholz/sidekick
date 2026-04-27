@@ -782,6 +782,21 @@
     padding: 4px 8px; font-size: var(--content-size); font-family: var(--font-sans);
   }
   #settings .text-input:focus { outline: none; border-color: var(--primary); }
+  /* Hotkey-capture input — click to focus, press a key combo, the
+     keydown handler in settings.ts formats and saves. Read-only so
+     typing doesn't fight the capture. Visual cue: dashed border on
+     focus to signal "we're listening for keys", solid otherwise. */
+  #settings .hotkey-input {
+    flex: 1; min-width: 200px; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 8px; font-size: var(--content-size);
+    font-family: var(--font-mono); cursor: pointer;
+    user-select: none;
+  }
+  #settings .hotkey-input:focus {
+    outline: none; border-style: dashed; border-color: var(--primary);
+    background: var(--surface-2);
+  }
   #settings .row { display: flex; align-items: center; gap: 12px; padding: 7px 0; }
   #settings .row:has(input[type=checkbox]) { cursor: pointer; }
   #settings label { color: var(--fg); min-width: 150px; font-size: var(--content-size); font-weight: 500; }
@@ -1334,17 +1349,26 @@
   }
   .composer .icon-btn-plain:hover { color: var(--fg); }
   .composer .icon-btn-plain svg { width: 22px; height: 22px; }
-  /* Active = some voice path is live (memo bar showing, dictation
-     streaming, or call open). Solid red filled circle reads
-     unambiguously as "recording" — matches the universal record-
-     button convention. White icon on red background gives strong
-     contrast. (Don't fill the SVG — the mic is line-art with open
-     sub-paths; filling produces a muddled shape. Stroke-on-fill
-     is the clean record-button look.) */
+  /* Active = button press registered (red filled, no animation).
+     Listening = .active PLUS the bridge or recorder confirmed audio is
+     actually flowing (red filled + soft pulse). The two-state visual
+     lets the user distinguish "we got your touch" from "actually
+     listening" — useful when WebRTC handshake adds 100-500ms before
+     STT goes hot. Cleared on stopVoice / call close / exitMemoMode.
+     Don't fill the SVG — the mic is line-art with open sub-paths;
+     filling produces a muddled shape. White stroke on red background
+     is the universal record-button look. */
   .composer #btn-mic.active {
     color: #fff;
     background: var(--danger);
     border-radius: 50%;
+  }
+  .composer #btn-mic.active.listening {
+    animation: mic-listening-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes mic-listening-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(192, 80, 74, 0.55); }
+    50%      { box-shadow: 0 0 0 6px rgba(192, 80, 74, 0); }
   }
 
   /* Mic-mode dropdown — chevron sits flush right of the mic button to

@@ -343,7 +343,6 @@ async function boot() {
   settings.applyVisuals();
   settings.hydrate({
     onThemeChange: () => theme.applyTheme(settings.get().theme),
-    onSessionsFilterChange: () => sessionDrawer.refreshAfterFilterChange(),
     onVoiceChange: () => {
       // Voice change: takes effect on the next WebRTC talk-mode call
       // (server-side TTS provider reads its config). No client-side cache
@@ -791,6 +790,12 @@ async function boot() {
       // turn" cue. Single source of truth: don't fire this anywhere
       // else on the client.
       try { playFeedback('listening'); } catch { /* ignore */ }
+      // Visual pulse — adds the .listening class to the mic button so
+      // the user can distinguish "we got your touch" (red filled, no
+      // pulse) from "actually listening" (red filled + pulse). The
+      // class clears with .active on stopVoice.
+      const btn = document.getElementById('btn-mic');
+      if (btn) btn.classList.add('listening');
       return;
     }
     if (ev.type !== 'transcript' || typeof ev.text !== 'string') return;
@@ -1130,6 +1135,12 @@ async function boot() {
       actionsRightEl.appendChild(composerSend);
     }
     composerSend.onclick = sendTypedMessage;
+    // Clear voice-state classes on the mic button when memo dismisses.
+    // .active is also flipped via voiceActive() polling indirectly, but
+    // explicit removal here keeps the visual in sync without waiting.
+    if (btnMic) {
+      btnMic.classList.remove('active', 'listening');
+    }
     updateSendButtonState();
   }
 
@@ -1367,7 +1378,14 @@ async function boot() {
   let dictateActive = false;
   webrtcDictate.setStateListener((opening, error) => {
     dictateActive = opening;
-    if (btnMic) btnMic.classList.toggle('active', opening);
+    if (btnMic) {
+      btnMic.classList.toggle('active', opening);
+      // Clear the "actually listening" pulse on stop. It's added by the
+      // bridge's {type: 'listening'} envelope when STT goes hot; we
+      // proactively remove on stop so the close transition reads
+      // cleanly instead of waiting for a final paint.
+      if (!opening) btnMic.classList.remove('listening');
+    }
     if (error) {
       status.setStatus(`Dictate error: ${error}`, 'err');
     } else if (opening) {
@@ -1835,6 +1853,70 @@ async function boot() {
     if (!dictateActive) return;
     e.preventDefault();
     void stopDictate();
+  });
+
+  // ── Global hotkeys (user-configurable in settings) ──────────────────
+  // Three actions, three hotkey strings stored in settings. Matcher
+  // accepts both Cmd (metaKey) and Ctrl (ctrlKey) for cross-platform
+  // editing — Mac users see Cmd in defaults, Windows/Linux users can
+  // overwrite with Ctrl. preventDefault on match so we override browser
+  // defaults (Cmd+Shift+C is DevTools "inspect" by default, etc).
+  document.addEventListener('keydown', (e) => {
+    // Skip when typing in editable fields, except for the hotkey-capture
+    // inputs themselves which handle their own keydown (those have
+    // .hotkey-input class).
+    const t = e.target as HTMLElement | null;
+    if (t) {
+      if (t.classList.contains('hotkey-input')) return;
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || (t as any).isContentEditable) return;
+    }
+    const s = settings.get();
+    const matches = (combo: string): boolean => {
+      if (!combo) return false;
+      const parts = combo.split('+').map(p => p.trim().toLowerCase()).filter(Boolean);
+      let needMeta = false, needCtrl = false, needAlt = false, needShift = false;
+      let key = '';
+      for (const p of parts) {
+        if (p === 'cmd' || p === 'meta') needMeta = true;
+        else if (p === 'ctrl') needCtrl = true;
+        else if (p === 'alt') needAlt = true;
+        else if (p === 'shift') needShift = true;
+        else key = p;
+      }
+      // Cross-platform: if combo says Cmd, allow either metaKey OR ctrlKey
+      // (so a "Cmd+Shift+C" binding works for Windows/Linux users typing Ctrl).
+      const modifierOK =
+        (needMeta ? (e.metaKey || e.ctrlKey) : !e.metaKey) &&
+        (needCtrl ? (e.ctrlKey || e.metaKey) : (needMeta || !e.ctrlKey)) &&
+        (needAlt ? e.altKey : !e.altKey) &&
+        (needShift ? e.shiftKey : !e.shiftKey);
+      if (!modifierOK) return false;
+      const eventKey = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
+      return eventKey === key;
+    };
+    if (matches(s.hotkeyCallMode)) {
+      e.preventDefault();
+      settings.set('micCall', !s.micCall);
+      // Refresh the menu UI in case it's open so the toggle reflects state.
+      applyMicModeUi();
+      status.setStatus(`Call mode: ${!s.micCall ? 'on' : 'off'}`, null);
+      return;
+    }
+    if (matches(s.hotkeyAutoSend)) {
+      e.preventDefault();
+      settings.set('micAutoSend', !s.micAutoSend);
+      applyMicModeUi();
+      status.setStatus(`Auto-send: ${!s.micAutoSend ? 'on' : 'off'}`, null);
+      return;
+    }
+    if (matches(s.hotkeyToggleMic)) {
+      e.preventDefault();
+      // Toggle whichever voice path matches the current settings —
+      // same effect as clicking the mic button.
+      const btn = document.getElementById('btn-mic') as HTMLButtonElement | null;
+      if (btn) btn.click();
+      return;
+    }
   });
 
   // ── Refresh button (full page reload for standalone PWA) ──

@@ -254,11 +254,6 @@
       <span class="hint">type a term and press Enter (or comma) to add it; × on a chip to remove. Saves to keyterms.txt in the sidekick repo root — takes effect on next mic-stream start.</span>
     </div>
     <div class="row">
-      <label for="set-sessions-filter">Sessions filter <span style="opacity:0.6;font-size:11px;">(deprecated)</span></label>
-      <input type="text" id="set-sessions-filter" placeholder="sidekick-*,*whatsapp*,*telegram*" style="flex:1">
-      <span class="hint">Saved drawer filter — open the sidebar and use the inline &ldquo;Filter Sessions&rdquo; input at the top of the sessions list instead. This field will be removed in a future release.</span>
-    </div>
-    <div class="row">
       <label for="set-tts-engine">TTS engine</label>
       <select id="set-tts-engine">
         <option value="server">Server (Deepgram Aura)</option>
@@ -334,6 +329,25 @@
       <label for="set-audio-feedback">Audio feedback</label>
       <input type="range" id="set-audio-feedback" min="0" max="100" step="10" value="50">
       <span class="val" id="set-audio-feedback-val">50%</span>
+    </div>
+  </div>
+
+  <div class="settings-group">
+    <div class="group-label">Hotkeys</div>
+    <div class="row">
+      <label for="set-hotkey-call">Toggle call mode</label>
+      <input type="text" id="set-hotkey-call" class="hotkey-input" readonly placeholder="click + press keys">
+      <span class="hint">flip the call-mode toggle in the mic menu</span>
+    </div>
+    <div class="row">
+      <label for="set-hotkey-autosend">Toggle auto-send</label>
+      <input type="text" id="set-hotkey-autosend" class="hotkey-input" readonly placeholder="click + press keys">
+      <span class="hint">flip the auto-send toggle in the mic menu</span>
+    </div>
+    <div class="row">
+      <label for="set-hotkey-mic">Toggle mic</label>
+      <input type="text" id="set-hotkey-mic" class="hotkey-input" readonly placeholder="click + press keys">
+      <span class="hint">start / stop voice for whatever mode is active</span>
     </div>
   </div>
 

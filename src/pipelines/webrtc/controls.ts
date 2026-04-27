@@ -52,6 +52,11 @@ export function init(o: ControlsOpts) {
         'connecting',
         state === 'requesting-mic' || state === 'connecting',
       );
+      // Clear the "actually listening" pulse when the call closes.
+      // The bridge's {type:'listening'} envelope adds it; we clear here
+      // so the visual reflects state immediately on close instead of
+      // lingering until next paint.
+      if (!conn.isOpen()) mic.classList.remove('listening');
     }
     // Reset the dictation state machine whenever a call ends so a
     // pending utterance buffer or silence timer doesn't leak across
