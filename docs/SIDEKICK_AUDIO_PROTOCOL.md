@@ -181,6 +181,21 @@ client-side mic analyser cannot reliably detect user voice during
 TTS for that reason — the bridge sees raw pre-DSP PCM and is the
 only place the user's voice is actually visible.
 
+#### `listening`
+
+```json
+{ "type": "listening" }
+```
+
+Sent by the bridge whenever it transitions from "not accepting mic
+frames" to "accepting mic frames into Deepgram" — i.e. on the first
+frame of the call AND after every TTS-end transition. The PWA chimes
+"your turn" on receipt. This is the single source of truth for the
+listening cue; clients should NOT chime on `connectionstatechange`
+or any other locally-derived signal, because the WebRTC peer can be
+"connected" before the STT pipe is actually hot, and chiming there
+would be either too early or doubled with this envelope at call-start.
+
 ### Client → server
 
 #### `dispatch`

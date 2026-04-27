@@ -775,6 +775,15 @@ async function boot() {
       webrtcSuppress.onBarge();
       return;
     }
+    if (ev.type === 'listening') {
+      // Bridge announced "STT pipe is hot" — fires at call-start AND
+      // after every TTS-end transition (i.e. it's the user's turn
+      // again in a multi-turn call). Plays the soft two-tone "your
+      // turn" cue. Single source of truth: don't fire this anywhere
+      // else on the client.
+      try { playFeedback('listening'); } catch { /* ignore */ }
+      return;
+    }
     if (ev.type !== 'transcript' || typeof ev.text !== 'string') return;
     if (ev.role === 'user') {
       // Half-duplex: while the agent is speaking, the iOS speakerphone

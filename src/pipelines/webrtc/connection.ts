@@ -68,8 +68,11 @@ interface CallSession {
  *
  *   - `transcript` — user/assistant text, both interim and final.
  *   - `barge`      — server-side VAD detected user voice during TTS;
- *                    client should cancel local playback. See
- *                    docs/SIDEKICK_AUDIO_PROTOCOL.md.
+ *                    client should cancel local playback.
+ *   - `listening`  — STT pipe is hot; bridge is now accepting mic
+ *                    frames into Deepgram. Fires at call-start AND
+ *                    after every TTS-end transition. PWA chimes
+ *                    "your turn." See docs/SIDEKICK_AUDIO_PROTOCOL.md.
  */
 interface TranscriptEvent {
   type: 'transcript';
@@ -80,7 +83,10 @@ interface TranscriptEvent {
 interface BargeEvent {
   type: 'barge';
 }
-type DataChannelEvent = TranscriptEvent | BargeEvent;
+interface ListeningEvent {
+  type: 'listening';
+}
+type DataChannelEvent = TranscriptEvent | BargeEvent | ListeningEvent;
 
 let onDataChannelEvent: ((ev: DataChannelEvent) => void) | null = null;
 
@@ -317,13 +323,15 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     if (!active) return;
     if (pc.connectionState === 'connected') {
       setState('connected');
-      // "Listening" chime — soft two-tone fade-in. Same audible cue the
-      // memo path plays at first audio frame captured; here it fires
-      // once the WebRTC peer is fully established (which is also when
-      // the bridge can hear us). Replaces the older 'connect' chime —
-      // for the unified mic UX both modes now share the same "ready
-      // for your voice" signal, just at the right per-mode moment.
-      try { playFeedback('listening'); } catch { /* ignore */ }
+      // No chime here. The 'listening' chime is now driven by the
+      // bridge sending {type: 'listening'} over the data channel
+      // whenever it actually accepts mic frames into Deepgram —
+      // call-start AND every TTS-end transition. Bridge is the source
+      // of truth for "STT is hot"; chiming on connectionstatechange
+      // would be a half-second early (data channel + STT pipe init
+      // happens after peer is "connected") AND would double up at
+      // call-start with the bridge's first-frame envelope. See
+      // docs/SIDEKICK_AUDIO_PROTOCOL.md.
     } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
       setState('failed');
       void close();

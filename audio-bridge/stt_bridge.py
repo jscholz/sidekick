@@ -222,6 +222,15 @@ async def _run_stt(
     async def _pcm_iter() -> AsyncIterator[bytes]:
         tts_track = peer.extra.get("tts_track")
         was_active = False
+        # Whether we've already announced "STT pipe is hot" for this
+        # turn boundary. Flips True on the first frame the bridge
+        # actually accepts into Deepgram (call-start AND every TTS-end
+        # transition); resets when TTS goes active again. Drives the
+        # `{type: 'listening'}` envelope so the PWA can chime "your
+        # turn." Without this, listening would either fire on every
+        # frame (spam) or only at call-start (one-shot, useless for
+        # multi-turn calls).
+        listening_announced = False
         # VAD state — counts consecutive over-threshold frames while
         # TTS is active. Reset on threshold-undershoot and on TTS-end
         # (so the next turn starts fresh). barge_fired_this_turn lives
@@ -283,6 +292,9 @@ async def _run_stt(
                     else:
                         vad_hold = 0
                 yield silence_frame
+                # While TTS is active we are NOT listening, so re-arm
+                # the listening announcement for the next user turn.
+                listening_announced = False
                 continue
             if was_active:
                 logger.info(
@@ -297,6 +309,14 @@ async def _run_stt(
                 obs_frames = 0
                 obs_max_rms = 0
                 obs_above = 0
+            # First mic frame after a TTS-active window (or the first
+            # frame of the call entirely): announce listening so the
+            # PWA can chime "your turn." Idempotent within a single
+            # user-turn — the `listening_announced` flag prevents
+            # re-firing on every frame.
+            if not listening_announced:
+                listening_announced = True
+                _send_data_channel(peer, {"type": "listening"})
             yield chunk
 
     try:
