@@ -2,31 +2,59 @@
 
 This is the internal contract between the sidekick PWA and the
 sidekick audio bridge. The aiortc service at
-`~/code/sidekick/audio-bridge/` is the **reference implementation**;
-alternative implementations (e.g. node-webrtc on a Mac) are valid as
-long as they satisfy this contract.
+`audio-bridge/` is the **reference implementation**; alternative
+implementations (e.g. node-webrtc on a Mac) are valid as long as they
+satisfy this contract.
 
-The bridge is sidekick-owned. It does not talk to the agent backend
-directly; all sidekick→agent traffic flows through the sidekick proxy
-at `/api/hermes/responses`.
+## What "audio bridge" bridges
+
+The audio bridge converts between two protocol families:
+- **Real-time media** (WebRTC: Opus packets, ICE, peer connection
+  lifecycle) on the PWA-facing side.
+- **Text** (HTTP/SSE — utterance dispatch, transcript stream) on the
+  agent-facing side, routed through the sidekick proxy.
+
+It's a media-↔-text bridge, not a network hop between PWA and proxy.
+The PWA still talks to the proxy directly for everything that isn't
+audio (chat history, sessions, model picker, settings, etc.).
+
+## Data path
+
+The proxy is the **sole gateway to the agent backend**. Nothing else
+in this system has the agent's URL. Both the PWA and the audio bridge
+hit the proxy when they need to dispatch to the agent.
 
 ```
-                  ┌──────────────┐
-                  │     PWA      │
-                  └──────┬───────┘
-                         │ http :3001
-                         ▼
-                sidekick proxy (Node :3001)  ◄── sole gateway to agent
-                    │ │
-                    │ └──── /api/hermes/* ─────► agent (hermes :8642)
-                    │                                  ▲
-                    │ /api/rtc/*                       │
-                    ▼                                  │
-                audio bridge (Python :8643)            │
-                    │                                  │
-                    └── POST http://127.0.0.1:3001/api/hermes/responses ──┘
-                         (bridge dispatches via proxy, NOT direct to agent)
+            ┌─────────────────────┐
+            │        PWA          │
+            └──┬───────────────┬──┘
+               │               │
+        HTTP   │               │  WebRTC media
+       :3001   │               │  (mic ↔ STT, TTS ↔ speaker)
+               │               │
+               ▼               ▼
+        ┌─────────────┐    ┌──────────────────┐
+        │   sidekick  │    │   audio bridge   │
+        │   proxy     │◄───┤   (Python :8643) │
+        │ (Node :3001)│    │                  │
+        │             │    │  user transcripts│
+        │             │    │  POSTed back to  │
+        │             │    │  proxy via       │
+        │             │    │  /api/<be>/      │
+        │             │    │   responses      │
+        │             │    └──────────────────┘
+        │             │
+        │ /api/<be>/* │ ──► agent backend (e.g. hermes, openai-compat, …)
+        └─────────────┘
+                              ◄── only the proxy talks to the agent.
+                                  the bridge always re-enters via the
+                                  proxy on the same /api/<be>/responses
+                                  endpoint the PWA uses.
 ```
+
+`<be>` is the active backend slug (`hermes`, `openai-compat`, …).
+The bridge doesn't know or care which backend is wired up — it always
+POSTs to the proxy URL configured at startup and lets the proxy route.
 
 ---
 
@@ -147,7 +175,10 @@ done (silence timeout, commit-phrase match, or any future trigger).
 The bridge:
 
 1. POSTs `{input: text, conversation: <conv_name>, stream: true}` to
-   `<proxy_url>/api/hermes/responses`.
+   `<proxy_url>/api/<be>/responses` where `<be>` is the active backend
+   slug (the proxy routes; the bridge is configured with the proxy URL
+   only and doesn't know the backend name in code — it gets it from
+   the `SIDEKICK_BACKEND` env var or falls back to the proxy default).
 2. Parses the SSE stream as the agent protocol's Responses API events
    (`response.output_text.delta` → user-visible deltas;
    `response.completed` → terminal).
@@ -170,10 +201,12 @@ ignores this in V1.
 ## Bridge dispatch behavior
 
 The bridge MUST POST utterances through the sidekick proxy
-(`<proxy_url>/api/hermes/responses`), NOT directly to the agent
-backend. The proxy is the sole sidekick→agent gateway; this keeps the
-bridge agent-agnostic and centralizes auth / rate-limiting / logging
-on a single hop.
+(`<proxy_url>/api/<be>/responses`), NOT directly to the agent backend.
+The proxy is the sole sidekick→agent gateway; this keeps the bridge
+agent-agnostic and centralizes auth / rate-limiting / logging on a
+single hop. `<be>` is whichever backend is wired up on the proxy
+(e.g. `hermes`, `openai-compat`); the bridge ships the same body shape
+regardless.
 
 `<proxy_url>` is supplied via the `SIDEKICK_PROXY_URL` env var
 (default `http://127.0.0.1:3001`); bridges that ship behind a non-
@@ -195,11 +228,11 @@ Stream parsing follows the abstract agent protocol. See
 
 ## Reference implementation
 
-`~/code/sidekick/audio-bridge/` (Python 3.11, aiortc). Standalone
-aiohttp service on port 8643. Run via:
+`audio-bridge/` (Python 3.11, aiortc). Standalone aiohttp service on
+port 8643. Run via:
 
 ```bash
-cd ~/code/sidekick/audio-bridge
+cd audio-bridge
 .venv/bin/python bridge.py
 ```
 
@@ -221,8 +254,9 @@ the same directory.
       `{type:'transcript', role:'user', text, is_final:true}` —
       pass-through, no buffering.
 - [ ] On `{type:'dispatch', text}` from the client: POST to
-      `<SIDEKICK_PROXY_URL>/api/hermes/responses` with the body
-      shape above; parse the SSE stream; mirror `output_text.delta`
+      `<SIDEKICK_PROXY_URL>/api/<be>/responses` (where `<be>` is the
+      active backend slug) with the body shape above; parse the SSE
+      stream; mirror `output_text.delta`
       events as `role:'assistant'` transcripts; emit a terminal
       `{role:'assistant', is_final:true, text:''}` after
       `response.completed`.

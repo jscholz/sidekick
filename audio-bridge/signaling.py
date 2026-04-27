@@ -65,7 +65,8 @@ from peer import (
 _VOICE_CONFIG: Optional[VoiceConfig] = None
 _API_SERVER_REF: Any = None  # legacy: reference to in-process APIServerAdapter
 _PROXY_URL: Optional[str] = None  # sidekick proxy URL, e.g. http://127.0.0.1:3001
-                                  # — bridge dispatches to <proxy>/api/hermes/responses
+                                  # — bridge dispatches to <proxy>/api/<backend>/responses
+_BACKEND: str = "hermes"  # active backend slug for the proxy responses endpoint
 
 
 def _err(message: str, status: int = 400, code: str = "rtc_error") -> "web.Response":
@@ -115,7 +116,7 @@ async def handle_offer(request: "web.Request") -> "web.Response":
     # (sidekick-<slug>), the same key the classic-mode chat path sends.
     # Backwards-compat: an older client using `session_id` is read but
     # treated as conv_name; the bridge passes it through as
-    # body["conversation"] when dispatching to /api/hermes/responses,
+    # body["conversation"] when dispatching to /api/<backend>/responses,
     # so voice and text turns chain through one session row.
     conv_name = (
         payload.get("conv_name")
@@ -130,10 +131,12 @@ async def handle_offer(request: "web.Request") -> "web.Response":
     peer_id = make_peer_id()
     peer = PeerSession(peer_id=peer_id, mode=mode, pc=pc)
     peer.extra["conv_name"] = conv_name
-    # Bridge dispatches to <proxy>/api/hermes/responses, NOT directly to the
+    # Bridge dispatches to <proxy>/api/<be>/responses, NOT directly to the
     # agent backend. The sidekick proxy is the sole gateway between
-    # sidekick-land and agent-land.
+    # sidekick-land and agent-land. <be> is the active backend slug
+    # configured at startup (default 'hermes').
     peer.extra["proxy_url"] = _PROXY_URL
+    peer.extra["backend"] = _BACKEND
 
     # Defer to bridge modules to install ontrack / outbound track wiring.
     # The dispatch listener handles inbound DataChannel control messages
@@ -407,18 +410,23 @@ def register_routes(
     *,
     voice_config: Optional[VoiceConfig] = None,
     proxy_url: Optional[str] = None,
+    backend: str = "hermes",
     api_server: Any = None,
 ) -> None:
     """Register the /v1/rtc/* routes onto an aiohttp Application.
 
     *proxy_url* is the sidekick proxy base URL (e.g. http://127.0.0.1:3001).
-    The bridge dispatches utterances to ``<proxy_url>/api/hermes/responses``
+    The bridge dispatches utterances to ``<proxy_url>/api/<backend>/responses``
     rather than POSTing directly to the agent backend. Routing through the
     proxy keeps the proxy as the sole sidekick→agent gateway and lets
     bridge implementations (aiortc / node-webrtc / future) stay agent-agnostic.
 
+    *backend* is the active backend slug whose responses endpoint the
+    proxy routes (default ``hermes``). Override per deployment so the
+    bridge can target whichever agent backend the proxy is wired to.
+
     *api_server* is the legacy in-process APIServerAdapter reference, kept
-    for backwards compatibility while bridges are still embedded in hermes.
+    for backwards compatibility while embedded bridges existed.
     Standalone callers should leave it None and pass *proxy_url* instead.
     """
     if not AIOHTTP_AVAILABLE:
@@ -440,10 +448,11 @@ def register_routes(
             "[webrtc-signaling] aiortc not installed; routes will return 501",
         )
 
-    global _VOICE_CONFIG, _API_SERVER_REF, _PROXY_URL
+    global _VOICE_CONFIG, _API_SERVER_REF, _PROXY_URL, _BACKEND
     _VOICE_CONFIG = voice_config
     _API_SERVER_REF = api_server
     _PROXY_URL = proxy_url
+    _BACKEND = backend
 
     app.router.add_post("/v1/rtc/offer", handle_offer)
     app.router.add_post("/v1/rtc/ice", handle_ice)

@@ -27,7 +27,7 @@ Dispatch path:
     {type: 'dispatch', text} envelope back over the data channel.  The
     bridge's dispatch_listener (in dispatch_listener.py) handles those
     messages and calls _dispatch_to_agent() here, which POSTs to
-    ``<proxy_url>/api/hermes/responses`` and streams the SSE reply
+    ``<proxy_url>/api/<backend>/responses`` and streams the SSE reply
     back over the data channel as assistant transcript envelopes.
 
     Bridge → proxy → agent: the bridge does NOT POST directly to the
@@ -285,7 +285,7 @@ async def dispatch_to_agent(peer, utterance: str) -> None:
 async def _dispatch_to_agent(peer, utterance: str) -> None:
     """Run an agent turn for *utterance* and route the streaming reply.
 
-    Wire shape: POST <proxy_url>/api/hermes/responses with the OpenAI
+    Wire shape: POST <proxy_url>/api/<backend>/responses with the OpenAI
     Responses API body (input + conversation + stream).  The proxy
     forwards to the agent's /v1/responses, returns the SSE stream as-is.
     The bridge parses the Responses API event format
@@ -303,7 +303,8 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
        streaming-cursor on the bubble.
     """
     proxy_url = (peer.extra.get("proxy_url") or "http://127.0.0.1:3001").rstrip("/")
-    url = f"{proxy_url}/api/hermes/responses"
+    backend = peer.extra.get("backend") or "hermes"
+    url = f"{proxy_url}/api/{backend}/responses"
 
     conv_name = peer.extra.get("conv_name")
     body = {
