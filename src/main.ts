@@ -577,6 +577,15 @@ async function boot() {
   // Hide tip on scroll/resize since the bounding rect we computed is stale.
   window.addEventListener('scroll', hideTip, true);
   window.addEventListener('resize', hideTip);
+  // Hide tip on any pointerdown / touchstart — iOS synthesizes mouseover
+  // from a tap, so a tap on (e.g.) the pocket-lock button schedules the
+  // tooltip; by the time it fires 300ms later, the button's action has
+  // launched (lockscreen overlay) and the tooltip ends up rendered on
+  // top of it. Pointer / touch events fire BEFORE the synthesized mouse
+  // events on tap, so killing the tooltip here lands ahead of any
+  // schedule.
+  window.addEventListener('pointerdown', hideTip, true);
+  window.addEventListener('touchstart', hideTip, { capture: true, passive: true });
 
   // Drive the mic-button peak indicator on the composer mic (the
   // toolbar #btn-mic is gone; the composer mic is now the single

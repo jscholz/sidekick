@@ -1770,6 +1770,12 @@
   }
   .ambient-widget.expanded .amb-fc-lo { color: var(--muted); margin-left: 2px; }
 
-  @media (max-width: 860px) {
+  /* Hide threshold tuned to clear the composer's right-side action
+     buttons. Chat column is max-width:760px centered; widget at
+     right:16px starts overlapping the composer's right edge once the
+     viewport drops below ~1100px (760 + ~130 widget width + ~210
+     headroom). Was 860px which left a "widget over the send button"
+     band 860-1100px wide. */
+  @media (max-width: 1100px) {
     .ambient-widget { display: none; }
   }
