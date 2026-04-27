@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { sqlQuery } from '../../generic/sql.ts';
 import { HERMES_STORE_DB, HERMES_STATE_DB, HERMES_CLI } from './config.ts';
 import { searchSessionsImpl } from './search.ts';
+import { chainCteFromSession } from './cte.ts';
 
 const execFileP = promisify(execFile);
 
@@ -81,19 +82,7 @@ export async function lookupAllSessionUuids(name: string): Promise<string[]> {
     return rows.map((r: any) => r.uuid).filter(Boolean);
   }
   const sql = `
-    WITH RECURSIVE
-      up(id) AS (
-        SELECT id FROM sessions WHERE id='${name}'
-        UNION ALL
-        SELECT s.parent_session_id FROM sessions s JOIN up ON s.id = up.id
-          WHERE s.parent_session_id IS NOT NULL
-      ),
-      root(id) AS (SELECT id FROM up WHERE id IN (SELECT id FROM sessions WHERE parent_session_id IS NULL)),
-      chain(id) AS (
-        SELECT id FROM root
-        UNION ALL
-        SELECT s.id FROM sessions s JOIN chain ON s.parent_session_id = chain.id
-      )
+    WITH RECURSIVE ${chainCteFromSession(name)}
     SELECT DISTINCT id FROM chain
   `;
   const rows = await sqlQuery(HERMES_STATE_DB, sql);

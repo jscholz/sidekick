@@ -5,6 +5,7 @@
 import { sqlQuery } from '../../generic/sql.ts';
 import { HERMES_STORE_DB, HERMES_STATE_DB } from './config.ts';
 import { lookupSessionUuid } from './sessions.ts';
+import { chainCteFromSession } from './cte.ts';
 
 export async function handleHermesSessionMessages(req, res, name: string) {
   // id is either a sidekick conversation name ('sidekick-*') we need to
@@ -61,19 +62,7 @@ export async function handleHermesSessionMessages(req, res, name: string) {
     // The `before=<id>` cursor still works because messages.id is a
     // global autoincrement, not per-session.
     const whereCursor = before !== null ? `AND m.id < ${before}` : '';
-    const msgSql = `WITH RECURSIVE
-      up(id) AS (
-        SELECT id FROM sessions WHERE id='${uuid}'
-        UNION ALL
-        SELECT s.parent_session_id FROM sessions s JOIN up ON s.id = up.id
-          WHERE s.parent_session_id IS NOT NULL
-      ),
-      root(id) AS (SELECT id FROM up WHERE id IN (SELECT id FROM sessions WHERE parent_session_id IS NULL)),
-      chain(id) AS (
-        SELECT id FROM root
-        UNION ALL
-        SELECT s.id FROM sessions s JOIN chain ON s.parent_session_id = chain.id
-      )
+    const msgSql = `WITH RECURSIVE ${chainCteFromSession(uuid)}
       SELECT m.id, m.role, m.content, m.tool_name, m.timestamp FROM messages m
         WHERE m.session_id IN (SELECT id FROM chain) ${whereCursor}
         ORDER BY m.id DESC LIMIT ${limit + 1}`;
