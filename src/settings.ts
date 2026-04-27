@@ -183,15 +183,13 @@ const DEFAULTS = {
   // (e.g. bike rides). Mapped linearly to gain multiplier in feedback.ts.
   audioFeedbackVolume: 0.5,
   theme: 'dark',
-  // Composer-mic behavior toggles. Three orthogonal flags control the
+  // Composer-mic behavior toggles. Two orthogonal flags control the
   // four modes the unified mic button can run in (call=on/off ×
-  // autoSend=on/off), plus the input gesture (PTT vs click-toggle).
-  // Default is the historical "tap-to-record memo, land in composer"
-  // behavior — offline-capable, gives the user time to review before
-  // sending.
+  // autoSend=on/off). Gesture (tap vs hold) is detected at press time
+  // — see the mic-button handler in main.ts. Default is the historical
+  // "tap-to-record memo, land in composer" behavior — offline-capable,
+  // gives the user time to review before sending.
   //
-  //   micPTT      false → click toggles (start on click, stop on click)
-  //               true  → press-and-hold (start on pointerdown, stop on up)
   //   micCall     false → memo (MediaRecorder → /transcribe batch)
   //               true  → live WebRTC stream (interim transcripts)
   //   micAutoSend false → transcript lands in the composer for review
@@ -203,7 +201,6 @@ const DEFAULTS = {
   //   call=false autoSend=true  → memo, fire-and-forget on stop
   //   call=true  autoSend=false → live cursor-aware dictation in composer
   //   call=true  autoSend=true  → live chat-bubble streaming
-  micPTT: false,
   micCall: false,
   micAutoSend: false,
   // Hotkey strings — modifier+key tokens joined by '+' in any order

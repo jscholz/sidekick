@@ -1398,8 +1398,9 @@ async function boot() {
 
   // ── Unified composer-mic state + dispatch ──────────────────────────
   //
-  // Three orthogonal toggles drive the four modes:
-  //   settings.micPTT      false=click-toggle, true=press-and-hold
+  // Two orthogonal toggles drive the four modes (gesture is detected at
+  // press time — see the mic-button handler below for the tap-vs-hold
+  // state machine):
   //   settings.micCall     false=memo (offline-first), true=live WebRTC
   //   settings.micAutoSend false=land in composer, true=auto-dispatch
   //
@@ -1551,196 +1552,218 @@ async function boot() {
     }
   }
 
-  // ── Mic button — click + PTT-as-button gesture ─────────────────────
+  // ── Mic button — gesture-detected tap-vs-hold state machine ────────
   if (btnMic) {
-    // Two gesture modes, controlled by settings.micPTT (read at gesture
-    // start so a mid-session flip in the menu takes effect cleanly):
+    // Single gesture, mode auto-detected from press duration. No user
+    // setting; the press itself reveals intent. State machine:
     //
-    //   PTT off → tap toggles start/stop (legacy click semantics).
+    //   IDLE
+    //     pointerdown → start recording, t0=now, state=RECORDING
     //
-    //   PTT on  → pointerdown arms a 200ms hold timer. If the user
-    //             releases before the timer fires, NOTHING happens (the
-    //             tap is a no-op — we surface a transient hint so the
-    //             user understands PTT is active and they need to hold).
-    //             If the timer fires, startVoice() runs, the memo bar
-    //             swaps in for the actions row, and the mic button
-    //             takes pointer-capture so the rest of the gesture
-    //             routes here regardless of where the finger moves:
-    //               - Drag LEFT into the trash zone → bar paints red,
-    //                 label flips to "RELEASE TO DISCARD".
-    //               - Drag back over the bar → bar paints green,
-    //                 label flips back to "RELEASE TO SEND".
-    //               - Release in green → finalize via the existing
-    //                 send-on-stop path (respects autoSend).
-    //               - Release in red → discard the blob (memo.cancel +
-    //                 exitMemoMode).
-    //               - pointercancel (e.g. iOS interruption) → discard.
-    const PTT_HOLD_MS = 200;
-    let pttHoldTimer: ReturnType<typeof setTimeout> | null = null;
-    /** True once the hold timer fired and we kicked off startVoice — the
-     *  rest of the gesture (move/up) belongs to PTT, not to a tap. */
-    let pttArmed = false;
-    /** True when we should swallow the synthesized click that
-     *  pointerup fires after a PTT release (otherwise the click would
-     *  re-toggle voice). */
-    let pttSuppressClick = false;
-    /** Memo bar element — cached after the timer fires so pointermove
-     *  doesn't re-querySelector every frame. */
-    let pttMemoBar: HTMLElement | null = null;
-    /** True when the pointer is currently in the trash zone. Drives the
-     *  red-state class swap; only the transition writes to the DOM. */
-    let pttDiscardArmed = false;
+    //   RECORDING (mode pending)
+    //     pointerup: dur = now - t0
+    //       dur < TAP_THRESHOLD_MS → state=RECORDING_TOGGLE (keep running,
+    //         next tap stops). Drag-to-discard NOT reachable here — the
+    //         gesture surface ended on release; user must use the
+    //         trash button on the memo bar to discard a toggled memo.
+    //       dur ≥ TAP_THRESHOLD_MS → finalize (send/dispatch), state=IDLE
+    //     pointercancel/leave-mid-press → treat as pointerup
+    //
+    //   RECORDING_TOGGLE
+    //     pointerdown → finalize (send), state=IDLE
+    //     pointerup → no-op (the click that started this state ALSO fires
+    //       a pointerup; we ignore it once we've transitioned)
+    //
+    // While in RECORDING (HOLD path), the existing waveform-as-button
+    // drag-to-discard gesture stays live: pointer-capture on the mic
+    // button means pointermove/pointerup route here even when the
+    // finger drifts onto the memo bar. Drag LEFT past the trash
+    // bounding rect → discard-armed; release in red → discard.
+    const TAP_THRESHOLD_MS = 200;
 
-    /** Decide whether the pointer (in viewport coords) is over the
-     *  trash zone. We use the trash button's bounding rect plus a
-     *  generous left-side hit margin so the user doesn't have to be
-     *  pixel-precise — sliding finger leftward off the bar is a
-     *  natural "discard" gesture. */
+    type MicState = 'idle' | 'recording' | 'recording_toggle';
+    let micState: MicState = 'idle';
+    let pressStartedAt = 0;
+    /** True once we've classified the press as HOLD (release ≥ threshold).
+     *  Distinct from micState so the drag-to-discard pointermove handler
+     *  knows when the gesture surface is live. */
+    let holdActive = false;
+    /** Memo bar element — cached on press_down (HOLD path) so pointermove
+     *  doesn't re-querySelector every frame. */
+    let holdMemoBar: HTMLElement | null = null;
+    /** True when the pointer is currently in the trash zone (HOLD only).
+     *  Drives the red-state class swap; only transitions write to the DOM. */
+    let holdDiscardArmed = false;
+    /** Pointer ID currently captured for HOLD-mode drag-to-discard. */
+    let capturedPointerId: number | null = null;
+
+    /** Trash-zone hit test: trash button's bbox + generous left-side
+     *  margin so sliding off the bar leftward counts as discard. */
     function isOverTrashZone(clientX: number, clientY: number): boolean {
-      if (!pttMemoBar) return false;
-      const trash = pttMemoBar.querySelector('.memo-trash') as HTMLElement | null;
+      if (!holdMemoBar) return false;
+      const trash = holdMemoBar.querySelector('.memo-trash') as HTMLElement | null;
       if (!trash) return false;
       const r = trash.getBoundingClientRect();
-      // Vertical: anywhere within the bar's height. Horizontal: over
-      // the trash button OR to its LEFT (off-bar = still discard).
-      const barRect = pttMemoBar.getBoundingClientRect();
+      const barRect = holdMemoBar.getBoundingClientRect();
       const inV = clientY >= barRect.top - 8 && clientY <= barRect.bottom + 8;
       const inH = clientX <= r.right + 8;
       return inV && inH;
     }
 
-    btnMic.onclick = async (e) => {
-      if (pttSuppressClick) {
-        // Synthesized post-PTT click — eat it.
-        pttSuppressClick = false;
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        return;
+    /** Resolve the memo bar element after startVoice's async setup
+     *  completes (mic permission, MediaRecorder spin-up). Polls briefly
+     *  to cover iOS getUserMedia latency. Only relevant for memo mode
+     *  (call mode has no .memo-bar). */
+    function pollForMemoBar(tries: number): void {
+      if (settings.get().micCall) return;  // call mode — no memo bar
+      const bar = document.querySelector('.memo-bar') as HTMLElement | null;
+      if (bar) {
+        bar.classList.add('memo-bar-ptt');
+        holdMemoBar = bar;
+      } else if (tries > 0) {
+        setTimeout(() => pollForMemoBar(tries - 1), 30);
       }
-      // Quick tap with PTT enabled — surface a hint so the user
-      // understands why nothing happened. The actual no-op behavior
-      // falls out for free: the hold timer was cleared on pointerup
-      // before reaching the threshold, so pttArmed stayed false and
-      // no startVoice was kicked off.
-      if (settings.get().micPTT && !voiceActive()) {
-        status.setStatus('Hold to record (push-to-talk is on)');
-        return;
-      }
-      // Plain tap (PTT off, or already-active toggle). Toggle: stop if
-      // active, start if idle.
-      if (voiceActive()) {
-        await stopVoice();
-      } else {
-        await startVoice();
-      }
-    };
+    }
 
+    let holdActivationTimer: ReturnType<typeof setTimeout> | null = null;
+
+    /** Press-down: starts recording immediately (regardless of eventual
+     *  tap-vs-hold classification). The release-time duration check
+     *  decides whether to keep recording or stop. */
     btnMic.addEventListener('pointerdown', (e: PointerEvent) => {
-      // Only arm PTT if the user has it enabled AND nothing is already
-      // running. If memoActive / dictateActive / call open, treat the
-      // press as a tap (let the click handler stop it).
-      if (!settings.get().micPTT) return;
-      if (voiceActive()) return;
-      pttArmed = false;
-      pttSuppressClick = false;
-      pttDiscardArmed = false;
-      pttMemoBar = null;
-      const pointerId = e.pointerId;
-      pttHoldTimer = setTimeout(() => {
-        pttHoldTimer = null;
-        pttArmed = true;
-        // Capture the pointer so subsequent move/up events route here
-        // even when the finger drifts off the mic button (the user
-        // will be dragging leftward toward the trash zone). Without
-        // capture, leaving btnMic during the drag would fire
-        // pointerleave + lose track of the pointer until pointerup
-        // somewhere else in the document.
-        try { btnMic.setPointerCapture(pointerId); } catch {}
-        // Kick off the appropriate start path. Don't synthesize a click
-        // — the click would also fire on pointerup which we explicitly
-        // want to handle as the "release = finalize" signal, not
-        // "release = toggle off via click".
-        void startVoice();
-        // Visual cue for memo mode (existing CSS handles the styling).
-        // Cache the bar ref for the move handler. The bar is created
-        // synchronously inside memo.start → renderBar, but startVoice
-        // is async (mic permission, audio context resume) so we poll
-        // briefly until the DOM lands.
-        if (settings.get().micCall === false) {
-          const findBar = (tries: number) => {
-            const bar = document.querySelector('.memo-bar') as HTMLElement | null;
-            if (bar) {
-              bar.classList.add('memo-bar-ptt');
-              pttMemoBar = bar;
-            } else if (tries > 0) {
-              setTimeout(() => findBar(tries - 1), 30);
-            }
-          };
-          findBar(10);  // up to ~300ms — covers iOS getUserMedia delay
+      if (holdActivationTimer) { clearTimeout(holdActivationTimer); holdActivationTimer = null; }
+      if (micState === 'recording_toggle') {
+        // Second press on a tap-toggled recording — stop now.
+        e.preventDefault();
+        micState = 'idle';
+        void stopVoice();
+        return;
+      }
+      if (micState !== 'idle') return;
+      // Defensive: if voice somehow active without our state knowing
+      // (race / external trigger), treat press as a stop request.
+      if (voiceActive()) {
+        e.preventDefault();
+        void stopVoice();
+        return;
+      }
+      pressStartedAt = performance.now();
+      micState = 'recording';
+      holdActive = false;
+      holdDiscardArmed = false;
+      holdMemoBar = null;
+      capturedPointerId = e.pointerId;
+      // Capture pointer so move/up route here even if finger drifts
+      // onto the memo bar — needed for drag-to-discard during HOLD.
+      try { btnMic.setPointerCapture(e.pointerId); } catch {}
+      void startVoice();
+      try {
+        status.setStatus('Listening — release after a moment to send, or tap to keep recording', 'live');
+      } catch {}
+      // Once the press has lasted long enough to qualify as HOLD, flip
+      // holdActive so pointermove enables the drag-to-discard surface
+      // and start polling for the memo bar. Recording itself started
+      // on press_down — this boundary is purely visual / drag-zone
+      // activation. Cleared on pointerup/cancel.
+      holdActivationTimer = setTimeout(() => {
+        holdActivationTimer = null;
+        if (micState === 'recording') {
+          holdActive = true;
+          pollForMemoBar(10);
         }
-      }, PTT_HOLD_MS);
+      }, TAP_THRESHOLD_MS);
     });
 
     btnMic.addEventListener('pointermove', (e: PointerEvent) => {
-      if (!pttArmed) return;
-      if (!pttMemoBar) {
-        // Bar might not have rendered yet (mic permission still
-        // resolving). Try once.
-        pttMemoBar = document.querySelector('.memo-bar') as HTMLElement | null;
-        if (!pttMemoBar) return;
+      // Drag-to-discard surface only active during HOLD-confirmed recording
+      // (the brief window between press_down and release_classified is
+      // pre-classification; we'd rather not flicker the bar red during
+      // a finger that's about to lift as a tap).
+      if (!holdActive) return;
+      if (!holdMemoBar) {
+        holdMemoBar = document.querySelector('.memo-bar') as HTMLElement | null;
+        if (!holdMemoBar) return;
       }
       const overTrash = isOverTrashZone(e.clientX, e.clientY);
-      if (overTrash !== pttDiscardArmed) {
-        pttDiscardArmed = overTrash;
-        pttMemoBar.classList.toggle('discard-armed', overTrash);
+      if (overTrash !== holdDiscardArmed) {
+        holdDiscardArmed = overTrash;
+        holdMemoBar.classList.toggle('discard-armed', overTrash);
       }
     });
 
-    const pttRelease = (e: PointerEvent) => {
-      if (pttHoldTimer) { clearTimeout(pttHoldTimer); pttHoldTimer = null; }
-      if (!pttArmed) return;
-      pttArmed = false;
-      // Eat the click that pointerup synthesizes — otherwise it'd fire
-      // the toggle and stop voice via the click path.
-      pttSuppressClick = true;
+    /** Press-up classifier: short → toggle (keep running); long → finalize. */
+    const onPointerUp = (e: PointerEvent) => {
+      // Ignore pointerup events that don't correspond to a press we own.
+      if (micState !== 'recording') return;
+
+      const dur = performance.now() - pressStartedAt;
+      const isCancel = e.type === 'pointercancel';
+      try { btnMic.releasePointerCapture(e.pointerId); } catch {}
+      capturedPointerId = null;
+
+      if (dur < TAP_THRESHOLD_MS && !isCancel) {
+        // TAP → keep recording in toggle mode. Next tap stops it.
+        micState = 'recording_toggle';
+        try {
+          status.setStatus('Recording — tap mic again to send', 'live');
+        } catch {}
+        // Drag-to-discard surface goes away (release happened); user
+        // must use the trash button on the bar to discard manually.
+        if (holdMemoBar) {
+          holdMemoBar.classList.remove('discard-armed');
+        }
+        holdMemoBar = null;
+        holdDiscardArmed = false;
+        return;
+      }
+
+      // HOLD (or pointercancel mid-press) → finalize.
+      micState = 'idle';
+      const wasDiscard = (holdActive && holdDiscardArmed) || isCancel;
+      holdActive = false;
+      holdDiscardArmed = false;
+      const barRef = holdMemoBar;
+      holdMemoBar = null;
       e.preventDefault();
       e.stopPropagation();
-      try { btnMic.releasePointerCapture(e.pointerId); } catch {}
-      const wasDiscard = pttDiscardArmed || e.type === 'pointercancel';
-      pttDiscardArmed = false;
-      pttMemoBar = null;
-      // Defer one tick so any async startVoice() initialization (e.g.
-      // memo's MediaRecorder, WebRTC handshake) settles before we ask
-      // it to stop. stopVoice() handles the case where start hasn't
-      // fully completed yet (each primitive's stop is idempotent).
+      // Defer a tick so async startVoice's MediaRecorder / WebRTC
+      // handshake settles before we ask the same primitive to stop.
       setTimeout(() => {
         if (wasDiscard && memoActive) {
-          // User dragged to trash zone (or iOS interrupted) — discard
-          // the blob. memo.cancel + exitMemoMode skip the transcribe
-          // path entirely so the user gets nothing in the composer
-          // and nothing sent.
-          log('memo finish: path=ptt-discard (gesture released over trash zone)');
+          log('memo finish: path=hold-discard (gesture released over trash zone)');
           memo.cancel();
           exitMemoMode();
         } else {
-          // Normal release — same path as composerSend.click(): stop
-          // memo, run handleMemoResult with the captured autoSend.
+          if (barRef) barRef.classList.remove('discard-armed');
           void stopVoice();
         }
       }, 0);
     };
-    btnMic.addEventListener('pointerup', pttRelease);
-    btnMic.addEventListener('pointercancel', pttRelease);
-    // pointerleave: NOT a release trigger once the gesture is armed
-    // (pointer-capture guarantees move/up route here regardless of
-    // where the finger goes). But if the user drags off the button
-    // BEFORE the hold timer fires, we abort — otherwise the timer
-    // would expire and start a memo with no way to end it (pointerup
-    // would happen elsewhere without capture). This preserves the
-    // pre-PTT-as-button cancel-on-quick-drag behavior.
-    btnMic.addEventListener('pointerleave', () => {
-      if (pttArmed) return;  // gesture already armed; capture handles it
-      if (pttHoldTimer) { clearTimeout(pttHoldTimer); pttHoldTimer = null; }
+    btnMic.addEventListener('pointerup', onPointerUp);
+    btnMic.addEventListener('pointercancel', onPointerUp);
+    const cancelHoldTimer = () => {
+      if (holdActivationTimer) { clearTimeout(holdActivationTimer); holdActivationTimer = null; }
+    };
+    btnMic.addEventListener('pointerup', cancelHoldTimer);
+    btnMic.addEventListener('pointercancel', cancelHoldTimer);
+
+    // The btnMic.onclick handler is intentionally absent: gestures are
+    // dispatched entirely by the pointerdown / pointerup state machine
+    // above. A click handler here would race with the synthetic click
+    // browsers fire after pointerup and re-stop a just-tap-toggled
+    // recording. Keyboard activation (Enter/Space on focused button)
+    // is handled below with explicit handlers.
+    btnMic.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      // Keyboard tap = same semantics as a quick tap: toggle.
+      if (micState === 'recording_toggle' || voiceActive()) {
+        micState = 'idle';
+        void stopVoice();
+      } else if (micState === 'idle') {
+        micState = 'recording_toggle';
+        void startVoice();
+      }
     });
 
     // Esc / Enter while memo bar is up.
@@ -1770,7 +1793,7 @@ async function boot() {
     const s = settings.get();
     if (micModeMenu) {
       micModeMenu.querySelectorAll<HTMLButtonElement>('button.mic-toggle-row').forEach(b => {
-        const key = b.dataset.toggle as 'micPTT' | 'micCall' | 'micAutoSend' | undefined;
+        const key = b.dataset.toggle as 'micCall' | 'micAutoSend' | undefined;
         if (!key) return;
         const on = !!(s as any)[key];
         b.setAttribute('aria-checked', on ? 'true' : 'false');
@@ -1786,11 +1809,10 @@ async function boot() {
       micModeWrap.dataset.mode = mode;
     }
     if (btnMic) {
-      const ptt = s.micPTT ? 'Hold' : 'Tap';
       const what = s.micCall
         ? (s.micAutoSend ? 'live chat' : 'live dictation')
         : (s.micAutoSend ? 'memo (auto-send)' : 'voice memo');
-      btnMic.title = `${ptt} to ${s.micPTT && !voiceActive() ? 'record' : 'toggle'} — ${what}`;
+      btnMic.title = `Tap or hold — ${what}`;
     }
   }
   applyMicModeUi();
@@ -1817,7 +1839,7 @@ async function boot() {
     micModeMenu.querySelectorAll<HTMLButtonElement>('button.mic-toggle-row').forEach(b => {
       b.onclick = (e) => {
         e.stopPropagation();
-        const key = b.dataset.toggle as 'micPTT' | 'micCall' | 'micAutoSend' | undefined;
+        const key = b.dataset.toggle as 'micCall' | 'micAutoSend' | undefined;
         if (!key) return;
         const cur = !!(settings.get() as any)[key];
         settings.set(key, !cur);
