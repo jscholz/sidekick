@@ -1335,9 +1335,17 @@
   .composer .icon-btn-plain:hover { color: var(--fg); }
   .composer .icon-btn-plain svg { width: 22px; height: 22px; }
   /* Active = some voice path is live (memo bar showing, dictation
-     streaming, or call open). Sage tint matches the toolbar mic's
-     historical "live" color so the visual language is consistent. */
-  .composer #btn-mic.active { color: var(--primary); }
+     streaming, or call open). Solid red filled circle reads
+     unambiguously as "recording" — matches the universal record-
+     button convention. White icon on red background gives strong
+     contrast. (Don't fill the SVG — the mic is line-art with open
+     sub-paths; filling produces a muddled shape. Stroke-on-fill
+     is the clean record-button look.) */
+  .composer #btn-mic.active {
+    color: #fff;
+    background: var(--danger);
+    border-radius: 50%;
+  }
 
   /* Mic-mode dropdown — chevron sits flush right of the mic button to
      swap between Memo (default) and Dictate (streaming STT to composer).
