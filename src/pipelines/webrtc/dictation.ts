@@ -97,7 +97,15 @@ function dispatchNow(): void {
     diag('[dictation] dispatch send failed (channel not open?)');
     return;
   }
-  try { playFeedback('send'); } catch { /* feedback is best-effort */ }
+  // No 'send' chime here: in WebRTC voice mode the dispatch is a
+  // synchronous data-channel write (no network round-trip from the
+  // PWA's POV — the bridge is the one talking to the agent). Firing
+  // 'send' here means commit and send chimes overlap by microseconds
+  // and merge audibly into one merged tone. Instead, main.ts fires
+  // 'send' on the first assistant delta arriving over the data
+  // channel — i.e. when the AGENT has actually received the
+  // utterance and started replying. Real time gap, real meaning:
+  // commit = "I heard the over"; send = "agent is replying."
 }
 
 function armSilenceTimer(): void {

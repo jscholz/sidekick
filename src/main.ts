@@ -822,6 +822,14 @@ async function boot() {
       }
       webrtcSuppress.onAssistantDelta();
       if (!dcAssistantStreamingId) {
+        // First delta of an assistant turn — the agent received our
+        // dispatch and is now replying. Fires the 'send' chime here
+        // (NOT at dispatch time in dictation.ts) so the user hears a
+        // real time gap between 'commit' (over detected, local) and
+        // 'send' (agent is replying, server-acknowledged). In WebRTC
+        // mode the local dispatch is synchronous, so colocating the
+        // two chimes there merged them into one tone.
+        try { playFeedback('send'); } catch { /* feedback is best-effort */ }
         dcAssistantStreamingId = `dc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         chat.addLine(getAgentLabel(), ev.text, 'agent streaming', {
           markdown: true,
