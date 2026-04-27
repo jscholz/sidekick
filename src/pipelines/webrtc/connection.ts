@@ -367,12 +367,17 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
   // now (see dictation.ts). The bridge stays a thin transcript pipe
   // and dispatches only when the PWA sends {type:'dispatch', text}
   // over the data channel.
+  // Use loadOrSeed instead of readList so that if the user starts a call
+  // BEFORE ever opening the settings panel, the seed file still
+  // populates IDB and reaches the bridge. readList alone returned null
+  // on first-boot (settings panel hadn't been opened yet to seed IDB),
+  // so the offer went out with keyterms=[] and STT ran un-biased.
   let keyterms: string[] = [];
   try {
-    const { readList } = await import('../../keyterms.ts');
-    const saved = await readList();
-    if (saved && saved.length) keyterms = saved;
+    const { loadOrSeed } = await import('../../keyterms.ts');
+    keyterms = (await loadOrSeed()) || [];
   } catch {}
+  log('[webrtc] offer keyterms=', keyterms.length, keyterms.length ? `(first: ${keyterms[0]})` : '');
   const offerPayload = {
     sdp: pc.localDescription?.sdp ?? '',
     type: pc.localDescription?.type ?? 'offer',

@@ -149,6 +149,14 @@ async def handle_offer(request: "web.Request") -> "web.Response":
         ]
     else:
         peer.extra["keyterms"] = []
+    # Log count unconditionally so an empty offer is visible too — the
+    # only signal we have for "PWA didn't send anything." Without this,
+    # an empty list silently slips through and STT runs un-biased.
+    logger.info(
+        "[signaling] peer %s offer keyterms=%d %s",
+        peer_id, len(peer.extra["keyterms"]),
+        f"first={peer.extra['keyterms'][0]!r}" if peer.extra["keyterms"] else "(empty)",
+    )
 
     # Defer to bridge modules to install ontrack / outbound track wiring.
     # The dispatch listener handles inbound DataChannel control messages

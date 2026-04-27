@@ -1844,6 +1844,13 @@ async function boot() {
         const cur = !!(settings.get() as any)[key];
         settings.set(key, !cur);
         applyMicModeUi();
+        // Closing call-mode WHILE a call is open should end the call —
+        // otherwise the WebRTC peer keeps streaming and the user has to
+        // click the mic to actually stop. Tapping the toggle is an
+        // unambiguous "end this" signal.
+        if (key === 'micCall' && cur && voiceActive()) {
+          void stopVoice();
+        }
         // Keep menu open so the user can flip multiple toggles in one
         // pass (matches iOS Control Center behavior). Tap outside to
         // close.
@@ -1890,7 +1897,13 @@ async function boot() {
     const t = e.target as HTMLElement | null;
     if (t) {
       if (t.classList.contains('hotkey-input')) return;
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || (t as any).isContentEditable) return;
+      // Modifier-key combos (Cmd/Ctrl + Shift + key) aren't normal
+      // typing — fire them everywhere INCLUDING input fields, so the
+      // user can hit Cmd+Shift+D from inside the composer to toggle
+      // mic without leaving the textarea. Without this, Chrome's
+      // Cmd+Shift+D (bookmark all tabs) wins via browser default.
+      const isShortcut = (e.metaKey || e.ctrlKey) && e.shiftKey;
+      if (!isShortcut && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || (t as any).isContentEditable)) return;
     }
     const s = settings.get();
     const matches = (combo: string): boolean => {
@@ -1922,6 +1935,12 @@ async function boot() {
       // Refresh the menu UI in case it's open so the toggle reflects state.
       applyMicModeUi();
       status.setStatus(`Call mode: ${!s.micCall ? 'on' : 'off'}`, null);
+      // Toggling call-mode OFF while a call is active should end it —
+      // mirrors the menu-click behavior so hotkey users get the same
+      // "I changed my mind" intent.
+      if (s.micCall && voiceActive()) {
+        void stopVoice();
+      }
       return;
     }
     if (matches(s.hotkeyAutoSend)) {
