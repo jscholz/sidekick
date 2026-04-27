@@ -9,7 +9,7 @@
  */
 
 import { log } from '../util/log.ts';
-import { getAudioCtx } from '../audio/unlock.ts';
+import { getAudioCtx } from './audio-unlock.ts';
 // Classic pipeline gone: getActiveStream + tts imports removed. Pocket-lock
 // keeps the cover overlay + status text + idle meter; per-turn player UI
 // is hidden via display:none in CSS while the WebRTC call surface owns

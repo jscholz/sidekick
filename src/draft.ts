@@ -19,7 +19,7 @@
  */
 
 import { diag } from './util/log.ts';
-import { getAudioCtx } from './audio/unlock.ts';
+import { getAudioCtx } from './ios/audio-unlock.ts';
 import { autoScroll } from './chat.ts';
 
 let transcriptEl = null;

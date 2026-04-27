@@ -49,9 +49,11 @@ true`) and load the right pipeline.
 ## Shared audio primitives
 
 Not pipeline-specific. Stay in `src/audio/`:
-- `unlock.ts` — iOS AudioContext gesture-unlock
 - `session.ts` — MediaSession integration for lockscreen / BT headset
 - `audio-processor.js` — AudioWorklet for mic peak + buffer
 - `micMeter.ts` — pub/sub for mic peak UI feedback
 - `feedback.ts` — click / receive sound effects
 - `memo.ts` — voice-memo MediaRecorder path (its own UX, not a pipeline)
+
+iOS-specific (in `src/ios/`):
+- `audio-unlock.ts` — iOS AudioContext gesture-unlock

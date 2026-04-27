@@ -15,7 +15,7 @@ import * as backend from './backend.ts';
 import * as sessionDrawer from './sessionDrawer.ts';
 import * as cmdkPalette from './cmdkPalette.ts';
 import * as gateway from './gateway.ts';
-import { unlock, getAudioCtx } from './audio/unlock.ts';
+import { unlock, getAudioCtx } from './ios/audio-unlock.ts';
 import * as audioSession from './audio/session.ts';
 import * as capture from './audio/capture.ts';
 import * as fakeLock from './ios/fakeLock.ts';

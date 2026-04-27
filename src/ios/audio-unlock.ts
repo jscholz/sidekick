@@ -1,6 +1,9 @@
 /**
- * @fileoverview iOS audio unlock — must run synchronously inside a user gesture.
- * Creates the AudioContext and primes the <audio> element.
+ * @fileoverview iOS-specific audio unlock — gesture-bound AudioContext
+ * + route-change rebuild. Required because iOS Safari refuses to play
+ * audio without a user-gesture-tied resume() and re-suspends on
+ * audio-route changes (BT/wired plug). Desktop browsers don't need
+ * either dance.
  */
 
 import { log } from '../util/log.ts';

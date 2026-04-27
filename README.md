@@ -136,14 +136,15 @@ src/
 ├── settings.ts          persistent settings (localStorage), model picker
 ├── draft.ts             unsent-voice-transcript block (live interim + commit)
 ├── attachments.ts       composer image picker + chips + model-capability gate
-├── fakeLock.ts          pocket-lock overlay (swipe-to-unlock, mic meter)
 ├── wakeLock.ts          ref-counted Screen Wake Lock (shared across owners)
 ├── queue.ts             IndexedDB outbox (audio blobs + text messages)
 ├── voiceMemos.ts        memo persistence (IndexedDB) + waveform extraction
 ├── memoCard.ts          memo card rendering (play, waveform, transcript)
+├── ios/
+│   ├── fakeLock.ts          pocket-lock overlay (swipe-to-unlock, mic meter)
+│   └── audio-unlock.ts      AudioContext + gesture-unlock for iOS
 ├── audio/
 │   ├── capture.ts           shared MediaStream owner (memo + streaming)
-│   ├── unlock.ts            AudioContext + gesture-unlock for iOS
 │   ├── session.ts           Media Session + audioSession.type + silent keepalive
 │   ├── memo.ts              MediaRecorder-based dictation bar
 │   ├── micMeter.ts          per-frame peak meter for barge-in + UI

@@ -10,7 +10,7 @@
 import { log } from '../util/log.ts';
 import * as audioSession from './session.ts';
 import * as capture from './capture.ts';
-import { getAudioCtx } from './unlock.ts';
+import { getAudioCtx } from '../ios/audio-unlock.ts';
 import { playFeedback } from './feedback.ts';
 
 let analyser = null;
