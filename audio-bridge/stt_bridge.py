@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, AsyncIterator, Optional
 
@@ -81,15 +82,25 @@ MAX_PCM_QUEUE = 100
 #
 # Frame energy (RMS over the 20 ms s16 PCM frame). int16 samples range
 # ±32767; ambient room noise on a Pi-attached USB mic tends to sit at
-# RMS 80-300, normal speech peaks 2000-8000, shouting 10k+. 800 is a
-# conservative "above ambient, below confused-with-loud-typing" floor —
-# tune in stt-bridge logs once Jonathan tests with his actual mic.
-VAD_RMS_THRESHOLD = 800
+# RMS 80-300, normal speech peaks 2000-8000, shouting 10k+.
+#
+# 2026-04-27: lowered from 800 → 300 after Jonathan's first run-through
+# couldn't fire barge on what felt like normal speaking volume —
+# evidently his desktop mic capture lands lower than the back-of-the-
+# envelope range. Tunable via SIDEKICK_VAD_RMS_THRESHOLD env var so we
+# don't have to ship a code change every time we move the bar.
+VAD_RMS_THRESHOLD = int(os.environ.get("SIDEKICK_VAD_RMS_THRESHOLD", "300"))
 
 # Consecutive 20 ms frames over threshold required to fire a barge.
 # 8 * 20 ms = 160 ms — long enough to filter cough/keypress transients,
 # short enough that a deliberate "stop" interrupts within ~one syllable.
-VAD_HOLD_FRAMES = 8
+VAD_HOLD_FRAMES = int(os.environ.get("SIDEKICK_VAD_HOLD_FRAMES", "8"))
+
+# Periodic RMS observability while TTS is active. Every N frames during
+# a TTS-active window, log the running max RMS + count of over-threshold
+# frames. Lets us see "during this TTS turn, the mic peaked at NNN"
+# without a hot path debug toggle. 50 frames * 20 ms = 1 Hz.
+VAD_OBS_LOG_EVERY = 50
 
 
 def attach(peer, *, voice_config: VoiceConfig, api_server: Any = None) -> None:
@@ -217,6 +228,12 @@ async def _run_stt(
         # on peer.extra so dispatch_to_agent can also see it if needed
         # later, and so it survives generator restarts in error paths.
         vad_hold = 0
+        # Observability state — sampled and logged every VAD_OBS_LOG_EVERY
+        # frames so we can see what RMS values the mic is actually
+        # producing during a TTS turn without flooding the log.
+        obs_frames = 0
+        obs_max_rms = 0
+        obs_above = 0
         while True:
             chunk = await pcm_q.get()
             if chunk is None:
@@ -225,20 +242,34 @@ async def _run_stt(
             if tts_active:
                 if not was_active:
                     logger.info(
-                        "[stt-bridge] peer %s: gating mic→Deepgram (TTS active)",
-                        peer.peer_id,
+                        "[stt-bridge] peer %s: gating mic→Deepgram (TTS active, vad_threshold=%d, hold=%d)",
+                        peer.peer_id, VAD_RMS_THRESHOLD, VAD_HOLD_FRAMES,
                     )
                     was_active = True
+                # Compute RMS once — used by both VAD and observability.
+                rms = _frame_rms(chunk)
+                obs_frames += 1
+                if rms > obs_max_rms:
+                    obs_max_rms = rms
+                if rms >= VAD_RMS_THRESHOLD:
+                    obs_above += 1
+                if obs_frames >= VAD_OBS_LOG_EVERY:
+                    logger.info(
+                        "[stt-bridge] peer %s: vad-obs frames=%d max_rms=%d above_thresh=%d/%d (need %d consecutive ≥%d)",
+                        peer.peer_id, obs_frames, obs_max_rms, obs_above, obs_frames,
+                        VAD_HOLD_FRAMES, VAD_RMS_THRESHOLD,
+                    )
+                    obs_frames = 0
+                    obs_max_rms = 0
+                    obs_above = 0
                 # Simple VAD: RMS over the 20ms frame.
                 # Fires when:
                 #   1) tts_track is active (we're playing TTS),
                 #   2) RMS exceeds VAD_RMS_THRESHOLD (above ambient),
                 #   3) sustained for VAD_HOLD_FRAMES consecutive frames
                 #      (~160ms hold).
-                # Threshold values are constants at the top of the module
-                # so they can be tuned without rewiring.
+                # Tunable via SIDEKICK_VAD_RMS_THRESHOLD / SIDEKICK_VAD_HOLD_FRAMES.
                 if not peer.extra.get("barge_fired_this_turn"):
-                    rms = _frame_rms(chunk)
                     if rms >= VAD_RMS_THRESHOLD:
                         vad_hold += 1
                         if vad_hold >= VAD_HOLD_FRAMES:
@@ -255,14 +286,17 @@ async def _run_stt(
                 continue
             if was_active:
                 logger.info(
-                    "[stt-bridge] peer %s: resuming mic→Deepgram (TTS done)",
-                    peer.peer_id,
+                    "[stt-bridge] peer %s: resuming mic→Deepgram (TTS done; final-turn max_rms=%d above_thresh=%d/%d)",
+                    peer.peer_id, obs_max_rms, obs_above, obs_frames,
                 )
                 was_active = False
                 # TTS turn ended — reset the once-per-turn barge gate
                 # and the hold counter so the NEXT turn can fire again.
                 peer.extra.pop("barge_fired_this_turn", None)
                 vad_hold = 0
+                obs_frames = 0
+                obs_max_rms = 0
+                obs_above = 0
             yield chunk
 
     try:

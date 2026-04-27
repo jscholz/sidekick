@@ -28,6 +28,12 @@ Environment variables:
                           utterances to ``<proxy>/api/<be>/responses``;
                           ``<be>`` is this value. Set to whatever slug
                           the proxy is wired to dispatch.
+    SIDEKICK_AUDIO_LOG_FILE  optional path to a log file. Falls back to
+                          ``/tmp/sidekick-audio.log`` if the bridge is
+                          launched under systemd (so logs are still
+                          tailable when journald isn't capturing this
+                          unit for whatever reason). Set to empty
+                          string to disable file logging.
     DEEPGRAM_API_KEY      required for the default deepgram STT provider
 """
 
@@ -35,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 from aiohttp import web
 
@@ -43,10 +50,22 @@ from signaling import register_routes
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=os.environ.get("SIDEKICK_AUDIO_LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    level = os.environ.get("SIDEKICK_AUDIO_LOG_LEVEL", "INFO").upper()
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+
+    # File handler — defaults to /tmp/sidekick-audio.log so logs are
+    # tailable even when user-level journald isn't capturing this unit
+    # (observed 2026-04-27 — sidekick.service logs fine, sidekick-audio
+    # silently doesn't). `tail -f` works regardless of journald state.
+    log_file = os.environ.get("SIDEKICK_AUDIO_LOG_FILE", "/tmp/sidekick-audio.log")
+    if log_file:
+        try:
+            handlers.append(logging.FileHandler(log_file))
+        except Exception as e:
+            print(f"[bridge] couldn't open {log_file}: {e}", file=sys.stderr)
+
+    logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
 
     host = os.environ.get("SIDEKICK_AUDIO_HOST", "127.0.0.1")
     port = int(os.environ.get("SIDEKICK_AUDIO_PORT", "8643"))

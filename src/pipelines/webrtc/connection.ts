@@ -180,24 +180,32 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
   setState('requesting-mic');
   let micStream: MediaStream;
   try {
-    // echoCancellation/noiseSuppression on for STT clarity (the bridge
-    // sees AEC'd mic samples, which is what Deepgram wants). AGC off:
-    // on iOS Safari AGC amplifies remote-audio echo above the AEC
-    // threshold and we lose echo cancellation on speakerphone; on
-    // desktop Chrome AGC ducks the mic when system output is loud.
-    // Production WebRTC voice apps (Discord web, Meet) leave AGC off
-    // in voice-call constraints.
+    // ALL DSP OFF on the WebRTC mic. Reasoning:
     //
-    // Note: client-side barge detection is gone — the bridge runs an
-    // RMS VAD on raw pre-DSP PCM and sends `{type:'barge'}` over the
-    // data channel. Browser AEC ducks anything correlated with
-    // system output, so a client-side mic analyser cannot reliably
-    // see user voice during TTS regardless of constraints. See
-    // docs/SIDEKICK_AUDIO_PROTOCOL.md for the new envelope.
+    //   - Echo handling is already SERVER-SIDE: the bridge's STT gate
+    //     swaps mic frames for silence whenever its outbound TTS track
+    //     is active (audio-bridge/stt_bridge.py). So Deepgram never
+    //     sees a TTS-bleed echo, regardless of browser AEC state.
+    //   - Browser AEC actively REDUCES the mic signal whenever it
+    //     correlates with system output. With server-side VAD checking
+    //     for user-voice-during-TTS to fire barge, AEC means the
+    //     bridge sees attenuated audio (max_rms ~140 instead of
+    //     2000+ during normal speech). Diagnosed 2026-04-27 with
+    //     /tmp/sidekick-audio.log vad-obs lines: user speaking during
+    //     TTS lands at max_rms ~140 with AEC on, well below any
+    //     reasonable VAD threshold.
+    //   - noiseSuppression similarly suppresses anything it considers
+    //     "background." Mac built-in mic + speakers tend to make AI-
+    //     voice-agent setups look noisy from the browser's POV.
+    //   - autoGainControl was already off (ducks mic on loud output).
+    //
+    // Net: trust the bridge to handle echo via server-side gating,
+    // get clean unprocessed audio over the wire. Matches Pipecat /
+    // LiveKit production WebRTC voice patterns.
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
+        echoCancellation: false,
+        noiseSuppression: false,
         autoGainControl: false,
       },
     });
