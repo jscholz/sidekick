@@ -106,7 +106,14 @@ let optimisticActiveId: string | null = null;
  *  getViewed() to decide whether to render. Must stay populated whenever
  *  there's a chat on screen, even one that's not yet persisted. */
 let viewedSessionId: string | null = null;
-export function setViewed(id: string | null) { viewedSessionId = id; }
+export function setViewed(id: string | null) {
+  const prev = viewedSessionId;
+  viewedSessionId = id;
+  if (prev !== id) {
+    const stack = (new Error()).stack?.split('\n').slice(2, 4).map(s => s.trim()).join(' / ') || 'unknown';
+    log(`[chat-trace] setViewed ${prev?.slice(0,8) ?? 'null'} → ${id?.slice(0,8) ?? 'null'} caller=${stack}`);
+  }
+}
 export function getViewed(): string | null { return viewedSessionId; }
 
 function fmtRelativeTime(epochSec: number): string {
@@ -124,6 +131,8 @@ function fmtRelativeTime(epochSec: number): string {
  *  drawer that's meant to feel instant. With the cache, the first tap
  *  paints in <100ms and the server fetch reconciles afterwards. */
 export async function refresh() {
+  const stack = (new Error()).stack?.split('\n').slice(2, 4).map(s => s.trim()).join(' / ') || 'unknown';
+  log(`[chat-trace] sessionDrawer.refresh()  viewed=${viewedSessionId?.slice(0,8) ?? 'null'} optActive=${optimisticActiveId?.slice(0,8) ?? 'null'} caller=${stack}`);
   const listEl = document.getElementById('sessions-list');
   if (!listEl) return;
   if (!backend.capabilities().sessionBrowsing) { listEl.innerHTML = ''; return; }

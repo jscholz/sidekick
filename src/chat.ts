@@ -4,7 +4,7 @@
 
 import { escapeHtml } from './util/dom.ts';
 import { miniMarkdown } from './util/markdown.ts';
-import { diag } from './util/log.ts';
+import { diag, log } from './util/log.ts';
 
 let transcriptEl = null;
 /** @type {HTMLElement|null} */
@@ -296,6 +296,8 @@ export function addLine(speaker: string, text: string, cls = '', opts: {
   batch?: boolean;
 } = {}) {
   if (!transcriptEl) return null;
+  const textPreview = (text || '').replace(/\s+/g, ' ').slice(0, 50);
+  log(`[chat-trace] chat.addLine speaker=${JSON.stringify(speaker)} cls=${JSON.stringify(cls)} text=${JSON.stringify(textPreview)}`);
   const div = document.createElement('div');
   div.className = `line ${cls}`;
   if (opts.replyId) div.dataset.replyId = opts.replyId;
@@ -487,6 +489,9 @@ export function addSystemLine(text) {
 
 /** Clear transcript and persisted state (used by refresh). */
 export function clear() {
+  const before = transcriptEl ? (transcriptEl.textContent || '').replace(/\s+/g, ' ').slice(0, 60) : '';
+  const stack = (new Error()).stack?.split('\n').slice(2, 5).map(s => s.trim()).join(' / ') || 'unknown';
+  log(`[chat-trace] chat.clear() — before=${JSON.stringify(before)} caller=${stack}`);
   if (transcriptEl) transcriptEl.innerHTML = '';
   viewedSessionIdRef = null;
   restoredViewedSessionId = null;
