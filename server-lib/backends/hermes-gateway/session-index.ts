@@ -29,11 +29,42 @@ function indexPath(): string {
   return path.join(path.dirname(HERMES_STATE_DB), 'sessions', 'sessions.json');
 }
 
+/** Hermes' gateway/mirror.py writes `updated_at` / `created_at` as
+ *  `datetime.now().isoformat()` — a NAIVE timestamp in the server's
+ *  LOCAL timezone, with no offset/Z marker. JS Date.parse interprets
+ *  unmarked ISO strings as the BROWSER's local time, which gives a
+ *  TZ-mismatched result whenever the user is in a different timezone
+ *  from the server (Pi in Philly, browser in London → 5h drift).
+ *
+ *  Fix at the proxy boundary: the timestamp's source IS the server,
+ *  so the server can interpret its own naive ISO correctly via
+ *  `new Date(naive)` (Node parses naive ISO as server-local) and
+ *  re-emit as a Z-tagged UTC ISO. The PWA then parses unambiguously. */
+function normalizeNaiveTimestamp(s: string | null | undefined): string | null {
+  if (!s || typeof s !== 'string') return null;
+  // Already has a TZ marker (Z, +HH:MM, -HH:MM)? Trust it.
+  if (/[Zz]$|[+-]\d{2}:\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  return d.toISOString();
+}
+
 export async function loadSessionsIndex(): Promise<Record<string, SessionsIndexEntry>> {
   try {
     const raw = await fs.readFile(indexPath(), 'utf-8');
     const parsed = JSON.parse(raw);
-    return (parsed && typeof parsed === 'object') ? parsed : {};
+    if (!parsed || typeof parsed !== 'object') return {};
+    // Normalize naive timestamps to UTC ISO so downstream consumers
+    // (the drawer's "5h ago") render correctly regardless of which
+    // TZ the browser is in.
+    for (const entry of Object.values(parsed)) {
+      if (entry && typeof entry === 'object') {
+        const e = entry as SessionsIndexEntry;
+        e.updated_at = normalizeNaiveTimestamp(e.updated_at) || undefined;
+        e.created_at = normalizeNaiveTimestamp(e.created_at) || undefined;
+      }
+    }
+    return parsed;
   } catch {
     return {};
   }
