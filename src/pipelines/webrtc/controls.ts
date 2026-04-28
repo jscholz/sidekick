@@ -23,7 +23,20 @@ import * as conn from './connection.ts';
 import * as dictation from './dictation.ts';
 import * as suppress from './suppress.ts';
 import * as settings from '../../settings.ts';
+import * as backend from '../../backend.ts';
 import { log, diag } from '../../util/log.ts';
+
+/** Resolve the (sessionId, chatId) pair to ship in the offer payload.
+ *  hermes-gateway uses chat_ids; everything else uses the legacy
+ *  conv_name/sessionId. The bridge picks the dispatch route based on
+ *  which one is set — see audio-bridge/stt_bridge.py:_dispatch_to_agent. */
+function resolveCallSession(): { sessionId: string | null; chatId: string | null } {
+  const id = opts?.getSessionId() ?? null;
+  if (backend.name() === 'hermes-gateway') {
+    return { sessionId: null, chatId: id };
+  }
+  return { sessionId: id, chatId: null };
+}
 
 export interface ControlsOpts {
   getSessionId: () => string | null;
@@ -117,7 +130,7 @@ export async function toggleCall(): Promise<void> {
   const mode: conn.CallMode = settings.get().tts ? 'talk' : 'stream';
   log('[webrtc-controls] toggleCall open mode=', mode);
   try {
-    await conn.open(mode, { sessionId: opts?.getSessionId() ?? null });
+    await conn.open(mode, resolveCallSession());
   } catch (e: any) {
     diag('[webrtc-controls] open failed', e?.message);
     if (opts?.onStatus) opts.onStatus(`Call error: ${e?.message ?? e}`, 'err');
@@ -137,7 +150,7 @@ export async function openCall(mode: conn.CallMode): Promise<void> {
   }
   log('[webrtc-controls] openCall mode=', mode);
   try {
-    await conn.open(mode, { sessionId: opts?.getSessionId() ?? null });
+    await conn.open(mode, resolveCallSession());
   } catch (e: any) {
     diag('[webrtc-controls] openCall failed', e?.message);
     if (opts?.onStatus) opts.onStatus(`Call error: ${e?.message ?? e}`, 'err');

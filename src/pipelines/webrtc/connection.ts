@@ -177,7 +177,10 @@ export function dispatch(text: string): boolean {
   }
 }
 
-export async function open(mode: CallMode, opts?: { sessionId?: string | null }): Promise<void> {
+export async function open(
+  mode: CallMode,
+  opts?: { sessionId?: string | null; chatId?: string | null },
+): Promise<void> {
   if (active) {
     log('[webrtc] open() called but session already active; closing first');
     await close();
@@ -350,11 +353,17 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     throw e;
   }
 
-  // POST the offer. conv_name is sidekick's stable conversation
-  // identifier (sidekick-<slug>), the same key classic-mode chat sends
-  // — the audio bridge passes it as body.conversation when dispatching
-  // to /api/hermes/responses so voice and text turns chain through one
-  // session row.
+  // POST the offer. Two routing identifiers, mutually exclusive in
+  // practice but both fields are forwarded so the bridge can pick:
+  //
+  //   conv_name — sidekick's legacy conversation slug (sidekick-<…>),
+  //               used when the active backend is the /v1/responses
+  //               path. Bridge passes it as body.conversation when
+  //               dispatching to /api/<backend>/responses.
+  //   chat_id   — hermes-gateway path, opaque PWA-minted UUID per
+  //               conversation. When present, bridge dispatches to
+  //               /api/sidekick/messages with {chat_id, text}. Set
+  //               only when the active backend is hermes-gateway.
   //
   // keyterms: per-user STT vocabulary biasing, sourced from the PWA's
   // IDB-backed list (src/keyterms.ts). The bridge merges this into the
@@ -378,13 +387,14 @@ export async function open(mode: CallMode, opts?: { sessionId?: string | null })
     keyterms = (await loadOrSeed()) || [];
   } catch {}
   log('[webrtc] offer keyterms=', keyterms.length, keyterms.length ? `(first: ${keyterms[0]})` : '');
-  const offerPayload = {
+  const offerPayload: Record<string, unknown> = {
     sdp: pc.localDescription?.sdp ?? '',
     type: pc.localDescription?.type ?? 'offer',
     mode,
     conv_name: opts?.sessionId || null,
     keyterms,
   };
+  if (opts?.chatId) offerPayload.chat_id = opts.chatId;
 
   let answer: { peer_id: string; sdp: string; type: string } | null = null;
   try {

@@ -59,7 +59,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 from config import VoiceConfig
 from providers import Transcript, get_stt_provider
@@ -460,34 +460,45 @@ async def dispatch_to_agent(peer, utterance: str) -> None:
 async def _dispatch_to_agent(peer, utterance: str) -> None:
     """Run an agent turn for *utterance* and route the streaming reply.
 
-    Wire shape: POST <proxy_url>/api/<backend>/responses with the OpenAI
-    Responses API body (input + conversation + stream).  The proxy
-    forwards to the agent's /v1/responses, returns the SSE stream as-is.
-    The bridge parses the Responses API event format
-    (response.output_text.delta + response.completed) and mirrors text
-    deltas onto the data channel.
+    Two routing paths, selected by which identifier the offer payload
+    carried:
 
-    Two sinks for the reply tokens:
+    - **chat_id present** (hermes-gateway backend): POST
+      <proxy_url>/api/sidekick/messages with {chat_id, text}. The proxy
+      forwards via WebSocket to the hermes sidekick platform adapter;
+      the SSE response carries `event: <envelope_type>` frames with the
+      adapter envelope (reply_delta / reply_final / typing / etc) as the
+      data payload.
+
+    - **chat_id absent** (legacy): POST <proxy_url>/api/<backend>/responses
+      with the OpenAI Responses API body. The proxy forwards to the
+      agent's /v1/responses; SSE carries response.output_text.delta /
+      response.completed events.
+
+    Both paths feed the same two sinks:
 
     1. The peer's TTS bridge (talk mode) — registers a queue under
        peer.extra["tts_text_queue"]; we push text deltas into it.
 
     2. The data channel — the PWA renders the assistant bubble from
        these envelopes.  A terminal {role:'assistant', is_final:true}
-       fires after the SSE stream completes so the PWA can drop the
+       fires after the stream completes so the PWA can drop the
        streaming-cursor on the bubble.
     """
     proxy_url = (peer.extra.get("proxy_url") or "http://127.0.0.1:3001").rstrip("/")
-    backend = peer.extra.get("backend") or "hermes"
-    url = f"{proxy_url}/api/{backend}/responses"
-
-    conv_name = peer.extra.get("conv_name")
-    body = {
-        "input": utterance,
-        "stream": True,
-    }
-    if conv_name:
-        body["conversation"] = conv_name
+    chat_id = peer.extra.get("chat_id")
+    if chat_id:
+        url = f"{proxy_url}/api/sidekick/messages"
+        body: Dict[str, Any] = {"chat_id": chat_id, "text": utterance}
+        route = "sidekick-platform"
+    else:
+        backend = peer.extra.get("backend") or "hermes"
+        url = f"{proxy_url}/api/{backend}/responses"
+        conv_name = peer.extra.get("conv_name")
+        body = {"input": utterance, "stream": True}
+        if conv_name:
+            body["conversation"] = conv_name
+        route = "responses"
 
     headers = {"Content-Type": "application/json"}
 
@@ -497,15 +508,29 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
         logger.error("[stt-bridge] aiohttp missing for agent dispatch")
         return
 
-    logger.debug("[stt-bridge] peer %s dispatching to %s", peer.peer_id, url)
+    logger.debug(
+        "[stt-bridge] peer %s dispatching to %s (route=%s)",
+        peer.peer_id, url, route,
+    )
 
     text_queue: Optional[asyncio.Queue] = peer.extra.get("tts_text_queue")
 
-    # Responses API SSE events arrive as `event: <name>\ndata: <json>\n\n`
-    # frames.  We track the current event name across lines so the
-    # data: payload can be interpreted in context.  See hermes-agent
-    # gateway/platforms/api_server.py:_handle_responses for the writer.
+    # SSE events arrive as `event: <name>\ndata: <json>\n\n` frames. We
+    # track the current event name across lines so the data: payload can
+    # be interpreted in context.
+    #
+    # Two event vocabularies depending on `route`:
+    #   responses        — response.output_text.delta (per-token delta) /
+    #                      response.completed (terminal)
+    #   sidekick-platform — reply_delta (cumulative text) / reply_final
+    #                       (terminal). See hermes-plugin/sidekick_platform.py.
+    #
+    # For the cumulative-text path we diff against the previously-seen
+    # text so the data-channel envelope to the PWA stays per-token (the
+    # PWA's transcript renderer appends, doesn't replace) and the TTS
+    # text-queue gets only the new tokens.
     current_event: Optional[str] = None
+    prev_cumulative: str = ""
 
     async with aiohttp.ClientSession() as sess:
         try:
@@ -544,6 +569,7 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
                     # the event header was missing (some SSE writers omit
                     # the `event:` line and rely on payload.type).
                     event_name = current_event or chunk.get("type")
+                    # ── responses path (legacy) ──────────────────────
                     if event_name == "response.output_text.delta":
                         delta = chunk.get("delta") or ""
                         if not delta:
@@ -566,6 +592,42 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
                         })
                     elif event_name == "response.completed":
                         # Terminal event; loop will exit on next iter.
+                        break
+                    # ── sidekick-platform path ───────────────────────
+                    elif event_name == "reply_delta":
+                        cumulative = chunk.get("text") or ""
+                        if not cumulative:
+                            continue
+                        # Diff against last seen so the per-token sinks
+                        # (TTS queue, on_transcript hook, data channel)
+                        # behave the same way they do on the responses
+                        # path. Defensively handle a non-monotonic
+                        # cumulative (shouldn't happen but adapter bugs
+                        # do — fall back to treating it as a fresh delta).
+                        if cumulative.startswith(prev_cumulative):
+                            delta = cumulative[len(prev_cumulative):]
+                        else:
+                            delta = cumulative
+                        prev_cumulative = cumulative
+                        if not delta:
+                            continue
+                        if text_queue is not None:
+                            try:
+                                text_queue.put_nowait(delta)
+                            except asyncio.QueueFull:
+                                pass
+                        if peer.on_transcript is not None:
+                            try:
+                                await peer.on_transcript(delta, False)
+                            except Exception:  # pragma: no cover
+                                pass
+                        _send_data_channel(peer, {
+                            "type": "transcript",
+                            "text": delta,
+                            "is_final": False,
+                            "role": "assistant",
+                        })
+                    elif event_name == "reply_final":
                         break
         except asyncio.CancelledError:
             raise

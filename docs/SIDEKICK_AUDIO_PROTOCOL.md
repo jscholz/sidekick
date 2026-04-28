@@ -73,7 +73,8 @@ Open a new peer connection.
   "sdp": "<offer SDP>",
   "type": "offer",
   "mode": "stream" | "talk",
-  "conv_name": "sidekick-tom-2026-04-26"   // optional; conversation key
+  "conv_name": "sidekick-tom-2026-04-26",   // optional; legacy /v1/responses path
+  "chat_id": "uuid-…"                        // optional; hermes-gateway path
 }
 ```
 
@@ -81,8 +82,19 @@ Open a new peer connection.
 - `stream` — mic in, transcripts out via data channel, no TTS audio.
 - `talk` — full duplex; bridge adds an outbound TTS track to the answer.
 
-`conv_name` is the stable agent conversation identifier. The bridge
-passes it through as `body.conversation` when dispatching to the proxy.
+`conv_name` is the stable agent conversation identifier for the legacy
+`/v1/responses` integration. When set, the bridge dispatches user
+transcripts to `<proxy>/api/<be>/responses` with
+`{input, conversation, stream}`.
+
+`chat_id` is the hermes-gateway path's session-routing primitive (an
+opaque UUID minted PWA-side per conversation). When set, the bridge
+dispatches to `<proxy>/api/sidekick/messages` with `{chat_id, text}`
+instead. The proxy WS-forwards to the hermes sidekick platform adapter.
+
+`conv_name` and `chat_id` are mutually exclusive in practice — the PWA
+sets exactly one based on the active backend (`backend.type: hermes` or
+`hermes-gateway`). If both are set, `chat_id` wins.
 
 **Response:**
 ```json
@@ -206,7 +218,21 @@ would be either too early or doubled with this envelope at call-start.
 
 The PWA sends this when its own state machine decides an utterance is
 done (silence timeout, commit-phrase match, or any future trigger).
-The bridge:
+The bridge picks one of two routes based on which identifier the
+offer payload carried:
+
+**`chat_id` set** (hermes-gateway path):
+
+1. POSTs `{chat_id, text}` to `<proxy_url>/api/sidekick/messages`.
+2. Parses the SSE stream as adapter envelopes:
+   `event: reply_delta\ndata: {type, chat_id, text}` carries the FULL
+   cumulative reply so far (per `BasePlatformAdapter.edit_message`'s
+   contract); `event: reply_final` is terminal.
+3. Diffs each `reply_delta`'s cumulative `text` against the previous
+   one and forwards the per-token delta to the same sinks as the
+   responses path (data channel envelope, TTS text queue).
+
+**`chat_id` unset** (legacy responses path):
 
 1. POSTs `{input: text, conversation: <conv_name>, stream: true}` to
    `<proxy_url>/api/<be>/responses` where `<be>` is the active backend
@@ -216,6 +242,9 @@ The bridge:
 2. Parses the SSE stream as the agent protocol's Responses API events
    (`response.output_text.delta` → user-visible deltas;
    `response.completed` → terminal).
+
+In both cases:
+
 3. Mirrors text deltas onto the data channel as `role:'assistant'`
    transcripts.
 4. (Talk mode only) feeds deltas into the TTS provider; the resulting

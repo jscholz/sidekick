@@ -124,6 +124,16 @@ async def handle_offer(request: "web.Request") -> "web.Response":
         or ""
     ).strip() or None
 
+    # chat_id is the hermes-gateway path's session-routing primitive,
+    # opaque UUID minted PWA-side per conversation (see
+    # src/conversations.ts). When present, the bridge dispatches user
+    # transcripts to <proxy>/api/sidekick/messages with {chat_id, text}
+    # instead of <proxy>/api/<backend>/responses with {input,
+    # conversation}. The two routing paths coexist so legacy
+    # `backend.type: hermes` deployments keep working unchanged — the
+    # PWA only sets chat_id when its active backend is hermes-gateway.
+    chat_id = (payload.get("chat_id") or "").strip() or None
+
     # Build the PeerConnection and accept the offer.
     from aiortc import RTCSessionDescription  # local for lazy import
 
@@ -131,10 +141,12 @@ async def handle_offer(request: "web.Request") -> "web.Response":
     peer_id = make_peer_id()
     peer = PeerSession(peer_id=peer_id, mode=mode, pc=pc)
     peer.extra["conv_name"] = conv_name
+    peer.extra["chat_id"] = chat_id
     # Bridge dispatches to <proxy>/api/<be>/responses, NOT directly to the
     # agent backend. The sidekick proxy is the sole gateway between
     # sidekick-land and agent-land. <be> is the active backend slug
-    # configured at startup (default 'hermes').
+    # configured at startup (default 'hermes'). When peer.extra["chat_id"]
+    # is set, dispatch routes through /api/sidekick/messages instead.
     peer.extra["proxy_url"] = _PROXY_URL
     peer.extra["backend"] = _BACKEND
     # Per-peer STT vocabulary biasing. The PWA owns the canonical list
@@ -231,8 +243,8 @@ async def handle_offer(request: "web.Request") -> "web.Response":
     await REGISTRY.add(peer)
 
     logger.info(
-        "[peer %s] offer accepted, mode=%s conv=%s",
-        peer_id, mode, conv_name or "<none>",
+        "[peer %s] offer accepted, mode=%s conv=%s chat_id=%s",
+        peer_id, mode, conv_name or "<none>", chat_id or "<none>",
     )
 
     return web.json_response({
