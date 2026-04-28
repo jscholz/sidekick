@@ -515,10 +515,20 @@ async function resume(id: string) {
     const cached = await sessionCache.getMessagesCache(id);
     log(`[resume-trace] resume(${id.slice(0,8)}) cache lookup done  cached=${cached?.messages?.length ?? 0}msg  optActive=${optimisticActiveId?.slice(0,8) ?? 'null'}  Δt=${Date.now()-t0}ms`);
     if (cached?.messages?.length) {
-      log(`sessionDrawer: resumed ${id} from cache (${cached.messages.length} messages)`);
-      log(`[resume-trace] resume(${id.slice(0,8)}) CACHE-CB FIRING onResumeCb`);
-      onResumeCb?.(id, cached.messages);
-      refresh();
+      // Stale-callback guard: same logic as the server cb path. If a
+      // newer click has set optimisticActiveId to a different id while
+      // we awaited the IDB read, our cache replay would render the
+      // SUPERSEDED chat over the user's just-clicked one. Without this
+      // the user sees A→B→A flicker on rapid clicks even when each
+      // click's id is correctly captured at click time.
+      if (optimisticActiveId !== id) {
+        log(`[resume-trace] resume(${id.slice(0,8)}) CACHE-CB DROPPED (newer click → ${optimisticActiveId?.slice(0,8) ?? 'null'})`);
+      } else {
+        log(`sessionDrawer: resumed ${id} from cache (${cached.messages.length} messages)`);
+        log(`[resume-trace] resume(${id.slice(0,8)}) CACHE-CB FIRING onResumeCb`);
+        onResumeCb?.(id, cached.messages);
+        refresh();
+      }
     }
     // 2. Always hit the server to reconcile. If cache was stale (server
     //    has new turns), the second replay catches up. resumeSession also
