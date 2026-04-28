@@ -524,24 +524,26 @@ async function resume(id: string) {
       const pagination = { firstId: result.firstId ?? null, hasMore: !!result.hasMore };
       log(`sessionDrawer: resumed ${id} (${messages.length} messages, hasMore=${pagination.hasMore})`);
       await sessionCache.putMessagesCache(id, messages);
-      if (!cached || cached.messages.length !== messages.length) {
-        onResumeCb?.(id, messages, pagination);
-      } else {
-        // Cache matched — still need to hand fresh pagination state to the
-        // chat pane (cached replay couldn't know firstId/hasMore).
-        onResumeCb?.(id, messages, pagination);
+      // Stale-callback guard: a newer click has set optimisticActiveId
+      // to a different id. Server fetches can take 100-300ms which is
+      // longer than typical click intervals; without this guard the
+      // user sees the chat flicker through every clicked id in
+      // completion order, last-callback-wins (Jonathan's "click A
+      // sometimes goes A→B→A→B" repro 2026-04-28).
+      if (optimisticActiveId !== id) {
+        diag(`sessionDrawer: resume ${id} server cb dropped (newer click → ${optimisticActiveId})`);
+        return;
       }
+      onResumeCb?.(id, messages, pagination);
       refresh();
     } catch (e: any) {
       diag(`sessionDrawer: resume ${id} failed: ${e.message}`);
-      // On server failure, drop the optimistic override so the highlight
-      // snaps back to real backend state — don't leave the user in a
-      // phantom-selected limbo.
-      optimisticActiveId = null;
-      refresh();
-      if (!cached?.messages?.length) {
-        // No cache + server failed → nothing to show. Silent; the drawer
-        // row was just tapped, user sees they're not in the session yet.
+      // On server failure, drop the optimistic override only if it's
+      // still our id — otherwise we'd clobber a newer click's
+      // optimistic state, leaving the user in a phantom-selected limbo.
+      if (optimisticActiveId === id) {
+        optimisticActiveId = null;
+        refresh();
       }
     }
   })();

@@ -1103,6 +1103,20 @@ async function boot() {
   if (btnNewChat) {
     btnNewChat.onclick = async () => {
       if (!backend.isConnected()) { status.setStatus('Gateway offline', 'err'); return; }
+      // No-op if there's already an active chat AND it's empty (no
+      // real bubbles rendered). Without this guard, rapid new-chat
+      // clicks accumulate empty 'New chat / 0 msgs' rows in the drawer
+      // for every press. Skip the guard on first-ever click (no
+      // active chat yet) so a fresh install still mints one.
+      const transcriptEl = document.getElementById('transcript');
+      const hasContent = transcriptEl
+        ? transcriptEl.querySelectorAll('.line.s0, .line.agent').length > 0
+        : false;
+      const hasActiveChat = !!backend.getCurrentSessionId?.();
+      if (hasActiveChat && !hasContent) {
+        diag('new-chat: current chat empty, no-op');
+        return;
+      }
       diag('reset history: new-chat button');
       // Intentionally do NOT stop streaming or cancel memo — new-chat is a
       // conversation rotation, not a full reset. Users expect to stay in
