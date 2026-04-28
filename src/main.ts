@@ -39,7 +39,6 @@ import * as webrtcDictation from './pipelines/webrtc/dictation.ts';
 import * as webrtcDictate from './pipelines/webrtc/dictate.ts';
 import * as webrtcSuppress from './pipelines/webrtc/suppress.ts';
 import * as bgTrace from './bgTrace.ts';
-import { stripReasoningLeak } from './backends/hermes.ts';
 import * as activityRow from './activityRow.ts';
 
 // Card kind modules
@@ -2263,10 +2262,7 @@ function replaySessionMessages(
  *  (prepend, batched). The caller owns scroll behavior + persist. */
 function renderHistoryMessage(m: any, label: string, mode: 'append' | 'prepend' = 'append') {
   const raw = (m.content || '').trim();
-  // Same stripper as the live delta path — hides Gemma reasoning-tag
-  // leftovers ("thought" / "thinking" / "reasoning" bare words) from
-  // historical replay.
-  const text = stripReasoningLeak(raw);
+  const text = raw;
   if (!text) return;
   // Hermes state.db stores timestamp as float UNIX seconds. chat.addLine's
   // formatTime passes through new Date(ts) which expects milliseconds, so

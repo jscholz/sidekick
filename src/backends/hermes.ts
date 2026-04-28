@@ -137,64 +137,6 @@ function dispatchSSEEvent(raw: string): void {
   handleEvent(type, payload);
 }
 
-/** Strip reasoning-format leftovers from Gemma-4 and Harmony-style models.
- *  Hermes's stream processing strips the XML `<thought>...</thought>`
- *  wrappers but leaves (a) the tag-NAME as standalone content
- *  ("thought" as the whole message), (b) the channel-delimiter prefix
- *  (`<channel|>` or `<|channel|>`) before the real reply, and
- *  (c) leading `thought\n` preambles.
- *
- *  Applied to both live delta text and restored-history text so the
- *  user never sees these reasoning-artifact bubbles. Upstream fix is
- *  tracked in project_harmony_leak_findings.md; this sidekick-scoped
- *  stripper is the pragmatic path until hermes's /v1/responses SSE
- *  output runs through a tag-aware stripper. */
-const REASONING_NAMES = '(?:thought|thinking|reasoning|analysis|commentary|final|channel|start|end|message)';
-export function stripReasoningLeak(text: string): string {
-  if (!text) return text;
-  // Drop entire message if it's JUST a reasoning-tag name
-  if (new RegExp(`^${REASONING_NAMES}\\s*$`, 'i').test(text.trim())) {
-    return '';
-  }
-
-  let out = text;
-
-  // Harmony-block leak: the model's full structured preamble
-  //   <|...|> ... thought\n thought\n <|channel|>final response
-  // bleeds through. The real reply starts AFTER the LAST channel
-  // marker. Conservative slice: only cut if everything before the
-  // last `<|channel|>` is harmony-shape noise (other `<|...|>` tokens,
-  // bare reasoning words, whitespace) — not real content.
-  const channelMatches = [...out.matchAll(/<\|?channel\|>/gi)];
-  if (channelMatches.length > 0) {
-    const last = channelMatches[channelMatches.length - 1];
-    const before = out.slice(0, last.index);
-    const residue = before
-      .replace(/<\|[^|]*\|>/g, '')                                     // strip <|...|> tokens
-      .replace(new RegExp(`\\b${REASONING_NAMES}\\b`, 'gi'), '')       // strip bare reasoning words
-      .replace(/[\s\n]/g, '');                                         // strip whitespace
-    if (residue === '') {
-      out = out.slice(last.index! + last[0].length);
-    }
-  }
-
-  // Iterate: strip any combination of leading reasoning artifacts that
-  // stack up. Order:
-  //   1. bare word + newline(s)    ("thought\n")
-  //   2. channel-delimiter prefix  ("<channel|>", "<|channel|>", etc.)
-  //      — the `<|` / `|` can be missing depending on how the renderer
-  //      mangled the original Harmony marker.
-  for (let i = 0; i < 5; i++) {
-    const before = out;
-    out = out.replace(new RegExp(`^\\s*${REASONING_NAMES}\\s*\\n+`, 'i'), '');
-    out = out.replace(new RegExp(`^\\s*<\\|?${REASONING_NAMES}\\|?>\\s*`, 'i'), '');
-    // Catch-all leading <|anything|> tokens (incl. <|"|>, <|im_end|>, etc.)
-    out = out.replace(/^\s*(?:<\|[^|]*\|>\s*)+/i, '');
-    if (out === before) break;
-  }
-  return out;
-}
-
 function handleEvent(type: string, d: any): void {
   // Every renderable subs callback gets the conversation tag so main.ts
   // can gate visual rendering when the user has switched away mid-stream.
@@ -217,10 +159,8 @@ function handleEvent(type: string, d: any): void {
         cumulativeText = '';
       }
       cumulativeText += delta;
-      const cleaned = stripReasoningLeak(cumulativeText);
-      if (!cleaned) return;   // all-reasoning so far; wait for real text
       subs?.onActivity?.({ working: true, detail: 'streaming', conversation: conv });
-      subs?.onDelta?.({ replyId: currentReplyId, cumulativeText: cleaned, conversation: conv });
+      subs?.onDelta?.({ replyId: currentReplyId, cumulativeText, conversation: conv });
       return;
     }
 
@@ -264,7 +204,7 @@ function handleEvent(type: string, d: any): void {
       currentReplyId = null;
       cumulativeText = '';
       subs?.onActivity?.({ working: false, conversation: conv });
-      subs?.onFinal?.({ replyId, text: stripReasoningLeak(finalText), conversation: conv });
+      subs?.onFinal?.({ replyId, text: finalText, conversation: conv });
       return;
     }
 
