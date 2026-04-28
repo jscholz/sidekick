@@ -305,6 +305,10 @@ function renderPlaceholderRow(id: string): HTMLLIElement {
 function renderRow(s: any, activeId: string): HTMLLIElement {
   const li = document.createElement('li');
   if (s.id === activeId) li.classList.add('active');
+  // Expose the chat/session id on the li so tests + future code can
+  // target rows without depending on title/snippet text (which may be
+  // a placeholder until hermes generates the title).
+  li.dataset.chatId = s.id;
 
   const row = document.createElement('div');
   row.className = 'sess-row';

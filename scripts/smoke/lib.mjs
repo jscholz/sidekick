@@ -28,6 +28,10 @@ export async function launchBrowser({ headed = false, debug = true } = {}) {
     executablePath: CHROMIUM,
     headless: !headed,
     args: ['--no-sandbox'],
+    // Desktop viewport — sidekick's mobile breakpoint auto-collapses
+    // the sidebar drawer on small screens, which would make drawer
+    // rows non-clickable in tests. Pin to a stable desktop size.
+    viewport: { width: 1280, height: 800 },
   });
   const page = ctx.pages()[0] || await ctx.newPage();
   const cleanup = async () => {
@@ -63,6 +67,26 @@ export async function waitForReady(page, url = DEFAULT_URL, { debug = true, time
   );
 }
 
+/** Ensure the sidebar drawer is expanded (so drawer rows are clickable).
+ *  Sidekick collapses by default on every fresh load — no LocalStorage
+ *  preference saved → drawer hidden. Tests need it open. */
+export async function openSidebar(page, { timeout = 3_000 } = {}) {
+  const isExpanded = await page.evaluate(() => {
+    const sb = document.getElementById('sidebar');
+    return sb?.classList.contains('expanded') || false;
+  });
+  if (isExpanded) return;
+  // Toggle button id: sb-toggle (desktop) or sb-toggle-mobile (mobile).
+  // We're on a 1280px viewport so desktop applies.
+  const toggle = page.locator('#sb-toggle, #sb-toggle-mobile').first();
+  await toggle.click();
+  await page.waitForFunction(
+    () => document.getElementById('sidebar')?.classList.contains('expanded'),
+    null,
+    { timeout, polling: 100 },
+  );
+}
+
 /** Click the new-chat button. Handles both the desktop (drawer-open)
  *  and mobile (drawer-collapsed) layouts. */
 export async function clickNewChat(page, { timeout = 5_000 } = {}) {
@@ -79,11 +103,17 @@ export async function clickNewChat(page, { timeout = 5_000 } = {}) {
 }
 
 /** Type into the composer + click send. Returns the timestamp of the
- *  click so the caller can compute round-trip timings. */
+ *  click so the caller can compute round-trip timings.
+ *
+ *  Uses programmatic click via DOM rather than Playwright's mouse
+ *  click — at our test viewport the ambient weather widget can
+ *  overlap the send button, causing Playwright's intercept-detection
+ *  to retry forever. End users hit Enter (which dispatches a
+ *  programmatic click anyway), so this matches that path. */
 export async function send(page, text) {
   await page.fill('#composer-input', text);
   const t0 = Date.now();
-  await page.click('#composer-send');
+  await page.evaluate(() => document.getElementById('composer-send')?.click());
   return t0;
 }
 
