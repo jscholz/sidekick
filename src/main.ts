@@ -1102,7 +1102,7 @@ async function boot() {
   // command is a separate path handled by sendTypedMessage.
   const btnNewChat = document.getElementById('sb-new-chat');
   if (btnNewChat) {
-    btnNewChat.onclick = () => {
+    btnNewChat.onclick = async () => {
       if (!backend.isConnected()) { status.setStatus('Gateway offline', 'err'); return; }
       diag('reset history: new-chat button');
       // Intentionally do NOT stop streaming or cancel memo — new-chat is a
@@ -1116,15 +1116,17 @@ async function boot() {
       draft.dismiss();
       voiceMemos.clearAll().catch(() => {});
       historyLoaded = false;
-      backend.newSession?.();
+      // newSession is async — it mints a chat_id and awaits an IDB write.
+      // Without awaiting, getCurrentSessionId() below returns the PRIOR
+      // activeChatId (or null), setViewed pins to that, and the next
+      // reply's chat_id mismatches the viewed gate → handleReplyDelta /
+      // handleReplyFinal early-return → nothing renders. User sees
+      // "sending…" forever despite the agent replying server-side.
+      await backend.newSession?.();
       chat.addSystemLine('New chat started');
-      // Pin the viewed-session to the freshly-rotated conversationName.
-      // Invariant: getViewed() mirrors the session on screen. The render
-      // gates in handleReplyDelta/Final compare incoming `conversation`
-      // against getViewed() — leaving it null here would drop the first
-      // reply of a new chat (the conversation id IS truthy on the wire,
-      // so `truthy !== null` would suppress every delta until the user
-      // switched away and back).
+      // Pin the viewed-session to the freshly-rotated chat_id. Invariant:
+      // getViewed() mirrors the session on screen so handleReplyDelta /
+      // handleReplyFinal don't drop incoming envelopes for it.
       sessionDrawer.setViewed(backend.getCurrentSessionId?.() || null);
       // Re-render the session list so the old session row loses its
       // active highlight (new one isn't in response_store.db yet —
@@ -2437,10 +2439,10 @@ function showThinking() {
  *  every incremental activity event; we just update the label, the
  *  streamingEl / replyId swap happens in showStreamingIndicator. */
 function handleActivity({ working, detail, conversation }: any) {
-  // Drop activity updates for off-screen conversations (user has switched
-  // to a different session mid-stream; the old conversation's "thinking"
-  // shouldn't render here).
-  if (conversation && conversation !== sessionDrawer.getViewed()) return;
+  // Drop only for an explicitly DIFFERENT viewed session — null gets
+  // through (covers fresh-chat / first-message / boot races).
+  const viewed = sessionDrawer.getViewed();
+  if (viewed && conversation && conversation !== viewed) return;
   if (!streamingEl) return;
   streamingEl.classList.remove('pending');
   const dots = streamingEl.querySelector('.thinking-dots');
@@ -2561,10 +2563,15 @@ function attachCardToLatestAgentBubble(card) {
  *  talk-mode track on the server side and arrives as audio independently. */
 function handleReplyDelta({ replyId, cumulativeText, conversation }: any) {
   if (!cumulativeText) return;
-  // Drop deltas for off-screen conversations. Server-side stream keeps
-  // running; user can switch back later and the persisted reply will
-  // appear via replaySessionMessages.
-  if (conversation && conversation !== sessionDrawer.getViewed()) return;
+  // Drop deltas only for explicitly off-screen conversations: getViewed()
+  // pinned to a DIFFERENT id. When getViewed() is null (boot before
+  // setViewed pinned, race between async newSession and the next reply,
+  // first-message-on-fresh-install where no setViewed has fired yet),
+  // there's no on-screen session to protect — render. Otherwise we drop
+  // the agent's reply on the floor while waiting for an IDB write the
+  // user has no idea they're racing against.
+  const viewed = sessionDrawer.getViewed();
+  if (viewed && conversation && conversation !== viewed) return;
   showStreamingIndicator(cumulativeText, replyId);
 }
 
@@ -2581,11 +2588,12 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
   // stream complete in the background: the user needs the row to find.
   sessionDrawer.refresh();
 
-  // If the user switched to a different session mid-stream, swallow the
-  // chat-bubble render here; the reply IS persisted server-side and
-  // will appear via replaySessionMessages when they switch back. Side
-  // effects above (drawer refresh) already fired.
-  if (conversation && conversation !== sessionDrawer.getViewed()) {
+  // Same null-tolerant gate as handleReplyDelta: drop only for an
+  // explicitly DIFFERENT viewed session. getViewed()=null = no
+  // constraint (render). Side effects above (drawer refresh) already
+  // fired regardless.
+  const viewed = sessionDrawer.getViewed();
+  if (viewed && conversation && conversation !== viewed) {
     return;
   }
 
@@ -2621,8 +2629,9 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
 /** Tool-events — cards and similar side-channel data the agent emits.
  *  Currently just canvas.show; grows as backends add more. */
 function handleToolEvent({ kind, payload, conversation }: any) {
-  // Drop tool-event renders for off-screen conversations.
-  if (conversation && conversation !== sessionDrawer.getViewed()) return;
+  // Drop only for an explicitly DIFFERENT viewed session.
+  const viewed = sessionDrawer.getViewed();
+  if (viewed && conversation && conversation !== viewed) return;
   if (kind === 'canvas.show' && payload) {
     log('canvas.show event from agent');
     attachCardToLatestAgentBubble(payload);
