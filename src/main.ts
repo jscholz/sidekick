@@ -1817,6 +1817,34 @@ async function boot() {
   }
   applyMicModeUi();
 
+  // Single source of truth for "flip a mic toggle" — used by BOTH the
+  // menu-click handler AND the global hotkey handler. Prior code had
+  // two independent paths reading `!s.X` snapshots taken BEFORE
+  // settings.set() flipped the value, which made the status pill text
+  // and the menu visuals drift out of sync (the visuals re-read live
+  // state via applyMicModeUi but the pill text used the stale snapshot).
+  // Reading the post-flip value via settings.get() after set() removes
+  // the anticorrelation entirely. Side-effects (end-call-on-call-off)
+  // also live here so menu + hotkey behave identically.
+  function flipMicSetting(key: 'micCall' | 'micAutoSend'): void {
+    const cur = !!(settings.get() as any)[key];
+    const next = !cur;
+    settings.set(key, next);
+    applyMicModeUi();
+    const label = key === 'micCall' ? 'Call mode' : 'Auto-send';
+    // Read POST-flip value off settings, not the captured snapshot —
+    // keeps the pill text honest if anything else mutated state in
+    // between (or if a future caller passes its own pre-flip value).
+    const live = !!(settings.get() as any)[key];
+    status.setStatus(`${label}: ${live ? 'on' : 'off'}`, null);
+    // Closing call-mode WHILE a call is open should end the call —
+    // otherwise the WebRTC peer keeps streaming and the user has to
+    // click the mic to actually stop. Same intent for menu + hotkey.
+    if (key === 'micCall' && !next && voiceActive()) {
+      void stopVoice();
+    }
+  }
+
   function setMicModeMenuOpen(open: boolean): void {
     if (!micModeMenu || !btnMicMode) return;
     if (open) {
@@ -1841,19 +1869,13 @@ async function boot() {
         e.stopPropagation();
         const key = b.dataset.toggle as 'micCall' | 'micAutoSend' | undefined;
         if (!key) return;
-        const cur = !!(settings.get() as any)[key];
-        settings.set(key, !cur);
-        applyMicModeUi();
-        // Closing call-mode WHILE a call is open should end the call —
-        // otherwise the WebRTC peer keeps streaming and the user has to
-        // click the mic to actually stop. Tapping the toggle is an
-        // unambiguous "end this" signal.
-        if (key === 'micCall' && cur && voiceActive()) {
-          void stopVoice();
-        }
-        // Keep menu open so the user can flip multiple toggles in one
-        // pass (matches iOS Control Center behavior). Tap outside to
-        // close.
+        // Single canonical path — same as the hotkey. flipMicSetting
+        // updates the setting, refreshes menu visuals, sets the status
+        // pill text from the post-flip value, and runs side effects
+        // (end-call-on-call-off). Menu stays open so the user can flip
+        // multiple toggles in one pass (iOS Control Center pattern);
+        // tap outside to close.
+        flipMicSetting(key);
       };
     });
     // Click outside closes the menu (capture so chat-bubble handlers
@@ -1888,8 +1910,18 @@ async function boot() {
   // Three actions, three hotkey strings stored in settings. Matcher
   // accepts both Cmd (metaKey) and Ctrl (ctrlKey) for cross-platform
   // editing — Mac users see Cmd in defaults, Windows/Linux users can
-  // overwrite with Ctrl. preventDefault on match so we override browser
-  // defaults (Cmd+Shift+C is DevTools "inspect" by default, etc).
+  // overwrite with Ctrl. preventDefault + stopPropagation on match so
+  // we override browser defaults (Cmd+Shift+C is DevTools "inspect" by
+  // default, Cmd+Shift+D is "Bookmark all tabs" in Chrome, etc) AND
+  // claim the event before any later document-level listener can run.
+  //
+  // Registered in CAPTURE phase (third arg `true`) so we run BEFORE any
+  // other document-level keydown handler that might preventDefault or
+  // stopPropagation us (e.g. the debug-panel Ctrl+Shift+D handler at
+  // boot, or any future addition). Field reports of "⌘⇧D does nothing
+  // regardless of cursor" pointed at exactly this scenario — handler
+  // ordering / phase gymnastics. Capture-phase first listener with
+  // stopPropagation gives the global hotkeys deterministic priority.
   document.addEventListener('keydown', (e) => {
     // Skip when typing in editable fields, except for the hotkey-capture
     // inputs themselves which handle their own keydown (those have
@@ -1929,36 +1961,32 @@ async function boot() {
       const eventKey = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
       return eventKey === key;
     };
-    if (matches(s.hotkeyCallMode)) {
+    // claim() is the standard "we owned this event" sequence: cancel the
+    // browser default (bookmark, devtools, downloads, etc) AND stop any
+    // later document-level listener from re-handling the same keydown.
+    const claim = () => {
       e.preventDefault();
-      settings.set('micCall', !s.micCall);
-      // Refresh the menu UI in case it's open so the toggle reflects state.
-      applyMicModeUi();
-      status.setStatus(`Call mode: ${!s.micCall ? 'on' : 'off'}`, null);
-      // Toggling call-mode OFF while a call is active should end it —
-      // mirrors the menu-click behavior so hotkey users get the same
-      // "I changed my mind" intent.
-      if (s.micCall && voiceActive()) {
-        void stopVoice();
-      }
+      e.stopPropagation();
+    };
+    if (matches(s.hotkeyCallMode)) {
+      claim();
+      flipMicSetting('micCall');
       return;
     }
     if (matches(s.hotkeyAutoSend)) {
-      e.preventDefault();
-      settings.set('micAutoSend', !s.micAutoSend);
-      applyMicModeUi();
-      status.setStatus(`Auto-send: ${!s.micAutoSend ? 'on' : 'off'}`, null);
+      claim();
+      flipMicSetting('micAutoSend');
       return;
     }
     if (matches(s.hotkeyToggleMic)) {
-      e.preventDefault();
+      claim();
       // Toggle whichever voice path matches the current settings —
       // same effect as clicking the mic button.
       const btn = document.getElementById('btn-mic') as HTMLButtonElement | null;
       if (btn) btn.click();
       return;
     }
-  });
+  }, true);
 
   // ── Refresh button (full page reload for standalone PWA) ──
   // Previously did a transport-rebind which had a confusing mental model
