@@ -296,3 +296,103 @@ the same directory.
 - [ ] Configurable via env: `SIDEKICK_AUDIO_HOST`,
       `SIDEKICK_AUDIO_PORT`, `SIDEKICK_PROXY_URL`, plus any provider
       API keys.
+
+---
+
+## Hermes-Gateway WS contract
+
+Separate protocol from the audio bridge above. This is the wire shape
+between the **sidekick proxy** (Node, port 3001) and the **hermes
+sidekick platform adapter** (Python, in-process inside hermes-gateway,
+port 8645 by default). The adapter is a peer of telegram/slack/signal
+in hermes-agent's gateway/platforms/* — not an audio thing.
+
+Reference implementation of the adapter: `hermes-plugin/sidekick_platform.py`.
+
+### Connection
+
+- Transport: persistent WebSocket from proxy → adapter, single
+  connection for the lifetime of the proxy.
+- URL: `ws://127.0.0.1:<port>/ws`. Default port `8645`. Override via
+  the `SIDEKICK_PLATFORM_URL` env var on the proxy or
+  `SIDEKICK_PLATFORM_PORT` on the adapter.
+- Auth: shared-secret bearer token in the WS upgrade `Authorization`
+  header — `Authorization: Bearer <SIDEKICK_PLATFORM_TOKEN>`. Both
+  sides read the same env var name; the adapter rejects upgrades
+  without it (constant-time compare).
+- Reconnect: proxy-side exponential backoff capped at 30s
+  (1, 2, 4, 8, 16, 30, 30, …). The adapter accepts new connections
+  and closes any stale predecessor on its side.
+- Heartbeat: 30s WS ping (set by the adapter via aiohttp's
+  `WebSocketResponse(heartbeat=30)`). Optional application-level
+  `{type:'ping', chat_id}` / `{type:'pong', chat_id}` envelopes for
+  RTT measurement.
+
+### Inbound (proxy → adapter)
+
+JSON text frames, all keyed on `chat_id` for per-conversation
+multiplexing.
+
+```json
+{ "type": "message",        "chat_id": "<uuid>", "text": "...", "attachments": [] }
+{ "type": "command",        "chat_id": "<uuid>", "command": "new", "args": "" }
+{ "type": "voice_dispatch", "chat_id": "<uuid>", "text": "..." }
+{ "type": "ping",           "chat_id": "<uuid>" }
+```
+
+`message` / `command` / `voice_dispatch` all dispatch to the gateway's
+standard `handle_message(MessageEvent)` path. The gateway resolves
+`(Platform.SIDEKICK, chat_id)` to a session_id internally and persists
+history per chat_id — there is no `previous_response_id` plumbing
+because the gateway owns conversation state.
+
+### Outbound (adapter → proxy)
+
+```json
+{ "type": "hello",          "protocol_version": 1 }
+{ "type": "reply_delta",    "chat_id": "...", "text": "<full so far>", "message_id": "...", "edit"?: true }
+{ "type": "reply_final",    "chat_id": "...", "message_id": "..." }
+{ "type": "image",          "chat_id": "...", "url": "...", "caption": "..." }
+{ "type": "typing",         "chat_id": "..." }
+{ "type": "notification",   "chat_id": "...", "kind": "cron", "content": "..." }
+{ "type": "session_changed","chat_id": "...", "session_id": "...", "title": "..." }
+{ "type": "pong",           "chat_id": "..." }
+```
+
+`reply_delta` carries the FULL text-so-far (not a per-token
+diff) — this matches `BasePlatformAdapter.edit_message`'s contract.
+Callers replace the bubble's text on each delta. `reply_final` marks
+the end of a turn.
+
+`session_changed` is emitted when the gateway compresses an active
+chat_id's session, which mints a new `session_id` and (often) a new
+title. The proxy fans this to the PWA so the drawer can re-key the
+row + refresh title without requiring a manual reload. See the
+"session_changed sourcing" section below for how the adapter detects
+the event.
+
+### Proxy → PWA mapping
+
+The proxy exposes the WS surface to the PWA over plain HTTP/SSE so
+the existing fetch+EventSource code path applies unchanged:
+
+- `POST /api/sidekick/messages` body `{chat_id, text, attachments?}`
+  forwards as `{type:'message', chat_id, text}` over the WS, then
+  streams every per-chat_id outbound envelope back as one SSE event
+  (`event:` = envelope `type`; `data:` = JSON envelope verbatim).
+  Connection ends on `reply_final`.
+- `GET /api/sidekick/sessions[?limit=N]` returns drawer enrichment
+  rows from state.db (`{chat_id, session_id, title, message_count,
+  last_active_at, created_at}`). PWA-side IDB owns the canonical chat
+  list; this endpoint adds gateway metadata.
+- `DELETE /api/sidekick/sessions/<chat_id>` drops the matching state.db
+  row + messages (best-effort; a fresh chat_id reuse mints a new
+  session automatically).
+
+### session_changed sourcing
+
+Phase 2 v1 detects compression by polling `state.db.sessions` for
+known chat_ids — see the `session_changed envelope` section in
+`hermes-plugin/sidekick_platform.py` for cadence + envelope shape.
+Trade-off: ~1s lag on title refresh after compression, no hermes-core
+patch required.
