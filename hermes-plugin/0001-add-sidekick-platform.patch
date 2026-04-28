@@ -1,4 +1,4 @@
-From 495d5958bcbe435aad0f0044643a572ccce9de11 Mon Sep 17 00:00:00 2001
+From c5f5c4c07bece55ad6569a2752f3508e5c99c9eb Mon Sep 17 00:00:00 2001
 From: Sidekick <noreply@example.invalid>
 Date: Tue, 28 Apr 2026 09:50:24 -0400
 Subject: [PATCH] local: register Platform.SIDEKICK + adapter factory branch
@@ -17,9 +17,9 @@ Also adds:
   SIDEKICK_PLATFORM_ALLOW_ALL_USERS).
 ---
  gateway/config.py       | 10 ++++++++++
- gateway/run.py          | 16 ++++++++++++++++
+ gateway/run.py          | 20 +++++++++++++++++++-
  hermes_cli/platforms.py |  1 +
- 3 files changed, 27 insertions(+)
+ 3 files changed, 30 insertions(+), 1 deletion(-)
 
 diff --git a/gateway/config.py b/gateway/config.py
 index 67ebf734..a047ee5a 100644
@@ -50,7 +50,7 @@ index 67ebf734..a047ee5a 100644
      idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
      if idle_minutes:
 diff --git a/gateway/run.py b/gateway/run.py
-index c59ca6fc..9a4f224c 100644
+index c59ca6fc..b7add7d8 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
 @@ -2938,6 +2938,19 @@ class GatewayRunner:
@@ -97,6 +97,17 @@ index c59ca6fc..9a4f224c 100644
              }
              if os.getenv(platform_env_map.get(platform, ""), "").strip():
                  return "ignore"
+@@ -4458,7 +4474,9 @@ class GatewayRunner:
+         
+         # One-time prompt if no home channel is set for this platform
+         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
+-        if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
++        # Skip for sidekick - the PWA is always reachable; cron deliveries
++        # arrive via the persistent notification SSE channel, not a home chat.
++        if not history and source.platform and source.platform not in (Platform.LOCAL, Platform.WEBHOOK, Platform.SIDEKICK):
+             platform_name = source.platform.value
+             env_key = f"{platform_name.upper()}_HOME_CHANNEL"
+             if not os.getenv(env_key):
 diff --git a/hermes_cli/platforms.py b/hermes_cli/platforms.py
 index 1fc3a3a8..521ff89d 100644
 --- a/hermes_cli/platforms.py
