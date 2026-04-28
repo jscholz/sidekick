@@ -22,64 +22,160 @@
  *      with growing speech. Otherwise the user couldn't keep typing in
  *      front of dictated text — the cursor would chase the tail.
  *
- * Per-utterance state:
+ * ── Deepgram quirks the state machine has to absorb ───────────────────
+ *
+ * Deepgram emits MULTIPLE `is_final: true` Results per utterance — one
+ * per endpoint (sentence/pause boundary inside a single breath). It
+ * also emits an empty-text final for `UtteranceEnd` (true end-of-turn).
+ * If we treated every is_final as "utterance done, capture cursor
+ * fresh next time", we'd:
+ *   - re-capture anchor between sentence-final and the next-sentence
+ *     interim, leaking previously-committed text into new splice
+ *     ranges and producing duplicates / fragments;
+ *   - lose the per-utterance invariant that the cursor stays pinned
+ *     while the user dictates a multi-sentence block.
+ *
+ * So this module distinguishes two levels of finality:
+ *   - CONTENT FINAL  (text non-empty, is_final=true): a sentence segment
+ *     is locked in; we BAKE it into committed[anchor, anchor+committedLen]
+ *     and keep the same anchor for the next interim/final.
+ *   - UTTERANCE END  (text empty, is_final=true — bridge yields one of
+ *     these on Deepgram's UtteranceEnd event): the user stopped
+ *     speaking; we close out the utterance, advance the cursor, and
+ *     null the anchor so the NEXT speech captures fresh.
+ *
+ * Defensive measures (should rarely trigger but kill regressions):
+ *   - duplicate / stale finals are dropped if their text matches the
+ *     most recent committed segment;
+ *   - interims that start with text we've already committed in this
+ *     utterance have that prefix stripped before splicing.
+ *
+ * ── Per-utterance state ──────────────────────────────────────────────
+ *
  *   anchor: number | null
  *     null = idle (no in-flight utterance). When a number, it's the
- *     textarea index of the start of the current interim.
+ *     textarea index of the start of the current utterance.
+ *
+ *   committedLen: number
+ *     Length of the text already locked-in by content-finals for this
+ *     utterance. Lives at [anchor, anchor + committedLen].
+ *
  *   interimLen: number
- *     Length of the in-flight interim text past the anchor. Each new
- *     interim replaces [anchor, anchor+interimLen] with the new text,
- *     so the most-recent partial transcript is always what's visible.
+ *     Length of the in-flight interim past committed end. Lives at
+ *     [anchor + committedLen, anchor + committedLen + interimLen]. New
+ *     interims REPLACE this range.
+ *
+ *   lastFinalText: string
+ *     The text of the most-recent content-final in this utterance —
+ *     used to drop duplicate / stale finals.
+ *
  *   updating: boolean
  *     Re-entrancy guard. Set while WE'RE writing to the textarea so the
- *     `input` and `selectionchange` listeners don't treat our own writes
- *     as user actions and bail out of the utterance.
+ *     `input` and `selectionchange` listeners don't treat our own
+ *     writes as user actions and bail out.
  *
  * Events:
  *   • Interim transcript arrives:
- *     - if anchor is null (new utterance): capture selectionStart as the
- *       anchor; if there's a selection range (start ≠ end), delete the
- *       selected text first (replaces user's selection with voice).
- *     - splice the new text into [anchor, anchor + interimLen]; update
- *       interimLen. Cursor goes back to anchor (i.e. we don't move it).
+ *     - if anchor is null (new utterance): capture selectionStart as
+ *       the anchor; if there's a selection range (start ≠ end), delete
+ *       the selected text first (replaces user's selection with voice).
+ *     - strip any prefix that overlaps with already-committed text in
+ *       this utterance (defensive — Deepgram normally doesn't do this).
+ *     - splice the new text into [anchor+committedLen,
+ *       anchor+committedLen+interimLen]; update interimLen. Cursor
+ *       stays at anchor.
  *
- *   • Final transcript arrives:
- *     - same splice, then advance anchor past the final text and reset
- *       interimLen = 0. Cursor advances to the new anchor (so the next
- *       utterance, if it captures cursor again, will chain naturally
- *       rightward — this deviates from "cursor stays" only at the moment
- *       a final commits, because otherwise chained utterances would all
- *       insert at the same point and stack on top of each other).
- *     - clear anchor → null so the NEXT utterance captures fresh.
+ *   • Content final arrives (text non-empty):
+ *     - drop if it matches lastFinalText (duplicate / stale).
+ *     - same splice as interim, then advance committedLen by the baked
+ *       length, reset interimLen=0, remember lastFinalText. anchor
+ *       STAYS — we're still in the same utterance.
+ *
+ *   • Utterance end arrives (text empty, is_final=true):
+ *     - if there's still an in-flight interim, leave it where it sits
+ *       (it'll be overwritten by the next utterance's first splice if
+ *       the user keeps talking, or stays as live caption if not).
+ *     - add a trailing space if the committed text doesn't already end
+ *       in whitespace, so the next utterance / typed char isn't glued
+ *       to the previous word.
+ *     - advance cursor to anchor + committedLen (post-trailing-space).
+ *     - reset: anchor=null, committedLen=0, interimLen=0, lastFinalText=''.
  *
  *   • User input event (typing/paste, NOT our own writes):
- *     - if interimLen > 0: commit the current interim as if it were a
- *       final at its current position (don't lose what we have), then
- *       reset (anchor → null) so the next utterance captures fresh at
- *       wherever the user's cursor lands after their edit.
+ *     - reset state machine (anchor → null) so the next utterance
+ *       captures fresh wherever the user's cursor lands.
  *
  *   • User selectionchange (caret move that wasn't ours):
- *     - if interimLen > 0 AND the new caret falls outside the interim
- *       range, commit the interim and reset. Caret moves WITHIN the
- *       interim are tolerated (user might be highlighting a word to
- *       replace mid-dictation; rare, but cheap to allow).
+ *     - if the new caret falls outside the utterance range
+ *       [anchor, anchor+committedLen+interimLen], reset state machine.
+ *       Caret moves WITHIN the range are tolerated.
  *
  * On call close: stop() clears state and restores the prior data-channel
  * listener (call-mode wiring registers one at boot; we replaced it).
+ *
+ * ── Diagnostic logging ───────────────────────────────────────────────
+ *
+ * Heavy per-event logging is gated behind `?dictate-debug=1` (URL) or
+ * `localStorage.dictate_debug='1'`. When enabled, every interim, final,
+ * splice, and reset prints with timestamps, anchor, committedLen,
+ * interimLen, and a short snapshot of the current span. Tail in the
+ * console (or the on-page debug panel via ?debug=1) to verify
+ * post-fix behavior.
  */
 
 import * as conn from './connection.ts';
 import { log, diag } from '../../util/log.ts';
+
+// ── Diagnostic flag ────────────────────────────────────────────────────
+
+const dictateDebugOn = (() => {
+  try {
+    const qs = new URLSearchParams(location.search);
+    if (qs.get('dictate-debug') === '1') return true;
+    if (qs.get('debug') === '1') return true;
+    if (localStorage.getItem('dictate_debug') === '1') return true;
+    if (localStorage.getItem('sidekick_debug') === '1') return true;
+  } catch { /* ignore */ }
+  return false;
+})();
+
+/** Per-event diagnostic log. Tag every line with [dictate] + a phase
+ *  label so Jonathan can grep one stream out of the console. No-op
+ *  unless the dictate-debug flag is on. */
+function dlog(phase: string, info: Record<string, unknown> = {}): void {
+  if (!dictateDebugOn) return;
+  const snapshot = composerInput
+    ? composerInput.value.slice(
+        Math.max(0, (anchor ?? 0)),
+        Math.max(0, (anchor ?? 0)) + committedLen + interimLen,
+      )
+    : '';
+  log(
+    `[dictate] ${phase}`,
+    JSON.stringify({
+      anchor,
+      committedLen,
+      interimLen,
+      lastFinalText: lastFinalText.slice(0, 40),
+      span: snapshot.slice(0, 80),
+      ...info,
+    }),
+  );
+}
 
 // ── State ──────────────────────────────────────────────────────────────
 
 let active = false;
 let composerInput: HTMLTextAreaElement | null = null;
 
-/** Index of the start of the current in-flight interim. null = idle. */
+/** Index of the start of the current utterance. null = idle. */
 let anchor: number | null = null;
-/** Length of in-flight interim past the anchor. */
+/** Length of finalized text from this utterance baked at [anchor, anchor+committedLen]. */
+let committedLen = 0;
+/** Length of in-flight interim past anchor+committedLen. */
 let interimLen = 0;
+/** Most recent content-final text — used to drop duplicates. */
+let lastFinalText = '';
 /** Re-entrancy guard for our own writes. */
 let updating = false;
 
@@ -112,6 +208,7 @@ export function init(input: HTMLTextAreaElement | null): void {
   // selectionchange fires on document, not the element. We filter to the
   // composer's selection by checking activeElement at handler time.
   document.addEventListener('selectionchange', onUserSelectionChange);
+  if (dictateDebugOn) log('[dictate] debug logging enabled');
 }
 
 /** Open a stream-mode WebRTC connection and start routing user
@@ -128,9 +225,7 @@ export async function start(opts: { sessionId?: string | null } = {}): Promise<v
   // Reset per-session state. anchor=null means the next interim/final
   // captures the cursor fresh; that's what we want at the top of every
   // dictation session.
-  anchor = null;
-  interimLen = 0;
-  updating = false;
+  resetUtterance('start');
 
   // Replace whatever data-channel listener was wired (call-mode routing
   // in main.ts) for the duration of this session. Restored on stop().
@@ -170,8 +265,7 @@ export async function stop(): Promise<void> {
     savedListener = null;
   }
   // Clear per-session state so a re-start() captures fresh.
-  anchor = null;
-  interimLen = 0;
+  resetUtterance('stop');
   notify(false);
 }
 
@@ -180,36 +274,76 @@ export async function stop(): Promise<void> {
 function dataChannelHandler(ev: any): void {
   if (!ev || ev.type !== 'transcript' || typeof ev.text !== 'string') return;
   if (ev.role !== 'user') return;
-  if (ev.is_final) handleFinal(ev.text);
-  else handleInterim(ev.text);
+  const trimmed = ev.text.trim();
+  if (ev.is_final) {
+    if (trimmed) handleContentFinal(trimmed);
+    else handleUtteranceEnd();
+  } else {
+    if (trimmed) handleInterim(trimmed);
+  }
 }
 
 // ── State machine — voice events ───────────────────────────────────────
 
-function handleInterim(rawText: string): void {
+function handleInterim(text: string): void {
   if (!composerInput) return;
-  const text = (rawText || '').trim();
-  if (!text) return;
+  dlog('interim<-', { text: text.slice(0, 80) });
   ensureAnchor();
-  spliceInterim(text);
+  const stripped = stripCommittedPrefix(text);
+  if (!stripped) {
+    dlog('interim drop (fully overlaps committed)', { text });
+    return;
+  }
+  spliceInterim(stripped);
+  dlog('interim->', { text: stripped.slice(0, 80) });
 }
 
-function handleFinal(rawText: string): void {
+function handleContentFinal(text: string): void {
   if (!composerInput) return;
-  const text = (rawText || '').trim();
-  if (!text) {
-    // Final-with-empty-text shouldn't happen in practice, but if it does
-    // just close out the utterance — anchor → null so the next interim
-    // captures fresh.
-    if (anchor !== null) {
-      anchor += interimLen;
-      interimLen = 0;
-    }
-    anchor = null;
+  dlog('final<-', { text: text.slice(0, 80) });
+  // Stale / duplicate final — same text as the last segment we baked.
+  // Deepgram occasionally re-emits a Results frame; don't double-write.
+  if (text === lastFinalText) {
+    dlog('final drop (duplicate)', { text });
     return;
   }
   ensureAnchor();
-  spliceFinal(text);
+  const stripped = stripCommittedPrefix(text);
+  if (!stripped) {
+    dlog('final drop (fully overlaps committed)', { text });
+    return;
+  }
+  spliceFinal(stripped);
+  dlog('final->', { text: stripped.slice(0, 80) });
+}
+
+function handleUtteranceEnd(): void {
+  if (!composerInput) return;
+  dlog('utterance-end<-');
+  if (anchor === null) {
+    dlog('utterance-end drop (no anchor)');
+    return;
+  }
+  // Add a trailing space so the next utterance / typed char isn't
+  // glued to the last word — only if we actually committed something
+  // and there's no whitespace there yet.
+  if (committedLen > 0) {
+    const endIdx = anchor + committedLen + interimLen;
+    const tail = composerInput.value.charAt(endIdx - 1);
+    if (!/\s/.test(tail)) {
+      // Append a single space at the end of the utterance span. We
+      // splice it in AFTER the interim (if any), so an in-flight
+      // interim isn't disturbed.
+      writeRange(endIdx, endIdx, ' ');
+      committedLen += 1;
+    }
+    // Advance cursor to the end of committed text (NOT past interim —
+    // the user's next keystroke should land between committed and
+    // interim if interim is still showing; in practice handleUtterance
+    // End fires after interimLen has been zeroed by the last final).
+    setCursor(anchor + committedLen);
+  }
+  resetUtterance('utterance-end');
 }
 
 /** Capture cursor at start of a new utterance. If the user has selected
@@ -233,39 +367,77 @@ function ensureAnchor(): void {
     }
   }
   anchor = start;
+  committedLen = 0;
   interimLen = 0;
+  lastFinalText = '';
+  dlog('anchor-capture', { at: start });
 }
 
-/** Replace [anchor, anchor + interimLen] with `text`, including a leading
- *  space if needed for word separation. Does NOT advance anchor — the
- *  next interim should overwrite this one. Cursor stays at anchor (we
- *  don't migrate it with growing interim text). */
+/** If `text` starts with a suffix of the already-committed text, strip
+ *  that overlap. Defensive against Deepgram occasionally re-sending
+ *  finalized words in a subsequent interim — without this, that
+ *  re-send would duplicate text in the textarea.
+ *
+ *  Note: we look at the LAST committed final's text (lastFinalText),
+ *  not the entire committed buffer, because Deepgram's interims for a
+ *  new sentence segment never re-include text from segments before
+ *  the previous one. Only adjacent overlap is plausible. */
+function stripCommittedPrefix(text: string): string {
+  if (!lastFinalText) return text;
+  // Try progressively longer prefixes of lastFinalText that match the
+  // start of `text`. If we find one, strip it.
+  const lower = text.toLowerCase();
+  const lastLower = lastFinalText.toLowerCase();
+  // Quick check: does text start with the entire last final? Then strip.
+  if (lower.startsWith(lastLower)) {
+    return text.slice(lastFinalText.length).replace(/^[\s.,!?]+/, '');
+  }
+  return text;
+}
+
+/** Replace [anchor + committedLen, anchor + committedLen + interimLen]
+ *  with `text`, including a leading space if needed for word
+ *  separation. Does NOT advance committedLen — the next interim should
+ *  overwrite this one. Cursor stays at anchor. */
 function spliceInterim(text: string): void {
   if (!composerInput || anchor === null) return;
-  const insert = leadingSpace(anchor) + text;
-  writeRange(anchor, anchor + interimLen, insert);
+  const at = anchor + committedLen;
+  const insert = leadingSpace(at) + text;
+  writeRange(at, at + interimLen, insert);
   interimLen = insert.length;
-  // Pin cursor at anchor so subsequent typing inserts BEFORE the interim,
-  // preserving the user's caret position. Calling setSelectionRange fires
-  // selectionchange; our own listener short-circuits via `updating`.
+  // Pin cursor at anchor so subsequent typing inserts BEFORE the
+  // utterance, preserving the user's caret position. setSelectionRange
+  // fires selectionchange; our own listener short-circuits via
+  // `updating`.
   setCursor(anchor);
 }
 
-/** Bake the final text in place: replace the in-flight interim, advance
- *  anchor past the baked text, reset interimLen, and move the cursor
- *  to the new end so chained utterances flow rightward. anchor → null
- *  so the NEXT utterance re-captures the cursor (which by then might
- *  have moved if the user edited between utterances). */
+/** Bake a content final into committed text: replace the in-flight
+ *  interim, advance committedLen by the baked length. anchor STAYS —
+ *  Deepgram will keep emitting more finals (and interims for those
+ *  finals) within the same utterance until UtteranceEnd. */
 function spliceFinal(text: string): void {
   if (!composerInput || anchor === null) return;
-  // Trailing space so the next dictation / typed char isn't glued to
-  // the final word — matches the long-standing memo / draft behavior.
-  const insert = leadingSpace(anchor) + text + ' ';
-  writeRange(anchor, anchor + interimLen, insert);
-  const newEnd = anchor + insert.length;
-  setCursor(newEnd);
-  anchor = null;
+  const at = anchor + committedLen;
+  const insert = leadingSpace(at) + text;
+  writeRange(at, at + interimLen, insert);
+  committedLen += insert.length;
   interimLen = 0;
+  lastFinalText = text;
+  // Cursor stays at anchor during a single utterance — same invariant
+  // as during interims. Don't migrate it on a content-final; only
+  // utterance-end advances cursor.
+  setCursor(anchor);
+}
+
+// ── Reset helper ──────────────────────────────────────────────────────
+
+function resetUtterance(reason: string): void {
+  anchor = null;
+  committedLen = 0;
+  interimLen = 0;
+  lastFinalText = '';
+  if (dictateDebugOn) dlog('reset', { reason });
 }
 
 // ── Textarea writes (with re-entrancy guard) ──────────────────────────
@@ -281,10 +453,11 @@ function writeRange(start: number, end: number, text: string): void {
   if (!composerInput) return;
   updating = true;
   try {
-    // setRangeText splices in place + dispatches an `input` event to the
-    // textarea. Our own onUserInput sees that event but `updating` makes
-    // it a no-op for the state machine; the OTHER listeners on the
-    // textarea (autoResize, updateSendButtonState in main.ts) still fire.
+    // setRangeText splices in place + dispatches an `input` event to
+    // the textarea. Our own onUserInput sees that event but `updating`
+    // makes it a no-op for the state machine; the OTHER listeners on
+    // the textarea (autoResize, updateSendButtonState in main.ts)
+    // still fire.
     composerInput.setRangeText(text, start, end, 'preserve');
   } finally {
     updating = false;
@@ -303,26 +476,16 @@ function setCursor(pos: number): void {
 
 // ── User events — typing, paste, cursor moves ─────────────────────────
 
-function onUserInput(ev: Event): void {
+function onUserInput(_ev: Event): void {
   if (updating) return;          // our own write — ignore
   if (!active) return;           // not dictating — irrelevant
-  if (anchor === null) return;   // no in-flight interim — nothing to commit
-  // The user typed (or pasted, or undo'd) DURING an in-flight interim.
-  // Commit the interim where it sits — the user's edit is sacrosanct
-  // and the current text in the textarea IS the truth (their input
-  // already mutated the value before this handler runs). We just
-  // reset the state machine so the next utterance captures fresh.
-  //
-  // Note: we do NOT splice the interim text in here — the textarea
-  // already reflects whatever happened (typing inserted between voice,
-  // delete removed something, etc.). Best we can do is bow out and
-  // start over. The interim text that was "in flight" is now baked
-  // wherever it ended up. If the user undid it via Ctrl-Z, fine —
-  // it's gone and the cursor is at their undo position. If they
-  // typed in front of it, fine — interim still there, cursor moved.
-  diag('[dictate] user input mid-interim — committing in place');
-  anchor = null;
-  interimLen = 0;
+  if (anchor === null) return;   // no in-flight utterance — nothing to commit
+  // The user typed (or pasted, or undo'd) DURING an in-flight utterance.
+  // Bow out: the textarea already reflects whatever happened (typing
+  // inserted between voice, delete removed something, etc.), and the
+  // next utterance captures fresh wherever the user's cursor lands.
+  diag('[dictate] user input mid-utterance — committing in place');
+  resetUtterance('user-input');
 }
 
 function onUserSelectionChange(_ev: Event): void {
@@ -334,12 +497,10 @@ function onUserSelectionChange(_ev: Event): void {
   // chat bubbles, settings, etc. shouldn't affect the dictation state.
   if (document.activeElement !== composerInput) return;
   const pos = composerInput.selectionStart ?? 0;
-  // Tolerate caret moves WITHIN the in-flight interim range — user might
-  // be highlighting a word to replace, no need to bail out yet.
-  const interimEnd = anchor + interimLen;
-  if (pos >= anchor && pos <= interimEnd) return;
-  // User navigated outside the interim. Commit and reset.
-  diag('[dictate] user moved cursor outside interim — committing in place');
-  anchor = null;
-  interimLen = 0;
+  // Tolerate caret moves WITHIN the in-flight utterance range.
+  const utteranceEnd = anchor + committedLen + interimLen;
+  if (pos >= anchor && pos <= utteranceEnd) return;
+  // User navigated outside the utterance. Reset.
+  diag('[dictate] user moved cursor outside utterance — committing in place');
+  resetUtterance('user-cursor-outside');
 }
