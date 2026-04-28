@@ -40,6 +40,7 @@ import * as webrtcDictate from './pipelines/webrtc/dictate.ts';
 import * as webrtcSuppress from './pipelines/webrtc/suppress.ts';
 import * as bgTrace from './bgTrace.ts';
 import { stripReasoningLeak } from './backends/hermes.ts';
+import * as activityRow from './activityRow.ts';
 
 // Card kind modules
 import imageCard from './canvas/cards/image.ts';
@@ -297,6 +298,7 @@ async function boot() {
     onSessionGone: () => {
       diag('reset history: viewed session disappeared from server');
       chat.clear();
+      activityRow.clearAll();
       draft.dismiss();
       voiceMemos.clearAll().catch(() => {});
       historyLoaded = false;
@@ -653,6 +655,11 @@ async function boot() {
     onToolEvent: handleToolEvent,
     onActivity: handleActivity,
     onNotification: handleNotification,
+    // Phase 3 — surface tool calls / results as inline activity rows.
+    // Renderer reads settings.agentActivity per call, so toggling at
+    // runtime takes effect on the next event without re-wiring.
+    onToolCall: (e) => activityRow.appendToolCall(e.conversation, e),
+    onToolResult: (e) => activityRow.appendToolResult(e.conversation, e),
   });
   // Show/hide the sessions section inside the sidebar based on the
   // active backend's capabilities (sidebar itself is always visible).
@@ -663,6 +670,15 @@ async function boot() {
   // agent jumps straight to tool calls (calendar, email, web fetch) with
   // no text deltas for seconds; without this the chat looks dead.
   backend.onSend(() => showThinking());
+
+  // Freeze the previous turn's activity row on every new user-initiated
+  // send so the next tool-event lands in a fresh row (per-turn grouping).
+  // The viewed chat is the only one whose row exists in DOM right now;
+  // background-chat rows are dropped at render time.
+  backend.onSend(() => {
+    const viewed = sessionDrawer.getViewed();
+    if (viewed) activityRow.freezeOnUserMessage(viewed);
+  });
 
   // Any user-initiated send is also a signal that the network is
   // responsive — take that opportunity to retry queued audio blobs
@@ -968,6 +984,7 @@ async function boot() {
         diag('reset history: slash command');
         releaseCaptureIfActive();
         chat.clear();
+        activityRow.clearAll();
         draft.dismiss();
         voiceMemos.clearAll().catch(() => {});
         historyLoaded = false;
@@ -1079,6 +1096,7 @@ async function boot() {
       // outbox, it'll send against the NEW session. That's a conscious
       // trade: user asked for a fresh thread, they get one.
       chat.clear();
+      activityRow.clearAll();
       draft.dismiss();
       voiceMemos.clearAll().catch(() => {});
       historyLoaded = false;
@@ -2193,6 +2211,9 @@ function replaySessionMessages(
   pagination?: { firstId: number | null; hasMore: boolean }
 ) {
   chat.clear();
+  // Tool activity rows are turn-scoped + chat-scoped; resuming a session
+  // wipes the on-screen turn surface, so wipe activity state too.
+  activityRow.clearAll();
   historyLoaded = true;  // we just populated history ourselves; skip backfill
   // Tell the drawer which session is ACTUALLY on screen — covers edge
   // cases where the adapter's conversationName diverges from what the

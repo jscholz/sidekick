@@ -212,6 +212,14 @@ const DEFAULTS = {
   hotkeyCallMode: 'Cmd+Shift+C',     // toggle settings.micCall
   hotkeyAutoSend: 'Cmd+Shift+S',     // toggle settings.micAutoSend
   hotkeyToggleMic: 'Cmd+Shift+D',    // start / stop the active voice path
+  // Tool / agent-activity surfacing in the transcript (Phase 3).
+  //   off     — drop tool_call / tool_result events; render nothing.
+  //   summary — single live-updating row per turn ("N tools · 1.2s ✓").
+  //             Click the row to expand to per-tool detail.
+  //   full    — per-tool collapsed rows; expand to see args / result.
+  // Read at render time, not at connect time, so toggling takes effect
+  // on the NEXT tool event (already-rendered rows freeze in place).
+  agentActivity: 'summary' as 'off' | 'summary' | 'full',
 };
 
 let current = { ...DEFAULTS };
@@ -307,6 +315,7 @@ export function hydrate(handlers: {
   const setFontSize = $inp('set-fontsize');
   const setFontSizeVal = $any('set-fontsize-val');
   const setTheme = $sel('set-theme');
+  const setAgentActivity = $sel('set-agent-activity');
 
   // Initial values
   if (setStreamEngine) setStreamEngine.value = current.streamingEngine;
@@ -332,6 +341,7 @@ export function hydrate(handlers: {
   if (setFontSize) setFontSize.value = String(current.contentSize);
   if (setFontSizeVal) setFontSizeVal.textContent = `${current.contentSize}px`;
   if (setTheme) setTheme.value = current.theme;
+  if (setAgentActivity) setAgentActivity.value = current.agentActivity;
   if (setHotkeyCall) setHotkeyCall.value = current.hotkeyCallMode;
   if (setHotkeyAutoSend) setHotkeyAutoSend.value = current.hotkeyAutoSend;
   if (setHotkeyMic) setHotkeyMic.value = current.hotkeyToggleMic;
@@ -615,6 +625,11 @@ export function hydrate(handlers: {
   if (setTheme) setTheme.onchange = () => {
     set('theme', setTheme.value);
     if (handlers.onThemeChange) handlers.onThemeChange();
+  };
+  if (setAgentActivity) setAgentActivity.onchange = () => {
+    // No handler callback — activityRow.ts reads settings.get() per call,
+    // so the next tool event picks up the new mode automatically.
+    set('agentActivity', setAgentActivity.value as any);
   };
 
   // Settings panel toggle — button moved into the sidebar bottom (#sb-settings).
