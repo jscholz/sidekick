@@ -70,6 +70,14 @@ export async function handleSidekickSessionsList(req, res) {
       res.end(JSON.stringify({ sessions: [] }));
       return;
     }
+    // sessions.json is the source-of-truth for chat_id ↔ session_id (it
+    // tracks compression-rotation; state.db preserves both old and new
+    // forks via parent_session_id). state.db is the source-of-truth for
+    // existence: a chat_id whose session_id has no state.db row is an
+    // orphan (sessions.json is written synchronously on session-create,
+    // but state.db is written async and may have failed silently — see
+    // gateway/session.py:817 vs :833). Drop those orphans so the drawer
+    // never surfaces ghosts.
     const dbRows = await sqlQuery(HERMES_STATE_DB, `
       SELECT id AS session_id,
              COALESCE(title, '') AS title,
@@ -77,21 +85,27 @@ export async function handleSidekickSessionsList(req, res) {
              started_at,
              ended_at
       FROM sessions
-      WHERE id IN (${idList})
+      WHERE id IN (${idList}) AND source='sidekick'
     `);
     const dbBySessionId = new Map<string, any>();
     for (const r of dbRows) dbBySessionId.set(r.session_id, r);
-    rows = chats.map(c => {
-      const meta = dbBySessionId.get(c.session_id) || {};
-      return {
+    let droppedOrphans = 0;
+    rows = [];
+    for (const c of chats) {
+      const meta = dbBySessionId.get(c.session_id);
+      if (!meta) { droppedOrphans++; continue; }
+      rows.push({
         chat_id: c.chat_id,
         session_id: c.session_id,
         title: meta.title || '',
         message_count: meta.message_count || 0,
         last_active_at: c.updated_at,
         created_at: meta.started_at ? new Date(meta.started_at * 1000).toISOString() : null,
-      };
-    });
+      });
+    }
+    if (droppedOrphans > 0) {
+      console.warn(`[hermes-gateway] sessions list: dropped ${droppedOrphans} orphan(s) — sessions.json had keys whose session_id has no state.db row`);
+    }
   } catch (e: any) {
     console.warn('[hermes-gateway] sessions list query failed:', e.message);
   }
