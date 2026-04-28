@@ -409,13 +409,14 @@ export const hermesGatewayAdapter = {
     return activeChatId;
   },
 
-  /** Imperative active-chat setter used by the session drawer click
-   *  handler. Persists to IDB so it survives reload. Not part of the
-   *  legacy hermes.ts adapter — that one folds the same logic into
-   *  resumeSession because hermes' chat_id == conversation name and
-   *  the row already exists server-side. With chat_ids minted locally,
-   *  we need a way to flip the active pointer without going through
-   *  the resume-fetch path. */
+  /** Imperative active-chat setter. Currently UNUSED by the shell:
+   *  every active-chat flip funnels through resumeSession (drawer
+   *  click) or newSession (toolbar / first-message), both of which
+   *  already write activeChatId + persist to IDB. Kept on the adapter
+   *  so callers that want a no-history-fetch session switch (e.g. a
+   *  future cmdk palette quick-jump that does its own snapshot replay)
+   *  have a stable hook. NOT exported through src/backend.ts —
+   *  promote it through the dispatcher when a real call site lands. */
   async setCurrentSessionId(chat_id: string | null) {
     activeChatId = chat_id;
     await conversations.setActive(chat_id);

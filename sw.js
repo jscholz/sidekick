@@ -2,7 +2,7 @@
  * Service worker — caches the app shell so iOS PWA survives app switches.
  * Strategy: cache-first for app shell assets, network-first for API calls.
  */
-const CACHE_NAME = 'v2.90';
+const CACHE_NAME = 'v2.91';
 const APP_SHELL = [
   '/',
   '/index.html',
