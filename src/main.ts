@@ -900,6 +900,7 @@ async function boot() {
       const bar = document.querySelector('.memo-bar');
       if (bar) bar.remove();
       memoActive = false;
+      log('[mic-diag] memoActive=false (releaseCaptureIfActive)');
       // Textarea + btnMic stay visible during memo (bottom-row-only
       // memo bar UX), so no display:'' to reset here. Restore the
       // composer-actions row in case it was hidden during memo.
@@ -1120,6 +1121,7 @@ async function boot() {
 
   function exitMemoMode() {
     memoActive = false;
+    log('[mic-diag] memoActive=false (exitMemoMode)');
     // Restore the composer-actions row + put the send button back in its
     // original DOM home (last child of .composer-actions-right). The bar
     // itself is removed by memo.cleanup(). Re-query each time since the
@@ -1447,6 +1449,7 @@ async function boot() {
     unlock(player);
     audioSession.prepareForCapture();
     memoActive = true;
+    log('[mic-diag] memoActive=true (startMemo)');
     updateSendButtonState();
     composerSend.onclick = async () => {
       if (composerSend.disabled) return;
@@ -1650,6 +1653,27 @@ async function boot() {
     /** Pointer ID currently captured for HOLD-mode drag-to-discard. */
     let capturedPointerId: number | null = null;
 
+    /** Diagnostic: snapshot every relevant gesture-state variable at a
+     *  decision site. Jonathan reports a "first-click does nothing,
+     *  second-click works" alternating pattern that doesn't show up
+     *  in normal logs — the press is silently no-op'd somewhere. This
+     *  helper makes every branch of the gesture machine self-reporting
+     *  so the next repro tells us which guard fired. Remove after fix. */
+    function diagMicState(label: string): void {
+      const age = recordingToggleAt > 0 ? (performance.now() - recordingToggleAt).toFixed(0) : '-';
+      log(
+        '[mic-diag]', label,
+        'micState=', micState,
+        'memoActive=', memoActive,
+        'dictateActive=', dictateActive,
+        'webrtcOpen=', webrtcControls.isOpen(),
+        'voiceActive=', voiceActive(),
+        'recordingToggleAt_age=', age, 'ms',
+        'holdActive=', holdActive,
+        'capturedPointerId=', capturedPointerId,
+      );
+    }
+
     /** Trash-zone hit test: trash button's bbox + generous left-side
      *  margin so sliding off the bar leftward counts as discard. */
     function isOverTrashZone(clientX: number, clientY: number): boolean {
@@ -1684,6 +1708,7 @@ async function boot() {
      *  tap-vs-hold classification). The release-time duration check
      *  decides whether to keep recording or stop. */
     btnMic.addEventListener('pointerdown', (e: PointerEvent) => {
+      diagMicState('pointerdown ENTRY');
       if (holdActivationTimer) { clearTimeout(holdActivationTimer); holdActivationTimer = null; }
       if (micState === 'recording_toggle') {
         // Second press on a tap-toggled recording — stop now, BUT only
@@ -1695,22 +1720,28 @@ async function boot() {
         const age = performance.now() - recordingToggleAt;
         if (age < TOGGLE_STOP_GUARD_MS) {
           e.preventDefault();
-          log('[mic] double-tap guard — ignoring stop press at age=', age.toFixed(0), 'ms');
+          log('[mic-diag] BRANCH: double-tap guard SWALLOWED press, age=', age.toFixed(0), 'ms');
           return;
         }
         e.preventDefault();
+        log('[mic-diag] BRANCH: recording_toggle → stopVoice (age=', age.toFixed(0), 'ms)');
         micState = 'idle';
         void stopVoice();
         return;
       }
-      if (micState !== 'idle') return;
+      if (micState !== 'idle') {
+        log('[mic-diag] BRANCH: micState !== idle → SILENT NO-OP (state=', micState, ')');
+        return;
+      }
       // Defensive: if voice somehow active without our state knowing
       // (race / external trigger), treat press as a stop request.
       if (voiceActive()) {
         e.preventDefault();
+        log('[mic-diag] BRANCH: voiceActive defensive → stopVoice (memo=', memoActive, 'dict=', dictateActive, 'rtc=', webrtcControls.isOpen(), ')');
         void stopVoice();
         return;
       }
+      log('[mic-diag] BRANCH: idle → start recording');
       pressStartedAt = performance.now();
       micState = 'recording';
       holdActive = false;
@@ -1774,8 +1805,12 @@ async function boot() {
 
     /** Press-up classifier: short → toggle (keep running); long → finalize. */
     const onPointerUp = (e: PointerEvent) => {
+      diagMicState('pointerup ENTRY (' + e.type + ')');
       // Ignore pointerup events that don't correspond to a press we own.
-      if (micState !== 'recording') return;
+      if (micState !== 'recording') {
+        log('[mic-diag] pointerup IGNORED (state=', micState, ')');
+        return;
+      }
 
       const dur = performance.now() - pressStartedAt;
       const isCancel = e.type === 'pointercancel';
