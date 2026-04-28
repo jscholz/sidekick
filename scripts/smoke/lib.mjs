@@ -143,6 +143,22 @@ export function assert(cond, msg) {
   if (!cond) throw new Error(`assertion failed: ${msg}`);
 }
 
+/** Best-effort: ask the server to forget a chat_id. Used by tests to
+ *  clean up the sessions they created so smoke runs don't pollute the
+ *  real user's drawer. Failures are swallowed — server might be in a
+ *  weird state at teardown, that's not the test's concern. */
+export async function deleteChat(page, chatId) {
+  try {
+    await page.evaluate(async (id) => {
+      try {
+        await fetch(`/api/sidekick/sessions/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+        });
+      } catch {}
+    }, chatId);
+  } catch {}
+}
+
 /** Dump the first N .line elements as `[i] class="…" text="…"` for
  *  diagnostic context on failure. */
 export async function dumpLines(page, n = 20) {
