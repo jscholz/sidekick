@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sidekick <jscholz@reimaginerobotics.ai>
+Date: Mon, 27 Apr 2026 00:00:00 +0100
+Subject: [PATCH] gateway: register Platform.SIDEKICK + adapter factory branch
+
+Add a new ``Platform.SIDEKICK`` enum value and the corresponding branch in
+``gateway/run.py:_create_adapter`` so a hermes-agent install with the
+sidekick plugin file at ``~/.hermes/plugins/sidekick/__init__.py`` can
+serve a sidekick PWA via WebSocket.
+
+Why a patch
+-----------
+Hermes' platform Enum is frozen at module import time, and
+``_create_adapter`` is a hardcoded if/elif chain — there is no plugin
+extension point for new platform adapters today. Until upstream lands a
+``register_platform_adapter`` extension on ``PluginContext``, the only
+way to wire a new adapter in is a small source patch.
+
+This patch is intentionally minimal:
+  - One enum entry
+  - One factory branch
+  - One env-var → PlatformConfig mapping
+  - One authorization map entry pair
+  - One platform-tools toolset name (optional, defaults work)
+
+Apply with::
+
+    cd ~/.hermes/hermes-agent
+    patch -p1 < ~/code/sidekick/hermes-plugin/0001-add-sidekick-platform.patch
+
+Or maintain it as a local entry in the patch ledger
+(``reference_hermes_patches.md``), rebased before each ``pip install -U
+hermes-agent``.
+
+DO NOT apply automatically — Jonathan rebases the patch ledger by hand.
+---
+ gateway/config.py | 2 ++
+ gateway/run.py    | 21 +++++++++++++++++++++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/gateway/config.py b/gateway/config.py
+index 0000000..0000000 100644
+--- a/gateway/config.py
++++ b/gateway/config.py
+@@ -67,6 +67,7 @@ class Platform(Enum):
+     WEIXIN = "weixin"
+     BLUEBUBBLES = "bluebubbles"
+     QQBOT = "qqbot"
++    SIDEKICK = "sidekick"
+
+
+ @dataclass
+@@ -<env-overrides line>,6 +<env-overrides line>,13 @@ def _apply_env_overrides(config):
+     # ... existing entries ...
+
++    # Sidekick (PWA + audio bridge front-end)
++    sidekick_token = os.getenv("SIDEKICK_PLATFORM_TOKEN")
++    if sidekick_token:
++        if Platform.SIDEKICK not in config.platforms:
++            config.platforms[Platform.SIDEKICK] = PlatformConfig()
++        config.platforms[Platform.SIDEKICK].enabled = True
++        config.platforms[Platform.SIDEKICK].token = sidekick_token
++
+
+diff --git a/gateway/run.py b/gateway/run.py
+index 0000000..0000000 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -<create_adapter end>,6 +<create_adapter end>,16 @@ class GatewayRunner:
+         elif platform == Platform.QQBOT:
+             # ... existing ...
+             pass
++
++        elif platform == Platform.SIDEKICK:
++            # Plugin lives at ~/.hermes/plugins/sidekick/__init__.py — import
++            # via the plugin namespace so the loader's sys.modules entry is
++            # used (avoids double-loading the module).
++            from hermes_plugins.sidekick import (
++                SidekickAdapter,
++                check_sidekick_requirements,
++            )
++            if not check_sidekick_requirements():
++                logger.warning("Sidekick: requirements not met (token missing or aiohttp absent)")
++                return None
++            return SidekickAdapter(config)
++
+         return None
+
+@@ -<is_user_authorized maps>,6 +<is_user_authorized maps>,8 @@ class GatewayRunner:
+         platform_env_map = {
+             # ... existing ...
++            Platform.SIDEKICK: "SIDEKICK_PLATFORM_ALLOWED_USERS",
+         }
+         platform_allow_all_map = {
+             # ... existing ...
++            Platform.SIDEKICK: "SIDEKICK_PLATFORM_ALLOW_ALL_USERS",
+         }
+--
+2.40.0

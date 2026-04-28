@@ -1,0 +1,13 @@
+name: sidekick
+version: 0.1.0
+description: |
+  Sidekick PWA platform adapter. Runs an aiohttp WebSocket server
+  bound to localhost so the sidekick proxy (Node.js) can dispatch
+  user messages and receive streaming agent responses + push
+  notifications. Peer of telegram/slack/signal adapters.
+author: Reimagine Robotics
+kind: standalone
+provides_hooks: []
+provides_tools: []
+requires_env:
+  - SIDEKICK_PLATFORM_TOKEN
