@@ -79,6 +79,13 @@ let lastId = 0;
 const subscribers = new Set<{ res: any; ka: NodeJS.Timeout }>();
 
 function broadcast(env: Envelope): void {
+  // Defense in depth: every envelope on this channel MUST carry chat_id
+  // so the PWA can route. Any plugin envelope missing it is a contract
+  // violation; drop with a warn rather than fan it out untargeted.
+  if (typeof env.chat_id !== 'string' || !env.chat_id) {
+    console.warn(`[hermes-gateway] dropping envelope without chat_id (type=${env.type})`);
+    return;
+  }
   lastId++;
   const id = lastId;
   const evtName = typeof env.type === 'string' ? env.type : 'message';
