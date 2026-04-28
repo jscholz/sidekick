@@ -989,8 +989,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/api/sidekick/messages') {
       return hermesGateway.handleSidekickMessage(req, res);
     }
-    if (req.method === 'GET' && req.url === '/api/sidekick/notifications') {
-      return hermesGateway.handleSidekickNotifications(req, res);
+    if (req.method === 'GET' && req.url === '/api/sidekick/stream') {
+      return hermesGateway.handleSidekickStream(req, res);
     }
     if (req.method === 'GET' && /^\/api\/sidekick\/sessions(?:\?.*)?$/.test(req.url)) {
       return hermesGateway.handleSidekickSessionsList(req, res);

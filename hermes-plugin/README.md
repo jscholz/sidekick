@@ -10,7 +10,7 @@ This directory contains the **plugin source**. Installing it is opt-in.
 
 | File | Purpose |
 |------|---------|
-| `sidekick_platform.py` | The adapter — `BasePlatformAdapter` subclass + WebSocket server. |
+| `__init__.py` | The adapter — `BasePlatformAdapter` subclass + WebSocket server. The plugin loader walks `<plugin-dir>/__init__.py`. |
 | `plugin.yaml` | Hermes plugin manifest. |
 | `0001-add-sidekick-platform.patch` | Required `hermes-agent` patch (see below). |
 | `wscat-test.py` | Standalone smoke test that connects as a fake proxy. |
@@ -31,10 +31,10 @@ patch.
 cd <your hermes-agent install>
 patch -p1 < <path-to-this-dir>/0001-add-sidekick-platform.patch
 
-# 2. Install the plugin.
-mkdir -p ~/.hermes/plugins/sidekick
-cp <path-to-this-dir>/sidekick_platform.py ~/.hermes/plugins/sidekick/__init__.py
-cp <path-to-this-dir>/plugin.yaml          ~/.hermes/plugins/sidekick/plugin.yaml
+# 2. Install the plugin (symlink so edits in the sidekick repo land
+#    immediately in ~/.hermes/plugins/ without a re-copy).
+rm -rf ~/.hermes/plugins/sidekick
+ln -s <path-to-this-dir> ~/.hermes/plugins/sidekick
 
 # 3. Enable in ~/.hermes/config.yaml:
 #    plugins:
@@ -66,7 +66,7 @@ then `reply_final`.
 
 ## Wire protocol
 
-See the module docstring at the top of `sidekick_platform.py` for the
+See the module docstring at the top of `__init__.py` for the
 envelope catalogue. Single persistent WS at
 `ws://127.0.0.1:8645/ws` authenticated via
 `Authorization: Bearer <token>` on the upgrade request.

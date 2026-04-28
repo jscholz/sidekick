@@ -13,13 +13,15 @@
 //   // route handlers:
 //   if (req.method === 'POST' && url === '/api/sidekick/messages')
 //     return hermesGateway.handleSidekickMessage(req, res);
+//   if (req.method === 'GET' && url === '/api/sidekick/stream')
+//     return hermesGateway.handleSidekickStream(req, res);
 //   if (req.method === 'GET' && url === '/api/sidekick/sessions')
 //     return hermesGateway.handleSidekickSessionsList(req, res);
 //   if (req.method === 'DELETE' && url.match(/^\/api\/sidekick\/sessions\/.+/))
 //     return hermesGateway.handleSidekickSessionDelete(req, res, chatId);
 
 import { client } from './client.ts';
-import { init as initNotifications } from './notifications.ts';
+import { init as initStream } from './stream.ts';
 
 export { handleSidekickMessage } from './messages.ts';
 export {
@@ -27,7 +29,7 @@ export {
   handleSidekickSessionDelete,
 } from './sessions.ts';
 export { handleSidekickSessionMessages } from './history.ts';
-export { handleSidekickNotifications } from './notifications.ts';
+export { handleSidekickStream } from './stream.ts';
 
 /** Wire env-derived config and start the persistent WS client.
  *
@@ -36,11 +38,11 @@ export { handleSidekickNotifications } from './notifications.ts';
  *  with 503 — there's no point silently proxying nothing. */
 export function init(opts: { token: string; url: string }): void {
   client.init(opts);
-  // Wire the notification fan-out alongside the WS client so the
-  // wildcard subscription is in place BEFORE the first connect — we'd
+  // Wire the stream fan-out alongside the WS client so the wildcard
+  // subscription is in place BEFORE the first connect — we'd
   // otherwise miss any envelope that arrives during the initial
   // handshake window.
-  initNotifications();
+  initStream();
 }
 
 /** Status helper — used by health-check tooling. */
