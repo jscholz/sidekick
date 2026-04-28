@@ -1,42 +1,27 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 939f98efeb4ba75a99463fe4f59241ad8f7c30fe Mon Sep 17 00:00:00 2001
 From: Sidekick <noreply@example.invalid>
-Date: Mon, 27 Apr 2026 00:00:00 +0100
-Subject: [PATCH] gateway: register Platform.SIDEKICK + adapter factory branch
+Date: Tue, 28 Apr 2026 09:50:24 -0400
+Subject: [PATCH] local: register Platform.SIDEKICK + adapter factory branch
 
-Add a new ``Platform.SIDEKICK`` enum value and the corresponding branch in
-``gateway/run.py:_create_adapter`` so a hermes-agent install with the
-sidekick plugin file at ``~/.hermes/plugins/sidekick/__init__.py`` can
-serve a sidekick PWA via WebSocket.
+Adds Platform.SIDEKICK enum + _create_adapter factory branch that imports
+SidekickAdapter from the hermes-agent plugin namespace
+(hermes_plugins.sidekick). Plugin source lives in the sidekick repo at
+hermes-plugin/sidekick_platform.py and is installed by the user into
+~/.hermes/plugins/sidekick/.
 
-Why a patch
------------
-Hermes' platform Enum is frozen at module import time, and
-``_create_adapter`` is a hardcoded if/elif chain — there is no plugin
-extension point for new platform adapters today. Until upstream lands a
-``register_platform_adapter`` extension on ``PluginContext``, the only
-way to wire a new adapter in is a small source patch.
-
-This patch is intentionally minimal:
-  - One enum entry
-  - One factory branch
-  - One env-var → PlatformConfig mapping
-  - One authorization map entry pair
-  - One platform-tools toolset name (optional, defaults work)
-
-Apply with::
-
-    cd <your hermes-agent install>
-    patch -p1 < <path-to-this-dir>/0001-add-sidekick-platform.patch
-
-Maintain as a local patch since it must be rebased before each
-``pip install -U hermes-agent``. NOT applied automatically.
+Also adds:
+- _apply_env_overrides reads SIDEKICK_PLATFORM_TOKEN to enable the
+  platform when the token is set.
+- platform_env_map / platform_allow_all_map entries for the standard
+  allowlist plumbing (SIDEKICK_PLATFORM_ALLOWED_USERS /
+  SIDEKICK_PLATFORM_ALLOW_ALL_USERS).
 ---
- gateway/config.py | 2 ++
- gateway/run.py    | 21 +++++++++++++++++++++
- 2 files changed, 23 insertions(+)
+ gateway/config.py | 10 ++++++++++
+ gateway/run.py    | 16 ++++++++++++++++
+ 2 files changed, 26 insertions(+)
 
 diff --git a/gateway/config.py b/gateway/config.py
-index 0000000..0000000 100644
+index 67ebf734..a047ee5a 100644
 --- a/gateway/config.py
 +++ b/gateway/config.py
 @@ -67,6 +67,7 @@ class Platform(Enum):
@@ -44,13 +29,15 @@ index 0000000..0000000 100644
      BLUEBUBBLES = "bluebubbles"
      QQBOT = "qqbot"
 +    SIDEKICK = "sidekick"
-
-
+ 
+ 
  @dataclass
-@@ -<env-overrides line>,6 +<env-overrides line>,13 @@ def _apply_env_overrides(config):
-     # ... existing entries ...
-
-+    # Sidekick (PWA + audio bridge front-end)
+@@ -1271,6 +1272,15 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
+                 name=os.getenv("QQBOT_HOME_CHANNEL_NAME") or os.getenv(qq_home_name_env, "Home"),
+             )
+ 
++    # Sidekick (PWA + audio bridge front-end). Plugin lives at
++    # ~/.hermes/plugins/sidekick/. SIDEKICK_PLATFORM_TOKEN gates startup.
 +    sidekick_token = os.getenv("SIDEKICK_PLATFORM_TOKEN")
 +    if sidekick_token:
 +        if Platform.SIDEKICK not in config.platforms:
@@ -58,16 +45,17 @@ index 0000000..0000000 100644
 +        config.platforms[Platform.SIDEKICK].enabled = True
 +        config.platforms[Platform.SIDEKICK].token = sidekick_token
 +
-
+     # Session settings
+     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
+     if idle_minutes:
 diff --git a/gateway/run.py b/gateway/run.py
-index 0000000..0000000 100644
+index c59ca6fc..9a4f224c 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -<create_adapter end>,6 +<create_adapter end>,16 @@ class GatewayRunner:
-         elif platform == Platform.QQBOT:
-             # ... existing ...
-             pass
-+
+@@ -2938,6 +2938,19 @@ class GatewayRunner:
+                 return None
+             return QQAdapter(config)
+ 
 +        elif platform == Platform.SIDEKICK:
 +            # Plugin lives at ~/.hermes/plugins/sidekick/__init__.py — import
 +            # via the plugin namespace so the loader's sys.modules entry is
@@ -82,15 +70,32 @@ index 0000000..0000000 100644
 +            return SidekickAdapter(config)
 +
          return None
-
-@@ -<is_user_authorized maps>,6 +<is_user_authorized maps>,8 @@ class GatewayRunner:
-         platform_env_map = {
-             # ... existing ...
+ 
+     def _is_user_authorized(self, source: SessionSource) -> bool:
+@@ -2980,6 +2993,7 @@ class GatewayRunner:
+             Platform.WEIXIN: "WEIXIN_ALLOWED_USERS",
+             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
+             Platform.QQBOT: "QQ_ALLOWED_USERS",
 +            Platform.SIDEKICK: "SIDEKICK_PLATFORM_ALLOWED_USERS",
          }
-         platform_allow_all_map = {
-             # ... existing ...
+         platform_group_env_map = {
+             Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
+@@ -3001,6 +3015,7 @@ class GatewayRunner:
+             Platform.WEIXIN: "WEIXIN_ALLOW_ALL_USERS",
+             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
+             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
 +            Platform.SIDEKICK: "SIDEKICK_PLATFORM_ALLOW_ALL_USERS",
          }
---
-2.40.0
+ 
+         # Per-platform allow-all flag (e.g., DISCORD_ALLOW_ALL_USERS=true)
+@@ -3132,6 +3147,7 @@ class GatewayRunner:
+                 Platform.WEIXIN:   "WEIXIN_ALLOWED_USERS",
+                 Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
+                 Platform.QQBOT:    "QQ_ALLOWED_USERS",
++                Platform.SIDEKICK: "SIDEKICK_PLATFORM_ALLOWED_USERS",
+             }
+             if os.getenv(platform_env_map.get(platform, ""), "").strip():
+                 return "ignore"
+-- 
+2.47.3
+
