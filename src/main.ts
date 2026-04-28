@@ -2014,10 +2014,22 @@ async function boot() {
     }
     if (matches(s.hotkeyToggleMic)) {
       claim();
-      // Toggle whichever voice path matches the current settings —
-      // same effect as clicking the mic button.
-      const btn = document.getElementById('btn-mic') as HTMLButtonElement | null;
-      if (btn) btn.click();
+      // Toggle whichever voice path matches the current settings.
+      // NOT btn.click() — the new mic gesture machine listens for
+      // pointerdown/pointerup, not click events, so synthetic clicks
+      // are ignored. Drive the same state transition a tap would
+      // produce: idle → recording_toggle (start), recording_toggle →
+      // idle (stop). Other states (active recording mid-press) are
+      // not reachable from a hotkey since there's no concept of
+      // "release" via keyboard.
+      log('[hotkey] toggleMic — voiceActive=', voiceActive(), 'micState=', micState);
+      if (voiceActive()) {
+        micState = 'idle';
+        void stopVoice();
+      } else {
+        micState = 'recording_toggle';
+        void startVoice();
+      }
       return;
     }
   }, true);
