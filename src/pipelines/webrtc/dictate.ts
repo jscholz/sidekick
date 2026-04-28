@@ -17,10 +17,14 @@
  *      mid-utterance, voice respects that: commit the in-flight interim
  *      as if it were final at its current position, then start a fresh
  *      anchor on the next utterance.
- *   2. Cursor stays put during a single utterance. Each interim REPLACES
- *      the previous interim's text in place; the caret doesn't migrate
- *      with growing speech. Otherwise the user couldn't keep typing in
- *      front of dictated text — the cursor would chase the tail.
+ *   2. Cursor advances with the dictated text, just like typing. Each
+ *      interim REPLACES the previous interim's text in place, and after
+ *      every splice the caret is moved to the END of what's been written
+ *      so far. The user's mental model: "the cursor follows what I'm
+ *      saying" — exactly as if they were typing the words themselves.
+ *      If they STOP dictating, the cursor is at the end of what they
+ *      just said. If they then click elsewhere, the next utterance
+ *      starts at that new caret position.
  *
  * ── Deepgram quirks the state machine has to absorb ───────────────────
  *
@@ -76,20 +80,25 @@
  *
  * Events:
  *   • Interim transcript arrives:
- *     - if anchor is null (new utterance): capture selectionStart as
- *       the anchor; if there's a selection range (start ≠ end), delete
- *       the selected text first (replaces user's selection with voice).
+ *     - if anchor is null (new utterance): use the cursor position
+ *       captured at start() time (initialCursor) — set BEFORE the user's
+ *       gesture moved focus off the textarea. If absent, fall back to
+ *       reading composerInput.selectionStart. If there's a selection
+ *       range (start ≠ end), delete the selected text first (replaces
+ *       user's selection with voice).
  *     - strip any prefix that overlaps with already-committed text in
  *       this utterance (defensive — Deepgram normally doesn't do this).
  *     - splice the new text into [anchor+committedLen,
  *       anchor+committedLen+interimLen]; update interimLen. Cursor
- *       stays at anchor.
+ *       moves to anchor + committedLen + interimLen (the end of the
+ *       in-flight text).
  *
  *   • Content final arrives (text non-empty):
  *     - drop if it matches lastFinalText (duplicate / stale).
  *     - same splice as interim, then advance committedLen by the baked
  *       length, reset interimLen=0, remember lastFinalText. anchor
- *       STAYS — we're still in the same utterance.
+ *       STAYS — we're still in the same utterance. Cursor is moved to
+ *       the new end of committed text.
  *
  *   • Utterance end arrives (text empty, is_final=true):
  *     - if there's still an in-flight interim, leave it where it sits
@@ -183,6 +192,14 @@ let updating = false;
 let savedListener: ((ev: any) => void) | null = null;
 let onStateChangeCb: ((opening: boolean, error?: string) => void) | null = null;
 
+/** Cursor position captured at the GESTURE site (e.g. mic-button
+ *  pointerdown, hotkey handler) BEFORE focus shifts off the textarea.
+ *  Consumed by the first ensureAnchor() of a session and then nulled.
+ *  Without this, by the time the first interim arrives the textarea is
+ *  blurred and reading selectionStart can return 0 / value.length /
+ *  stale values, dropping voice text at the wrong location. */
+let initialCursor: number | null = null;
+
 // ── Public API ─────────────────────────────────────────────────────────
 
 export function setStateListener(cb: (opening: boolean, error?: string) => void): void {
@@ -212,8 +229,19 @@ export function init(input: HTMLTextAreaElement | null): void {
 }
 
 /** Open a stream-mode WebRTC connection and start routing user
- *  transcripts to the composer with cursor-aware injection. */
-export async function start(opts: { sessionId?: string | null } = {}): Promise<void> {
+ *  transcripts to the composer with cursor-aware injection.
+ *
+ *  `initialCursor` should be the textarea selectionStart captured at the
+ *  user's gesture site (mic-button pointerdown, hotkey handler) BEFORE
+ *  focus shifted off the textarea. The first interim/final of the
+ *  session uses this as the anchor. Pass null if the gesture site
+ *  couldn't reasonably know the cursor position; we'll fall back to
+ *  reading selectionStart at first-interim time (correct on browsers
+ *  that preserve selection across blur, wrong on ones that don't). */
+export async function start(opts: {
+  sessionId?: string | null;
+  initialCursor?: number | null;
+} = {}): Promise<void> {
   if (active) {
     log('[dictate] start() while already active — no-op');
     return;
@@ -226,6 +254,8 @@ export async function start(opts: { sessionId?: string | null } = {}): Promise<v
   // captures the cursor fresh; that's what we want at the top of every
   // dictation session.
   resetUtterance('start');
+  initialCursor = (typeof opts.initialCursor === 'number') ? opts.initialCursor : null;
+  if (dictateDebugOn) log('[dictate] start initialCursor=', initialCursor);
 
   // Replace whatever data-channel listener was wired (call-mode routing
   // in main.ts) for the duration of this session. Restored on stop().
@@ -266,6 +296,7 @@ export async function stop(): Promise<void> {
   }
   // Clear per-session state so a re-start() captures fresh.
   resetUtterance('stop');
+  initialCursor = null;
   notify(false);
 }
 
@@ -348,12 +379,47 @@ function handleUtteranceEnd(): void {
 
 /** Capture cursor at start of a new utterance. If the user has selected
  *  text, the selection is the insertion target — voice REPLACES the
- *  selection (matching native dictation behavior on macOS / iOS). */
+ *  selection (matching native dictation behavior on macOS / iOS).
+ *
+ *  Anchor source priority:
+ *    1. initialCursor (captured at gesture site BEFORE focus shifted) —
+ *       used once, then nulled.
+ *    2. composerInput.selectionStart — fallback for mid-session
+ *       re-captures (after a user-input or user-cursor-outside reset)
+ *       where the textarea is presumably focused at the user's chosen
+ *       caret position.
+ *    3. composerInput.value.length — last-ditch fallback if both above
+ *       are null (selectionStart can return null on never-focused
+ *       textareas in some browsers). */
 function ensureAnchor(): void {
   if (anchor !== null) return;
   if (!composerInput) return;
-  const start = composerInput.selectionStart ?? composerInput.value.length;
-  const end = composerInput.selectionEnd ?? start;
+  // Diagnostic snapshot — Jonathan asked for this so we can verify the
+  // gesture-site capture is doing its job vs. falling back to
+  // selectionStart on a blurred element.
+  if (dictateDebugOn) {
+    const ss = composerInput.selectionStart;
+    const se = composerInput.selectionEnd;
+    const len = composerInput.value.length;
+    const focused = document.activeElement === composerInput;
+    log(
+      '[dictate] ensureAnchor enter',
+      JSON.stringify({ initialCursor, selectionStart: ss, selectionEnd: se, valueLen: len, focused }),
+    );
+  }
+  let start: number;
+  let end: number;
+  if (typeof initialCursor === 'number') {
+    // Clamp into [0, value.length] in case the textarea contents changed
+    // between gesture and first interim (e.g. user typed during connect).
+    const clamped = Math.max(0, Math.min(initialCursor, composerInput.value.length));
+    start = clamped;
+    end = clamped;
+    initialCursor = null;
+  } else {
+    start = composerInput.selectionStart ?? composerInput.value.length;
+    end = composerInput.selectionEnd ?? start;
+  }
   if (start !== end) {
     // Delete the selection so voice writes into the gap. We use
     // setRangeText so we get the native behavior + the input event
@@ -370,6 +436,18 @@ function ensureAnchor(): void {
   committedLen = 0;
   interimLen = 0;
   lastFinalText = '';
+  // Refocus the textarea so the caret is VISIBLE as text streams in.
+  // Without this, the user's gesture (e.g. clicking the mic button)
+  // moved focus to the button; setSelectionRange on a non-focused
+  // textarea silently updates the selection but the caret doesn't
+  // render. Re-focusing here brings the cursor back where we want it.
+  try {
+    if (document.activeElement !== composerInput) {
+      // preventScroll keeps the page from jumping when refocusing
+      // mid-stream (e.g. inside a long composer).
+      (composerInput as any).focus({ preventScroll: true });
+    }
+  } catch { /* not all browsers support focus options; ignore */ }
   dlog('anchor-capture', { at: start });
 }
 
@@ -398,18 +476,21 @@ function stripCommittedPrefix(text: string): string {
 /** Replace [anchor + committedLen, anchor + committedLen + interimLen]
  *  with `text`, including a leading space if needed for word
  *  separation. Does NOT advance committedLen — the next interim should
- *  overwrite this one. Cursor stays at anchor. */
+ *  overwrite this one. Cursor moves to the END of the in-flight text
+ *  so the user sees their words advancing the caret, just like typing. */
 function spliceInterim(text: string): void {
   if (!composerInput || anchor === null) return;
   const at = anchor + committedLen;
   const insert = leadingSpace(at) + text;
   writeRange(at, at + interimLen, insert);
   interimLen = insert.length;
-  // Pin cursor at anchor so subsequent typing inserts BEFORE the
-  // utterance, preserving the user's caret position. setSelectionRange
+  // Move cursor to the end of the in-flight text — matches user's
+  // mental model of "the cursor follows what I'm saying." If they
+  // pause, the cursor is sitting right after the last word; their
+  // next keystroke / mouse-click resumes from there. setSelectionRange
   // fires selectionchange; our own listener short-circuits via
   // `updating`.
-  setCursor(anchor);
+  setCursor(anchor + committedLen + interimLen);
 }
 
 /** Bake a content final into committed text: replace the in-flight
@@ -424,10 +505,12 @@ function spliceFinal(text: string): void {
   committedLen += insert.length;
   interimLen = 0;
   lastFinalText = text;
-  // Cursor stays at anchor during a single utterance — same invariant
-  // as during interims. Don't migrate it on a content-final; only
-  // utterance-end advances cursor.
-  setCursor(anchor);
+  // Cursor sits at the end of committed text — same advancing-with-
+  // speech invariant as the interim path. Earlier versions pinned at
+  // anchor so the caret stayed put; that was the wrong mental model
+  // (Jonathan: "as text comes in it should land immediately behind the
+  // cursor just like if the user had typed that input").
+  setCursor(anchor + committedLen);
 }
 
 // ── Reset helper ──────────────────────────────────────────────────────
@@ -466,6 +549,7 @@ function writeRange(start: number, end: number, text: string): void {
 
 function setCursor(pos: number): void {
   if (!composerInput) return;
+  if (dictateDebugOn) log('[dictate] setCursor', pos);
   updating = true;
   try {
     composerInput.setSelectionRange(pos, pos);

@@ -1479,8 +1479,17 @@ async function boot() {
     }
   }
 
-  /** Start cursor-aware live dictation (call=true, autoSend=false). */
-  async function startDictate(): Promise<void> {
+  /** Start cursor-aware live dictation (call=true, autoSend=false).
+   *
+   *  `initialCursor` is the textarea selectionStart captured at the
+   *  user's gesture site (mic-button pointerdown / hotkey handler)
+   *  BEFORE focus shifted off the textarea. Without it, the first
+   *  interim's anchor capture reads selectionStart on a possibly-
+   *  blurred textarea — which on iOS Safari can return 0 (text lands
+   *  at start) or value.length (text lands at end), and the visible
+   *  caret then jumps to whatever setCursor was given. See dictate.ts
+   *  ensureAnchor for the full anchor-source priority chain. */
+  async function startDictate(initialCursor: number | null = null): Promise<void> {
     if (dictateActive) return;
     if (memoActive) return;
     if (!navigator.onLine) {
@@ -1493,6 +1502,7 @@ async function boot() {
     try {
       await webrtcDictate.start({
         sessionId: sessionDrawer.getViewed() || backend.getCurrentSessionId?.() || null,
+        initialCursor,
       });
     } catch (e: any) {
       diag('dictate start failed', e?.message);
@@ -1554,14 +1564,34 @@ async function boot() {
     }
   }
 
-  /** Start whichever voice path matches the current toggles. */
-  async function startVoice(): Promise<void> {
+  /** Start whichever voice path matches the current toggles.
+   *
+   *  `initialCursor` (composer textarea selectionStart, captured at the
+   *  gesture site BEFORE focus shifted) is plumbed only to the dictate
+   *  path — it's the only mode that splices into the textarea at the
+   *  user's caret. The other modes (memo, call-stream auto-send) don't
+   *  care where the caret was. */
+  async function startVoice(initialCursor: number | null = null): Promise<void> {
     const s = settings.get();
     if (s.micCall) {
       if (s.micAutoSend) await startCallStream();
-      else await startDictate();
+      else await startDictate(initialCursor);
     } else {
       await startMemo(!!s.micAutoSend);
+    }
+  }
+
+  /** Read the current composer cursor position. Called BEFORE focus
+   *  shifts off the textarea (mic-button pointerdown, hotkey handler)
+   *  so the value reflects the user's intended insertion point. Returns
+   *  null if the textarea has never been focused / has no selection
+   *  data — dictate.ts will fall back gracefully. */
+  function captureComposerCursor(): number | null {
+    try {
+      const ss = composerInput.selectionStart;
+      return (typeof ss === 'number') ? ss : null;
+    } catch {
+      return null;
     }
   }
 
@@ -1698,8 +1728,15 @@ async function boot() {
       // fires later when MediaRecorder genuinely starts recording —
       // two-state visual remains correct.
       try { btnMic.classList.add('active'); } catch {}
-      log('[mic] pointerdown — startVoice fired (state=recording, t0=', pressStartedAt.toFixed(0), ')');
-      void startVoice();
+      // Capture composer cursor BEFORE focus shifts to the mic button.
+      // pointerdown fires while the textarea (if it was focused) still
+      // has its selection state; reading later — after the implicit
+      // focus shift / the async startVoice handshake — risks getting
+      // 0 / value.length / null on iOS Safari, landing voice text at
+      // the wrong location. See dictate.ts ensureAnchor for details.
+      const initialCursor = captureComposerCursor();
+      log('[mic] pointerdown — startVoice fired (state=recording, t0=', pressStartedAt.toFixed(0), ', initialCursor=', initialCursor, ')');
+      void startVoice(initialCursor);
       try {
         status.setStatus('Listening — release after a moment to send, or tap to keep recording', 'live');
       } catch {}
@@ -1809,7 +1846,13 @@ async function boot() {
         void stopVoice();
       } else if (micState === 'idle') {
         micState = 'recording_toggle';
-        void startVoice();
+        // Reading composer cursor here is best-effort: the user is
+        // tabbed onto the mic button so the textarea is blurred. On
+        // browsers that preserve selectionStart across blur (most
+        // desktops) we get the right value; on ones that don't, we
+        // fall back to whatever ensureAnchor() can read at first
+        // interim. Either way better than nothing.
+        void startVoice(captureComposerCursor());
       }
     });
 
@@ -2050,7 +2093,13 @@ async function boot() {
       if (voiceActive()) {
         void stopVoice();
       } else {
-        void startVoice();
+        // Capture composer cursor BEFORE the rest of the hotkey path
+        // (which may not shift focus, but reading at the gesture site
+        // is the canonical pattern — same as the pointerdown handler).
+        // If textarea was focused when the hotkey fired, this is the
+        // user's caret; if focus was elsewhere, it's the last-known
+        // selection state, which is still a reasonable insertion point.
+        void startVoice(captureComposerCursor());
       }
       return;
     }
