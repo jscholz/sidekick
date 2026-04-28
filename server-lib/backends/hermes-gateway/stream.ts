@@ -113,6 +113,19 @@ export function init(): void {
   });
 }
 
+/** Test-only: reset module state between proxy test cases. Production
+ *  must never call this. */
+export function __resetForTest(): void {
+  wired = false;
+  recent.length = 0;
+  lastId = 0;
+  for (const sub of subscribers) {
+    try { clearInterval(sub.ka); } catch { /* noop */ }
+    try { sub.res.end(); } catch { /* noop */ }
+  }
+  subscribers.clear();
+}
+
 export function handleSidekickStream(req, res): void {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
