@@ -44,8 +44,10 @@ Outbound (adapter → proxy)::
     {"type": "typing",          "chat_id": "..."}
     # Push notification (cron output, /background result, scheduled reminder):
     {"type": "notification",    "chat_id": "...", "kind": "cron", "content": "..."}
-    # Future Phase-2 envelope: emitted when the gateway compresses a session
-    # (proxy uses this to update the sidebar title / new session_id):
+    # Emitted when state.db's sessions row for a known chat_id changes its
+    # (session_id, title) — happens on compression-driven rotation. The
+    # adapter polls state.db every ~1.5s while a proxy client is connected
+    # and detects transitions; see ``_session_poll_loop`` below.
     {"type": "session_changed", "chat_id": "...", "session_id": "...", "title": "..."}
 
 The proxy fans these out to the right PWA WebSocket(s) by chat_id.
@@ -55,9 +57,11 @@ Limitations / Phase 1 scope
 * Single connected proxy client. Second connection replaces the first
   (same-host single-user assumption).
 * No reply_to threading, no media beyond URL-encoded images.
-* ``session_changed`` envelope is NOT yet emitted — Phase 2 wires this
-  via the gateway's compression hook (out of scope for the plugin file
-  alone; needs a gateway-side hook). Documented here for Phase 2.
+* ``session_changed`` is wired in Phase 2 via state.db polling (see
+  ``_session_poll_loop``). Lives entirely inside this file — no hermes
+  patches required. Trade-off: ~1.5s lag between compression and the
+  PWA seeing the new title, vs the cleaner-but-invasive option of
+  patching hermes to expose an ``on_session_compressed`` callback.
 
 Install
 -------
@@ -92,9 +96,11 @@ import json
 import logging
 import os
 import socket as _socket
+import sqlite3
 import time
 import uuid
-from typing import Any, Dict, Optional, Set
+from pathlib import Path
+from typing import Any, Dict, Optional, Set, Tuple
 
 try:
     from aiohttp import web, WSMsgType
@@ -117,6 +123,30 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8645
 PROTOCOL_VERSION = 1
+
+# ── session_changed polling (Phase 2) ─────────────────────────────────
+# We watch state.db for compression-induced session_id rotations on the
+# chat_ids we know about, and emit a `session_changed` envelope to the
+# proxy when (session_id, title) changes for a known chat_id. This is
+# strictly less invasive than (a) patching hermes to add a callback hook
+# or (c) polling from the PWA on tab-focus — the adapter already runs
+# in-process with the gateway, so it has direct read access to state.db
+# and zero additional moving parts.
+#
+# Trade-off accepted: ~1s lag between compression and the PWA seeing a
+# title refresh. Polling cost is one indexed SELECT per cadence tick;
+# negligible at sidekick's single-user scale.
+#
+# Cadence: every 1.5s while a proxy client is connected. Skipped when
+# disconnected (no listener — would be wasted I/O). The first time we
+# see a chat_id we record its initial state without emitting; the emit
+# only fires on subsequent (session_id, title) changes.
+SESSION_POLL_INTERVAL_S = 1.5
+
+# state.db lookup pattern. Matches the session_key shape that
+# build_session_key generates for SessionSource(platform=SIDEKICK,
+# chat_id=X, chat_type='dm') — `agent:main:sidekick:dm:<chat_id>`.
+SESSION_KEY_PREFIX = "agent:main:sidekick:dm:"
 
 
 def check_sidekick_requirements() -> bool:
@@ -196,6 +226,17 @@ class SidekickAdapter(BasePlatformAdapter):
         # the proxy/PWA side.
         self._message_seq = 0
 
+        # session_changed polling state. Map of chat_id → (session_id, title)
+        # last seen in state.db. We only emit envelopes for transitions —
+        # the first observation seeds the cache silently. The poller task is
+        # spawned in connect() and cancelled in disconnect().
+        self._session_state_cache: Dict[str, Tuple[str, str]] = {}
+        self._session_poll_task: Optional[asyncio.Task] = None
+        # state.db path resolution. Hermes' own config picks this up from
+        # HERMES_STATE_DB or the default ~/.hermes/state.db; we mirror that
+        # so the adapter doesn't need a separate env var.
+        self._state_db_path: Optional[Path] = self._resolve_state_db_path()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -244,10 +285,37 @@ class SidekickAdapter(BasePlatformAdapter):
             self._port,
             self._token[:4],
         )
+
+        # Spawn the state.db poller for session_changed emission. Logs
+        # once at startup so an operator can confirm it's wired.
+        if self._state_db_path is not None:
+            self._session_poll_task = asyncio.create_task(
+                self._session_poll_loop(),
+                name="sidekick-session-poll",
+            )
+            logger.info(
+                "[sidekick] session_changed poller armed against %s "
+                "(interval=%.1fs)",
+                self._state_db_path,
+                SESSION_POLL_INTERVAL_S,
+            )
+        else:
+            logger.warning(
+                "[sidekick] state.db path not resolved — "
+                "session_changed envelopes will not be emitted"
+            )
         return True
 
     async def disconnect(self) -> None:
         """Stop accepting new connections, close the active proxy client."""
+        # Cancel the session poller before tearing down the WS so it can't
+        # fire envelopes into a half-closed socket.
+        if self._session_poll_task is not None:
+            self._session_poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._session_poll_task
+            self._session_poll_task = None
+
         async with self._client_lock:
             if self._client_ws is not None and not self._client_ws.closed:
                 with contextlib.suppress(Exception):
@@ -531,6 +599,127 @@ class SidekickAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "sidekick", "chat_id": chat_id}
+
+    # ------------------------------------------------------------------
+    # session_changed polling (Phase 2)
+    #
+    # Approach (b) from the platform-adapter plan: watch state.db for
+    # (session_id, title) transitions on the chat_ids we know about and
+    # emit a `session_changed` envelope when either changes. Picked over
+    # (a) hermes-side hooks (would require a hermes patch — explicit
+    # opt-in only) and (c) PWA polling (more client-side complexity,
+    # doesn't free push notifications). Trade-off: ~1s lag between a
+    # compression-driven session swap and the PWA seeing the new title.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_state_db_path() -> Optional[Path]:
+        """Find the gateway's state.db. Mirrors hermes' own resolution
+        order so the adapter doesn't introduce a new env var.
+
+        Resolution: HERMES_STATE_DB env → HERMES_HOME/state.db →
+        ~/.hermes/state.db. Returns None if nothing exists; caller logs.
+        """
+        env_path = os.getenv("HERMES_STATE_DB", "").strip()
+        if env_path:
+            p = Path(env_path).expanduser()
+            return p if p.exists() else None
+        home_path = os.getenv("HERMES_HOME", "").strip()
+        if home_path:
+            p = Path(home_path).expanduser() / "state.db"
+            if p.exists():
+                return p
+        default = Path("~/.hermes/state.db").expanduser()
+        return default if default.exists() else None
+
+    async def _session_poll_loop(self) -> None:
+        """Background task: poll state.db every ~1.5s and emit
+        ``session_changed`` envelopes for any chat_id whose
+        (session_id, title) tuple changes.
+
+        Skips polling while no proxy client is connected — there's no
+        listener to push to, and a queued event would race against the
+        proxy's reconnect handshake.
+        """
+        # Small initial delay so the gateway has a chance to write the
+        # first sessions row before our first SELECT (avoids one
+        # spurious "no rows yet" log).
+        await asyncio.sleep(SESSION_POLL_INTERVAL_S)
+        while True:
+            try:
+                # Skip when nobody's listening — the moment a proxy
+                # reconnects, we resume from the cached state, so a
+                # transition that happened during the disconnect still
+                # fires once on reconnect.
+                if self._client_ws is None or self._client_ws.closed:
+                    await asyncio.sleep(SESSION_POLL_INTERVAL_S)
+                    continue
+                await self._poll_sessions_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Never let a transient sqlite error kill the poller —
+                # we want it to recover the next tick.
+                logger.exception("[sidekick] session poll iteration failed")
+            await asyncio.sleep(SESSION_POLL_INTERVAL_S)
+
+    async def _poll_sessions_once(self) -> None:
+        """One pass over the gateway's sessions table. Pushed off the
+        event loop via a thread executor so the (tiny) sqlite read
+        doesn't stall the WS pump."""
+        rows = await asyncio.to_thread(self._read_session_rows)
+        for chat_id, session_id, title in rows:
+            prev = self._session_state_cache.get(chat_id)
+            current = (session_id or "", title or "")
+            if prev is None:
+                # First sighting of this chat_id since adapter startup.
+                # Seed the cache; we'd rather miss the very first
+                # session_id on this run than emit on a hot reload.
+                self._session_state_cache[chat_id] = current
+                continue
+            if prev == current:
+                continue
+            self._session_state_cache[chat_id] = current
+            logger.info(
+                "[sidekick] session_changed chat_id=%s session_id=%s title=%r",
+                chat_id,
+                current[0],
+                current[1],
+            )
+            await self._safe_send_envelope({
+                "type": "session_changed",
+                "chat_id": chat_id,
+                "session_id": current[0],
+                "title": current[1],
+            })
+
+    def _read_session_rows(self) -> list:
+        """Synchronous sqlite read — runs in a worker thread. Returns
+        ``[(chat_id, session_id, title), …]`` for every sidekick
+        session_key in state.db. Callers swallow exceptions."""
+        if self._state_db_path is None or not self._state_db_path.exists():
+            return []
+        # read-only URI: avoids any chance of write contention with the
+        # gateway's own writer thread.
+        uri = f"file:{self._state_db_path}?mode=ro"
+        # Trim length cap on title isn't enforced server-side; keeps
+        # log lines reasonable if someone names a chat War and Peace.
+        sql = """
+            SELECT
+                substr(session_key, ?) AS chat_id,
+                id                     AS session_id,
+                COALESCE(title, '')    AS title
+            FROM sessions
+            WHERE session_key LIKE ?
+        """
+        like = f"{SESSION_KEY_PREFIX}%"
+        # SQLite's substr is 1-indexed — the first character of chat_id
+        # in `agent:main:sidekick:dm:<chat_id>` is at position
+        # len(prefix) + 1.
+        substr_start = len(SESSION_KEY_PREFIX) + 1
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as conn:
+            cur = conn.execute(sql, (substr_start, like))
+            return [(r[0], r[1], r[2]) for r in cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------
