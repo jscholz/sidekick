@@ -76,7 +76,16 @@ const RECENT_CAP = 128;
 // (replay the whole ring).
 const recent: { id: number; env: Envelope }[] = [];
 let lastId = 0;
-const subscribers = new Set<{ res: any; ka: NodeJS.Timeout }>();
+interface Subscriber {
+  res: any;
+  ka: NodeJS.Timeout;
+  /** When set, this subscriber only receives envelopes whose chat_id
+   *  matches. PWA tabs should always pass ?chat_id= so cross-chat events
+   *  never reach the wrong view; null is left as a back-compat fallback
+   *  for diagnostic clients (curl) that want the raw firehose. */
+  chatId: string | null;
+}
+const subscribers = new Set<Subscriber>();
 
 function broadcast(env: Envelope): void {
   // Defense in depth: every envelope on this channel MUST carry chat_id
@@ -91,6 +100,7 @@ function broadcast(env: Envelope): void {
   const evtName = typeof env.type === 'string' ? env.type : 'message';
   const frame = `id: ${id}\nevent: ${evtName}\ndata: ${JSON.stringify(env)}\n\n`;
   for (const sub of subscribers) {
+    if (sub.chatId && sub.chatId !== env.chat_id) continue;
     try { sub.res.write(frame); }
     catch { detach(sub); }
   }
@@ -101,7 +111,7 @@ function broadcast(env: Envelope): void {
   if (recent.length > RECENT_CAP) recent.shift();
 }
 
-function detach(sub: { res: any; ka: NodeJS.Timeout }): void {
+function detach(sub: Subscriber): void {
   clearInterval(sub.ka);
   subscribers.delete(sub);
 }
@@ -141,6 +151,24 @@ export function handleSidekickStream(req, res): void {
     'X-Accel-Buffering': 'no',
   });
   res.write('retry: 5000\n\n');
+
+  // ?chat_id=<id> scopes both live broadcast and replay to a single chat.
+  // PWA tabs always pass this so cross-chat envelopes never reach the
+  // wrong view. Validate against the same shape used by the rest of the
+  // /api/sidekick/* surface; reject malformed values rather than silently
+  // ignoring them.
+  const url = new URL(req.url || '/', 'http://x');
+  const chatIdParam = url.searchParams.get('chat_id');
+  let chatId: string | null = null;
+  if (chatIdParam !== null) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(chatIdParam)) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: 'invalid chat_id' })}\n\n`);
+      res.end();
+      return;
+    }
+    chatId = chatIdParam;
+  }
+
   // SSE `Last-Event-ID`: when the client reconnects (auto-retry, manual
   // forceReconnect on visibility/online, etc.), the EventSource sends
   // back the most recent id it saw. Replay only entries strictly newer
@@ -155,6 +183,7 @@ export function handleSidekickStream(req, res): void {
   const replayFrom = Number.isFinite(lastEventId) ? lastEventId : -1;
   for (const entry of recent) {
     if (entry.id <= replayFrom) continue;
+    if (chatId && entry.env.chat_id !== chatId) continue;
     const evtName = typeof entry.env.type === 'string' ? entry.env.type : 'message';
     res.write(`id: ${entry.id}\nevent: ${evtName}\ndata: ${JSON.stringify(entry.env)}\n\n`);
   }
@@ -162,7 +191,7 @@ export function handleSidekickStream(req, res): void {
     try { res.write(': ka\n\n'); }
     catch { /* will be evicted on next broadcast */ }
   }, 15_000);
-  const sub = { res, ka };
+  const sub: Subscriber = { res, ka, chatId };
   subscribers.add(sub);
   req.on('close', () => detach(sub));
   req.on('error', () => detach(sub));
