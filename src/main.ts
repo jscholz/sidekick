@@ -652,6 +652,7 @@ async function boot() {
     onFinal: handleReplyFinal,
     onToolEvent: handleToolEvent,
     onActivity: handleActivity,
+    onNotification: handleNotification,
   });
   // Show/hide the sessions section inside the sidebar based on the
   // active backend's capabilities (sidebar itself is always visible).
@@ -2534,6 +2535,26 @@ function handleToolEvent({ kind, payload, conversation }: any) {
     log('canvas.show event from agent');
     attachCardToLatestAgentBubble(payload);
   }
+}
+
+/** Push notification handler — cron output, /background results,
+ *  scheduled reminders. Backends that support out-of-band push (today:
+ *  hermes-gateway via /api/sidekick/notifications) call this; others
+ *  never fire it. v1: append a styled system row in the targeted chat
+ *  if it's currently being viewed. Off-screen chats get a no-op for
+ *  now (a future iteration adds a drawer-side unread badge). Browser
+ *  Push API / APNS / Web Push integration is a separate sprint. */
+function handleNotification({ chatId, kind, content }: any) {
+  // Off-screen chat — drop for v1. The drawer doesn't yet have an
+  // unread-badge surface; refresh on switch will pick up the message
+  // via the next listSessions / resumeSession round-trip.
+  if (chatId && chatId !== sessionDrawer.getViewed()) {
+    log(`notification (off-screen) chat=${chatId} kind=${kind}`);
+    return;
+  }
+  const label = kind ? `notification — ${kind}` : 'notification';
+  const text = content ? `(${label}) ${content}` : `(${label})`;
+  chat.addSystemLine(text);
 }
 
 // ─── Go ─────────────────────────────────────────────────────────────────────

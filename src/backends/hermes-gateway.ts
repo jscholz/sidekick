@@ -50,6 +50,10 @@ let currentReplyId: string | null = null;
  *  there's no separate health route to mount. */
 let healthTimer: ReturnType<typeof setTimeout> | null = null;
 const HEALTH_INTERVAL_MS = 30_000;
+/** Persistent notifications EventSource. EventSource auto-reconnects
+ *  on transient failures (5s retry hint set by the server), so we
+ *  open once on connect() and let it handle redial. */
+let notifyES: EventSource | null = null;
 
 function newReplyId(): string {
   return `sk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -102,6 +106,50 @@ function startHealthPoll(): void {
 
 function stopHealthPoll(): void {
   if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; }
+}
+
+/** Open the persistent notifications channel. Idempotent — calling
+ *  twice keeps the existing source. EventSource handles reconnect via
+ *  the `retry: 5000` hint the server emits, so we don't manage the
+ *  lifecycle ourselves beyond open / close on connect / disconnect. */
+function startNotificationsChannel(): void {
+  if (notifyES) return;
+  try {
+    notifyES = new EventSource(`${apiBase()}/notifications`);
+  } catch (e: any) {
+    diag(`hermes-gateway: notifications EventSource open failed: ${e.message}`);
+    return;
+  }
+  notifyES.addEventListener('notification', (ev: MessageEvent) => {
+    let env: any;
+    try { env = JSON.parse(ev.data); }
+    catch {
+      diag('hermes-gateway: notifications non-JSON frame ignored');
+      return;
+    }
+    const chatId = typeof env?.chat_id === 'string' ? env.chat_id : '';
+    if (!chatId) return;
+    const kind = typeof env?.kind === 'string' ? env.kind : 'unknown';
+    const content = typeof env?.content === 'string' ? env.content : '';
+    log(`hermes-gateway: notification kind=${kind} chat_id=${chatId}`);
+    subs?.onNotification?.({ chatId, kind, content });
+    // Bump the drawer ordering so the chat with the freshest notification
+    // floats up. last_message_at semantically tracks "most-recent
+    // activity" — a cron-pushed message qualifies.
+    conversations.updateLastMessageAt(chatId, Date.now()).catch(() => {});
+  });
+  notifyES.onerror = (e) => {
+    // EventSource auto-reconnects; just log so transient blips are
+    // visible without closing the source (closing would prevent retry).
+    diag(`hermes-gateway: notifications stream errored (will retry): ${(e as any)?.message || ''}`);
+  };
+}
+
+function stopNotificationsChannel(): void {
+  if (notifyES) {
+    try { notifyES.close(); } catch {}
+    notifyES = null;
+  }
 }
 
 // ─── SSE parsing ─────────────────────────────────────────────────────────────
@@ -201,12 +249,20 @@ function handleEnvelope(type: string, env: any, chatId: string): void {
       return;
     }
 
-    case 'notification':
+    case 'notification': {
       // Push notification (cron, /background result, scheduled
-      // reminder). Not handled for v1 — no UI hookup yet. Logged so
-      // they're observable from devtools when the plugin lands.
-      log(`hermes-gateway: notification for ${chatId}: ${env.kind || 'unknown'}`);
+      // reminder). Normally arrives via the dedicated notifications
+      // EventSource (see startNotificationsChannel above) — but the
+      // adapter MAY emit one mid-turn on the per-message SSE if a
+      // background event lands while a turn is streaming, so handle it
+      // here too. Idempotent at the shell level (system rows are
+      // append-only; minor duplication is fine).
+      const kind = typeof env.kind === 'string' ? env.kind : 'unknown';
+      const content = typeof env.content === 'string' ? env.content : '';
+      log(`hermes-gateway: notification (in-stream) for ${chatId}: ${kind}`);
+      subs?.onNotification?.({ chatId, kind, content });
       return;
+    }
 
     case 'error':
       log(`hermes-gateway: error for ${chatId}: ${env.detail || 'unknown'}`);
@@ -258,11 +314,13 @@ export const hermesGatewayAdapter = {
       log('hermes-gateway: probe failed — is the proxy running?');
     }
     startHealthPoll();
+    startNotificationsChannel();
   },
 
   disconnect() {
     if (inflight) { try { inflight.abort(); } catch {} inflight = null; }
     stopHealthPoll();
+    stopNotificationsChannel();
     connected = false;
   },
 

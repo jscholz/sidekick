@@ -92,6 +92,20 @@
  */
 
 /**
+ * Push notification emitted out-of-band by the backend — cron output,
+ * `/background` results, scheduled reminders. Distinct from `onFinal`:
+ * notifications aren't tied to a user-initiated turn. The shell renders
+ * them as system rows in whichever chat they target. v1: in-PWA only;
+ * browser Push API (APNS / Web Push) is a separate sprint.
+ *
+ * @typedef {Object} NotificationEvent
+ * @property {string} chatId      - Conversation the notification belongs to.
+ * @property {string} kind        - Free-form label (cron / background /
+ *                                  reminder / etc). Renderer uses this
+ *                                  for a small visual hint next to the row.
+ * @property {string} content     - The message body to display.
+ */
+/**
  * Passed to `connect`. Adapter fires these as events arrive from its wire
  * protocol. Missing handlers = adapter silently drops that event class.
  *
@@ -101,6 +115,7 @@
  * @property {(f: FinalEvent) => void} [onFinal]
  * @property {(e: ToolEvent) => void} [onToolEvent]
  * @property {(a: ActivityEvent) => void} [onActivity]
+ * @property {(n: NotificationEvent) => void} [onNotification]
  */
 
 /**
