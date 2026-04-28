@@ -994,6 +994,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && /^\/api\/sidekick\/sessions(?:\?.*)?$/.test(req.url)) {
       return hermesGateway.handleSidekickSessionsList(req, res);
     }
+    // Per-chat_id transcript history. Match BEFORE the generic
+    // /sessions/<id> DELETE pattern so the more-specific subroute wins.
+    const sidekickHistory = req.method === 'GET'
+      && req.url.match(/^\/api\/sidekick\/sessions\/([^/?]+)\/messages(?:\?.*)?$/);
+    if (sidekickHistory) {
+      return hermesGateway.handleSidekickSessionMessages(req, res, decodeURIComponent(sidekickHistory[1]));
+    }
     const sidekickDelete = req.method === 'DELETE'
       && req.url.match(/^\/api\/sidekick\/sessions\/([^/?]+)(?:\?.*)?$/);
     if (sidekickDelete) {

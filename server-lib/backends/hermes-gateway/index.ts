@@ -25,6 +25,7 @@ export {
   handleSidekickSessionsList,
   handleSidekickSessionDelete,
 } from './sessions.ts';
+export { handleSidekickSessionMessages } from './history.ts';
 
 /** Wire env-derived config and start the persistent WS client.
  *

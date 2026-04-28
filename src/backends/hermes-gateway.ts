@@ -228,7 +228,7 @@ export const hermesGatewayAdapter = {
     sessions: true,           // chat_id provides multi-session semantics
     models: false,            // not exposed via the gateway adapter (yet)
     toolEvents: false,        // image envelope is a placeholder; no canvas wiring v1
-    history: false,           // resume returns empty for v1; future work
+    history: true,            // /api/sidekick/sessions/<chat_id>/messages
     attachments: false,       // wire shape allows it, no PWA composer support yet
     sessionBrowsing: true,    // /api/sidekick/sessions
     slashCommands: true,      // gateway parses /new, /compress, /resume, /undo, /background
@@ -421,19 +421,58 @@ export const hermesGatewayAdapter = {
     if (id.startsWith('__sidekick:hint:')) {
       return { messages: [], firstId: null, hasMore: false };
     }
-    // Phase-3 v1: gateway-owned message history isn't surfaced through
-    // the proxy yet (no /api/sidekick/sessions/<id>/messages endpoint).
-    // Switching active chat_id is enough for the gateway to continue
-    // the conversation server-side — it resolves (Platform.SIDEKICK,
-    // chat_id) → session_id internally. Returning empty messages
-    // means the chat pane will show a blank slate until the user
-    // sends the next turn; future work fetches the cached transcript
-    // when an endpoint exists.
+    // Flip the active pointer FIRST. The next sendMessage uses this
+    // chat_id even if the history fetch below errors — the gateway
+    // resolves (Platform.SIDEKICK, chat_id) → session_id internally
+    // so the conversation continues server-side regardless. We don't
+    // need a token-monotonic guard like hermes.ts because the active
+    // chat_id is the single source of truth and IDB write is atomic.
     activeChatId = id;
     await conversations.setActive(id);
     currentReplyId = null;
-    log(`hermes-gateway: resumed session (chat_id=${id}, no transcript replay yet)`);
-    return { messages: [], firstId: null, hasMore: false };
+    // Fetch transcript via the proxy. The endpoint resolves chat_id →
+    // session_id by looking up state.db.sessions.session_key, then walks
+    // the parent_session_id chain so compression rotations show their
+    // full transcript. On any failure (proxy down, unconfigured token,
+    // unknown chat_id) we return an empty transcript and let the user
+    // continue the chat — better than a hard error toast for what is
+    // strictly enrichment.
+    try {
+      const r = await fetch(
+        `${apiBase()}/sessions/${encodeURIComponent(id)}/messages`,
+      );
+      if (!r.ok) {
+        diag(`hermes-gateway.resumeSession: HTTP ${r.status} for ${id}`);
+        log(`hermes-gateway: resumed (chat_id=${id}, history fetch failed)`);
+        return { messages: [], firstId: null, hasMore: false };
+      }
+      const d = await r.json();
+      const result = {
+        messages: d.messages || [],
+        firstId: d.firstId ?? null,
+        hasMore: !!d.hasMore,
+      };
+      log(`hermes-gateway: resumed (chat_id=${id}, ${result.messages.length} messages, hasMore=${result.hasMore})`);
+      return result;
+    } catch (e: any) {
+      diag(`hermes-gateway.resumeSession: ${e.message}`);
+      return { messages: [], firstId: null, hasMore: false };
+    }
+  },
+
+  async loadEarlier(id: string, beforeId: number) {
+    if (id.startsWith('__sidekick:hint:')) {
+      return { messages: [], firstId: null, hasMore: false };
+    }
+    const q = new URLSearchParams({ before: String(beforeId) });
+    const r = await fetch(`${apiBase()}/sessions/${encodeURIComponent(id)}/messages?${q}`);
+    if (!r.ok) throw new Error(`loadEarlier HTTP ${r.status}`);
+    const d = await r.json();
+    return {
+      messages: d.messages || [],
+      firstId: d.firstId ?? null,
+      hasMore: !!d.hasMore,
+    };
   },
 
   async deleteSession(id: string) {
