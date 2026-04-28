@@ -1710,6 +1710,18 @@ async function boot() {
     btnMic.addEventListener('pointerdown', (e: PointerEvent) => {
       diagMicState('pointerdown ENTRY');
       if (holdActivationTimer) { clearTimeout(holdActivationTimer); holdActivationTimer = null; }
+      // Stale-state guard: if the gesture machine thinks we're in
+      // recording_toggle but no voice path is actually running, the
+      // memo finalized externally (Enter-in-composer, memo bar's
+      // own send button, etc) without our pointerdown firing. The
+      // old code path called stopVoice → no-op → user perceived
+      // "click did nothing" alternating pattern. Reset to idle and
+      // fall through to the normal start path.
+      if (micState === 'recording_toggle' && !voiceActive()) {
+        log('[mic-diag] stale recording_toggle (voice not active) — resetting to idle');
+        micState = 'idle';
+        recordingToggleAt = 0;
+      }
       if (micState === 'recording_toggle') {
         // Second press on a tap-toggled recording — stop now, BUT only
         // if enough time has passed since toggle-start. A press within
