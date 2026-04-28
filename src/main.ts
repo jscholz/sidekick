@@ -1597,6 +1597,15 @@ async function boot() {
     type MicState = 'idle' | 'recording' | 'recording_toggle';
     let micState: MicState = 'idle';
     let pressStartedAt = 0;
+    /** Time the gesture machine entered `recording_toggle`. A second
+     *  pointerdown within TOGGLE_STOP_GUARD_MS of this is treated as
+     *  an accidental double-tap (browser autoclick / fast user) and
+     *  ignored — otherwise rapid double-clicks finalize a sub-second
+     *  empty memo (matches Jonathan's "memo requires two clicks" bug
+     *  2026-04-28). Call mode dodges this because WebRTC handshake is
+     *  still in flight on click 2, so its stopVoice no-ops. */
+    let recordingToggleAt = 0;
+    const TOGGLE_STOP_GUARD_MS = 500;
     /** True once we've classified the press as HOLD (release ≥ threshold).
      *  Distinct from micState so the drag-to-discard pointermove handler
      *  knows when the gesture surface is live. */
@@ -1646,7 +1655,18 @@ async function boot() {
     btnMic.addEventListener('pointerdown', (e: PointerEvent) => {
       if (holdActivationTimer) { clearTimeout(holdActivationTimer); holdActivationTimer = null; }
       if (micState === 'recording_toggle') {
-        // Second press on a tap-toggled recording — stop now.
+        // Second press on a tap-toggled recording — stop now, BUT only
+        // if enough time has passed since toggle-start. A press within
+        // ~500ms of the toggle-start is almost certainly a stray
+        // double-tap, not a deliberate stop. Without this guard, two
+        // fast clicks fire start+stop in <1s and produce an empty
+        // memo (Jonathan's "memo requires two clicks" bug).
+        const age = performance.now() - recordingToggleAt;
+        if (age < TOGGLE_STOP_GUARD_MS) {
+          e.preventDefault();
+          log('[mic] double-tap guard — ignoring stop press at age=', age.toFixed(0), 'ms');
+          return;
+        }
         e.preventDefault();
         micState = 'idle';
         void stopVoice();
@@ -1726,8 +1746,11 @@ async function boot() {
 
       log('[mic] pointerup — dur=', dur.toFixed(0), 'ms, classify=', dur < TAP_THRESHOLD_MS ? 'TAP' : 'HOLD');
       if (dur < TAP_THRESHOLD_MS && !isCancel) {
-        // TAP → keep recording in toggle mode. Next tap stops it.
+        // TAP → keep recording in toggle mode. Next tap stops it
+        // (but see TOGGLE_STOP_GUARD_MS in pointerdown handler — too-
+        // fast follow-up taps get ignored as accidental double-taps).
         micState = 'recording_toggle';
+        recordingToggleAt = performance.now();
         try {
           status.setStatus('Recording — tap mic again to send', 'live');
         } catch {}
@@ -2014,20 +2037,19 @@ async function boot() {
     }
     if (matches(s.hotkeyToggleMic)) {
       claim();
-      // Toggle whichever voice path matches the current settings.
-      // NOT btn.click() — the new mic gesture machine listens for
-      // pointerdown/pointerup, not click events, so synthetic clicks
-      // are ignored. Drive the same state transition a tap would
-      // produce: idle → recording_toggle (start), recording_toggle →
-      // idle (stop). Other states (active recording mid-press) are
-      // not reachable from a hotkey since there's no concept of
-      // "release" via keyboard.
-      log('[hotkey] toggleMic — voiceActive=', voiceActive(), 'micState=', micState);
+      // Toggle voice via startVoice/stopVoice directly. NOT btn.click()
+      // (the new mic gesture machine listens to pointer events, not
+      // clicks — synthetic clicks are ignored) and NOT touching the
+      // gesture machine's internal `micState` (out-of-scope from this
+      // listener). The gesture machine's pointerdown handler has a
+      // `if (voiceActive()) { stopVoice(); return; }` defensive branch
+      // that auto-syncs state when the user next touches the mic — so
+      // hotkey-started voice gets stopped correctly by a subsequent
+      // tap, and vice versa.
+      log('[hotkey] toggleMic — voiceActive=', voiceActive());
       if (voiceActive()) {
-        micState = 'idle';
         void stopVoice();
       } else {
-        micState = 'recording_toggle';
         void startVoice();
       }
       return;
