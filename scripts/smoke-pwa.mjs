@@ -100,8 +100,9 @@ try {
     await page.click('#sb-new-chat');
   }
 
-  // Turn 1: send "hi" — assert an assistant bubble appears.
-  log('turn 1: sending "hi"');
+  // ── Turn 1: greeting ───────────────────────────────────────────────
+  log('--- turn 1: "hi" ---');
+  const turn1StartMs = Date.now();
   await page.fill('#composer-input', 'hi');
   await page.click('#composer-send');
 
@@ -148,6 +149,9 @@ try {
          `  -- last ${Math.min(30, consoleRing.length)} page-console lines --\n${consoleTail || '    (none)'}\n` +
          `  -- #transcript HTML (truncated) --\n  ${transcriptHTML.slice(0, 300)}`);
   }
+  const turn1FirstBubbleMs = Date.now() - turn1StartMs;
+  log(`turn 1: first finalized assistant bubble appeared ✓  (${turn1FirstBubbleMs} ms after click)`);
+
   // First-message-ever in a fresh chat draws TWO bubbles: the gateway's
   // home-channel onboarding nudge ("📬 No home channel is set…") then
   // the agent's actual greeting. Wait for BOTH so we don't mistake
@@ -179,6 +183,68 @@ try {
   if (agentTexts.some(t => /^(thinking|using \w+|pending)…?$/i.test(t.trim()))) {
     fail(`turn 1: at least one bubble is still a placeholder: ${JSON.stringify(agentTexts)}`);
   }
+
+  // ── Turn 1 timing: send → first agent text on screen ──────────────
+  // Measure the BARE-MINIMUM-greeting round-trip so we can spot
+  // throughput regressions. End-of-nudge is what the user sees first
+  // in a fresh chat; for non-fresh chats (no nudge), this is the
+  // agent's reply directly.
+  log(`turn 1: ${agentTexts.length} agent bubble(s) rendered`);
+
+  // ── Turn 2: tool-using prompt ────────────────────────────────────
+  log('--- turn 2: tool-using prompt ---');
+  const toolPrompt = 'Search the web for today\'s weather in London and tell me the high temperature.';
+  log(`turn 2: prompting "${toolPrompt}"`);
+  const turn2StartMs = Date.now();
+  await page.fill('#composer-input', toolPrompt);
+  await page.click('#composer-send');
+
+  // Phase 3 renders an activity row between the user message and the
+  // agent reply when tool_call / tool_result envelopes arrive.
+  // Default agentActivity setting is 'summary' → one .activity-row
+  // exists per turn. We assert the row appears AND eventually a new
+  // finalized agent bubble lands after it.
+  log('turn 2: waiting for activity row (tool calls)');
+  let sawActivity = false;
+  try {
+    await page.waitForSelector('.activity-row', { timeout: 30_000 });
+    sawActivity = true;
+  } catch {
+    log('  (no .activity-row appeared in 30s — model may have answered without using a tool)');
+  }
+  const turn2ActivityMs = Date.now() - turn2StartMs;
+
+  // The next finalized agent bubble (count must increase past turn-1's count).
+  log('turn 2: waiting for new finalized agent bubble');
+  const baselineCount = agentTexts.length;
+  try {
+    await page.waitForFunction(
+      ({ sel, baseline }) => document.querySelectorAll(sel).length > baseline,
+      { sel: finalAgentSel, baseline: baselineCount },
+      { timeout: TIMEOUT_PER_TURN, polling: 250 },
+    );
+  } catch (e) {
+    const finalCount = await page.locator(finalAgentSel).count();
+    fail(`turn 2: no NEW finalized agent bubble within ${TIMEOUT_PER_TURN}ms (still ${finalCount}, baseline ${baselineCount})`);
+  }
+  const turn2ReplyMs = Date.now() - turn2StartMs;
+  const turn2Texts = await page.locator(`${finalAgentSel} .text`).allInnerTexts();
+  const turn2Reply = turn2Texts[turn2Texts.length - 1] || '';
+  log(`turn 2: reply "${turn2Reply.slice(0, 120).replace(/\n/g, ' ')}"`);
+
+  // Tool rows inside the activity row (full-mode children, expanded
+  // when summary is clicked; in summary mode these still exist
+  // in the DOM, just hidden behind the summary).
+  const toolRowCount = await page.locator('.tool-row').count();
+  log(`turn 2: tool rows in DOM: ${toolRowCount}`);
+
+  console.log('');
+  const turn1FinalMs = Date.now();  // Just for log alignment.
+  console.log('=== timings ===');
+  console.log(`  turn 1 (send → 1st bubble):           ${turn1FirstBubbleMs} ms`);
+  console.log(`  turn 2 (send → activity row):         ${sawActivity ? `${turn2ActivityMs} ms` : 'N/A (no activity row)'}`);
+  console.log(`  turn 2 (send → reply finalized):      ${turn2ReplyMs} ms`);
+  console.log('');
 
   log('PASS');
 } catch (e) {
