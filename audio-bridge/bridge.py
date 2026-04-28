@@ -55,9 +55,8 @@ def main() -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
 
     # File handler — defaults to /tmp/sidekick-audio.log so logs are
-    # tailable even when user-level journald isn't capturing this unit
-    # (observed 2026-04-27 — sidekick.service logs fine, sidekick-audio
-    # silently doesn't). `tail -f` works regardless of journald state.
+    # tailable even when user-level journald isn't capturing this unit.
+    # `tail -f` works regardless of journald state.
     log_file = os.environ.get("SIDEKICK_AUDIO_LOG_FILE", "/tmp/sidekick-audio.log")
     if log_file:
         try:

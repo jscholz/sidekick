@@ -73,7 +73,7 @@ Open a new peer connection.
   "sdp": "<offer SDP>",
   "type": "offer",
   "mode": "stream" | "talk",
-  "conv_name": "sidekick-tom-2026-04-26",   // optional; legacy /v1/responses path
+  "conv_name": "sidekick-example-2026-04-26",   // optional; legacy /v1/responses path
   "chat_id": "uuid-…"                        // optional; hermes-gateway path
 }
 ```
@@ -420,7 +420,7 @@ the existing fetch+EventSource code path applies unchanged:
 
 ### session_changed sourcing
 
-Phase 2 v1 detects compression by polling `state.db.sessions` for
+The adapter detects compression by polling `state.db.sessions` for
 known chat_ids — see the `session_changed envelope` section in
 `hermes-plugin/sidekick_platform.py` for cadence + envelope shape.
 Trade-off: ~1s lag on title refresh after compression, no hermes-core

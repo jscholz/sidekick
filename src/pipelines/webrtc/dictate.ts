@@ -149,8 +149,7 @@ const dictateDebugOn = (() => {
 })();
 
 /** Per-event diagnostic log. Tag every line with [dictate] + a phase
- *  label so Jonathan can grep one stream out of the console. No-op
- *  unless the dictate-debug flag is on. */
+ *  label so it's greppable. No-op unless the dictate-debug flag is on. */
 function dlog(phase: string, info: Record<string, unknown> = {}): void {
   if (!dictateDebugOn) return;
   const snapshot = composerInput
@@ -394,9 +393,8 @@ function handleUtteranceEnd(): void {
 function ensureAnchor(): void {
   if (anchor !== null) return;
   if (!composerInput) return;
-  // Diagnostic snapshot — Jonathan asked for this so we can verify the
-  // gesture-site capture is doing its job vs. falling back to
-  // selectionStart on a blurred element.
+  // Diagnostic snapshot — verifies the gesture-site capture is doing
+  // its job vs. falling back to selectionStart on a blurred element.
   if (dictateDebugOn) {
     const ss = composerInput.selectionStart;
     const se = composerInput.selectionEnd;
@@ -506,10 +504,8 @@ function spliceFinal(text: string): void {
   interimLen = 0;
   lastFinalText = text;
   // Cursor sits at the end of committed text — same advancing-with-
-  // speech invariant as the interim path. Earlier versions pinned at
-  // anchor so the caret stayed put; that was the wrong mental model
-  // (Jonathan: "as text comes in it should land immediately behind the
-  // cursor just like if the user had typed that input").
+  // speech invariant as the interim path. Text should land
+  // immediately behind the cursor as if the user had typed it.
   setCursor(anchor + committedLen);
 }
 

@@ -1,5 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Sidekick <jscholz@reimaginerobotics.ai>
+From: Sidekick <noreply@example.invalid>
 Date: Mon, 27 Apr 2026 00:00:00 +0100
 Subject: [PATCH] gateway: register Platform.SIDEKICK + adapter factory branch
 
@@ -25,14 +25,11 @@ This patch is intentionally minimal:
 
 Apply with::
 
-    cd ~/.hermes/hermes-agent
-    patch -p1 < ~/code/sidekick/hermes-plugin/0001-add-sidekick-platform.patch
+    cd <your hermes-agent install>
+    patch -p1 < <path-to-this-dir>/0001-add-sidekick-platform.patch
 
-Or maintain it as a local entry in the patch ledger
-(``reference_hermes_patches.md``), rebased before each ``pip install -U
-hermes-agent``.
-
-DO NOT apply automatically — Jonathan rebases the patch ledger by hand.
+Maintain as a local patch since it must be rebased before each
+``pip install -U hermes-agent``. NOT applied automatically.
 ---
  gateway/config.py | 2 ++
  gateway/run.py    | 21 +++++++++++++++++++++

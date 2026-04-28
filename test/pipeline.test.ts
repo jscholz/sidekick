@@ -81,7 +81,7 @@ describe('full pipeline: parse → validate', () => {
   });
 
   it('hand-crafted agent canvas.show payload validates', () => {
-    // This is what the Phase 3 CLI tool will emit
+    // Sample payload an external CLI tool would emit
     const card = {
       v: 1,
       kind: 'markdown',

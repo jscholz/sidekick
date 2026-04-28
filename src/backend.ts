@@ -54,9 +54,9 @@ export async function loadAdapter() {
         break;
       }
       case 'hermes-gateway': {
-        // Phase-3 platform-adapter backend; talks to the proxy's
+        // Platform-adapter backend; talks to the proxy's
         // /api/sidekick/* surface. Coexists with 'hermes' (legacy
-        // /v1/responses path) until Phase 4 cleanup.
+        // /v1/responses path).
         const m = await import('./backends/hermes-gateway.ts');
         adapter = m.hermesGatewayAdapter;
         break;

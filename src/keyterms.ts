@@ -71,10 +71,9 @@ export async function readList(): Promise<string[] | null> {
 }
 
 /** Persist the given list to IDB. Overwrites any prior list.
- *  Logs to console on success/failure so the chip-UI commit path is
- *  observable from DevTools — Jonathan reported "adding chips fires no
- *  console output" 2026-04-28; without observability, an IDB write
- *  failure (quota, private mode, schema mismatch) was silent. */
+ *  Logs success/failure so the chip-UI commit path is observable from
+ *  DevTools; without observability, an IDB write failure (quota,
+ *  private mode, schema mismatch) is silent. */
 export async function writeList(terms: string[]): Promise<void> {
   try {
     const db = await openDB();

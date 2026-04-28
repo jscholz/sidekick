@@ -353,7 +353,7 @@ async function handleLinkPreview(req, res) {
       signal: ctrl.signal,
       redirect: 'follow',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; Sidekick/1.0; +https://github.com/jscholz/sidekick)',
+        'User-Agent': 'Mozilla/5.0 (compatible; Sidekick/1.0)',
         'Accept': 'text/html,application/xhtml+xml',
       },
     });
@@ -829,7 +829,7 @@ initHermesConfig({
   HINDSIGHT_URL: (cfgVal('SIDEKICK_HINDSIGHT_URL', 'backend.hindsight.url',
     'http://127.0.0.1:8765') as string).replace(/\/+$/, ''),
   HINDSIGHT_BANK: cfgVal('SIDEKICK_HINDSIGHT_BANK', 'backend.hindsight.bank_id',
-    'jonathan') as string,
+    'default') as string,
   HINDSIGHT_API_KEY: (process.env.HINDSIGHT_API_KEY ||
     cfgVal('SIDEKICK_HINDSIGHT_API_KEY', 'backend.hindsight.api_key', '') as string).trim(),
   // Filter so random test names / non-sidekick conversations don't clutter the UI.
@@ -863,11 +863,11 @@ initOpenAICompatConfig({
   OPENAI_COMPAT_KEY: process.env.SIDEKICK_OPENAI_COMPAT_KEY || '',  // secret — env only
 });
 
-// ─── Hermes-gateway backend (Phase 2) ───────────────────────────────────
+// ─── Hermes-gateway backend ─────────────────────────────────────────────
 // WS client to the in-process hermes sidekick platform adapter (the
 // hermes-plugin/sidekick_platform.py adapter, peer of telegram/slack).
-// Coexists with the existing /api/hermes/* /v1/responses path until the
-// PWA backend cuts over in Phase 3. With no token configured, the WS
+// Coexists with the legacy /api/hermes/* /v1/responses path; the PWA
+// picks one via its backend setting. With no token configured, the WS
 // client logs a warning and the /api/sidekick/* endpoints return 503.
 hermesGateway.init({
   token: process.env.SIDEKICK_PLATFORM_TOKEN
@@ -880,8 +880,7 @@ hermesGateway.init({
 // this, PREFERRED_MODELS_RAW stays at its module-default `[]` until
 // the first config-mtime change picks up the yaml value via
 // reloadConfigIfChanged() — which never happens on a stable deployment
-// where the yaml hasn't been edited since boot. Lost during the hermes
-// backend extraction (commit 860a6ad); restored 2026-04-27.
+// where the yaml hasn't been edited since boot.
 //
 // Falls back to SIDEKICK_PREFERRED_MODELS env var (comma-sep) for
 // deployments that haven't switched to the yaml yet.
@@ -982,11 +981,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && /^\/api\/hermes\/model(?:\?.*)?$/.test(req.url)) return handleHermesModelSet(req, res);
   }
   if (req.url && req.url.startsWith('/api/hermes')) return handleHermesProxy(req, res);
-  // Sidekick platform-adapter endpoints (Phase 2 — coexists with the
-  // /api/hermes/* path; PWA-side cutover lands in Phase 3). Match
-  // before the static fallback. The DELETE pattern's chat_id capture
-  // group is permissive on character class to match the IDB-minted
-  // UUIDs we expect.
+  // Sidekick platform-adapter endpoints (coexist with /api/hermes/*).
+  // Match before the static fallback. The DELETE pattern's chat_id
+  // capture group is permissive on character class to match the
+  // IDB-minted UUIDs we expect.
   if (req.url) {
     if (req.method === 'POST' && req.url === '/api/sidekick/messages') {
       return hermesGateway.handleSidekickMessage(req, res);

@@ -932,9 +932,10 @@ async function boot() {
   composerInput.addEventListener('input', () => { autoResize(); updateSendButtonState(); });
 
   // Paste image support — if the clipboard has an image (e.g. screenshot
-  // copied via cmd+shift+4 then cmd+C, or Claude Code "copy image"), add
-  // it to the pending attachments via the same path as the attach/camera
-  // buttons. Text paste falls through to the default textarea behavior.
+  // copied via cmd+shift+4 then cmd+C, or any tool that puts an image
+  // on the clipboard), add it to the pending attachments via the same
+  // path as the attach/camera buttons. Text paste falls through to the
+  // default textarea behavior.
   composerInput.addEventListener('paste', async (e) => {
     const items = e.clipboardData?.items as DataTransferItemList | undefined;
     if (!items) return;
@@ -1199,11 +1200,11 @@ async function boot() {
           // Permanent: drop from queue so we don't retry forever.
           // Transient: throw, queue.flush keeps the item for next round.
           //
-          // Symptom 2026-04-25 PM: 9 audio memos queued, /transcribe
-          // returning "deepgram 400 corrupt or unsupported data" on
-          // each retry. Likely blobs recorded while the iOS mic-perm
-          // dialog was up (silent / partial). Without this fix the
-          // outbox just keeps growing.
+          // Symptom: queued audio memos all fail with "deepgram 400
+          // corrupt or unsupported data" on each retry — typically
+          // blobs recorded while the iOS mic-perm dialog was up
+          // (silent / partial). Without this guard the outbox grows
+          // unbounded.
           const err = String(data.error || 'transcription failed');
           const isPermanent = /\b4\d\d\b|corrupt|unsupported|empty body/i.test(err);
           if (isPermanent) {
@@ -1635,8 +1636,7 @@ async function boot() {
      *  pointerdown within TOGGLE_STOP_GUARD_MS of this is treated as
      *  an accidental double-tap (browser autoclick / fast user) and
      *  ignored — otherwise rapid double-clicks finalize a sub-second
-     *  empty memo (matches Jonathan's "memo requires two clicks" bug
-     *  2026-04-28). Call mode dodges this because WebRTC handshake is
+     *  empty memo. Call mode dodges this because WebRTC handshake is
      *  still in flight on click 2, so its stopVoice no-ops. */
     let recordingToggleAt = 0;
     const TOGGLE_STOP_GUARD_MS = 500;
@@ -1654,11 +1654,7 @@ async function boot() {
     let capturedPointerId: number | null = null;
 
     /** Diagnostic: snapshot every relevant gesture-state variable at a
-     *  decision site. Jonathan reports a "first-click does nothing,
-     *  second-click works" alternating pattern that doesn't show up
-     *  in normal logs — the press is silently no-op'd somewhere. This
-     *  helper makes every branch of the gesture machine self-reporting
-     *  so the next repro tells us which guard fired. Remove after fix. */
+     *  decision site. Used to debug silent no-op press branches. */
     function diagMicState(label: string): void {
       const age = recordingToggleAt > 0 ? (performance.now() - recordingToggleAt).toFixed(0) : '-';
       log(
@@ -1728,7 +1724,7 @@ async function boot() {
         // ~500ms of the toggle-start is almost certainly a stray
         // double-tap, not a deliberate stop. Without this guard, two
         // fast clicks fire start+stop in <1s and produce an empty
-        // memo (Jonathan's "memo requires two clicks" bug).
+        // memo (the "memo requires two clicks" symptom).
         const age = performance.now() - recordingToggleAt;
         if (age < TOGGLE_STOP_GUARD_MS) {
           e.preventDefault();

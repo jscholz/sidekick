@@ -4,7 +4,7 @@
  * /api/sidekick/* HTTP/SSE surface (server-lib/backends/hermes-gateway/)
  * into the BackendAdapter contract. Coexists with the legacy hermes.ts
  * adapter, which talks to /api/hermes/responses (/v1/responses) — both
- * stay live until Phase 4.
+ * stay live; the user picks one via the backend setting.
  *
  * Wire path:
  *   PWA → POST /api/sidekick/messages {chat_id, text}

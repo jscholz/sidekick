@@ -199,9 +199,8 @@ export async function open(
     //     correlates with system output. With server-side VAD checking
     //     for user-voice-during-TTS to fire barge, AEC means the
     //     bridge sees attenuated audio (max_rms ~140 instead of
-    //     2000+ during normal speech). Diagnosed 2026-04-27 with
-    //     /tmp/sidekick-audio.log vad-obs lines: user speaking during
-    //     TTS lands at max_rms ~140 with AEC on, well below any
+    //     2000+ during normal speech). Empirically, user speech during
+    //     TTS with AEC on lands at max_rms ~140 — well below any
     //     reasonable VAD threshold.
     //   - noiseSuppression similarly suppresses anything it considers
     //     "background." Mac built-in mic + speakers tend to make AI-

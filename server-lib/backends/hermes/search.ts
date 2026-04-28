@@ -57,12 +57,12 @@
 //
 // WHY HERE AND NOT IN HERMES
 //
-// Jonathan's stance: don't stack hermes patches for sidekick-specific UX.
-// All three mechanisms above are sidekick concerns: hermes can keep its own
-// internal model. The cost is this comment block plus mergeForkRows +
-// lookupAllSessionUuids — a price worth paying to keep hermes upgrades
-// clean. If upstream #16517 lands, mechanism (B) goes away and so can the
-// JS merge step (the SQL CTE alone covers (A)).
+// Don't stack hermes patches for sidekick-specific UX. All three mechanisms
+// above are sidekick concerns: hermes can keep its own internal model.
+// The cost is this comment block plus mergeForkRows + lookupAllSessionUuids
+// — a price worth paying to keep hermes upgrades clean. If upstream #16517
+// lands, mechanism (B) goes away and so can the JS merge step (the SQL
+// CTE alone covers (A)).
 //
 // IF YOU'RE EDITING ANYTHING IN THIS SECTION
 //
@@ -153,8 +153,8 @@ export async function handleHermesSearch(req, res) {
  *       (parent_session_id is null — there's nothing to link to) but the
  *       slug is the same. Without (2), the sidebar would show "sidekick-foo"
  *       twice. JS merge sums messageCount, takes max lastMessageAt, latest
- *       snippet. (Discovered 2026-04-27: Jonathan saw "8 sessions with 730
- *       messages" after a gateway restart cycle — that was case 2.)
+ *       snippet. This case shows up after a gateway restart or LRU eviction
+ *       cycle — sidebar would otherwise duplicate the slug with split counts.
  *
  *  Why JS merge instead of more SQL? The CTE already aggregates within a
  *  chain; a second SQL grouping over the result requires another CTE

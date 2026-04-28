@@ -11,7 +11,7 @@ Implementers include:
 - **hermes-agent** — the reference implementation
   (`gateway/platforms/api_server.py:_handle_responses`).
 - **openclaw** — historic, may return after a stability pass.
-- **Tom's backend** — future contributor; reads only this document.
+- **Third-party backends** — implementers reading only this document.
 
 The protocol is OpenAI-compatible (a strict subset of the OpenAI
 Responses API) so existing tooling slots in without translation. There
@@ -33,7 +33,7 @@ Authorization: Bearer <token>     (optional)
 | Field                    | Type             | Required | Description |
 | ------------------------ | ---------------- | -------- | ----------- |
 | `input`                  | `string \| array` | yes     | The user message. String for one-shot; array of `{role, content}` objects for explicit prompting. Sidekick sends a string. |
-| `conversation`           | `string`         | no       | Stable session key. The backend MUST honor this as a chaining identifier — repeated calls with the same `conversation` continue the same logical thread, with prior turns visible to the agent. Sidekick uses `sidekick-<slug>` names (e.g. `sidekick-tom-2026-04-26`). |
+| `conversation`           | `string`         | no       | Stable session key. The backend MUST honor this as a chaining identifier — repeated calls with the same `conversation` continue the same logical thread, with prior turns visible to the agent. Sidekick uses `sidekick-<slug>` names (e.g. `sidekick-example-2026-04-26`). |
 | `stream`                 | `boolean`        | no       | Default `false`. When `true`, the response is an SSE stream (see below). When `false`, the response is a single JSON object. Sidekick sends `true` for live conversation. |
 | `previous_response_id`   | `string`         | no       | Alternative chaining mechanism — pass the `id` of the previous response. **Mutually exclusive with `conversation`.** |
 | `instructions`           | `string`         | no       | System-prompt override for this turn. Sidekick does not currently send this. |
@@ -101,7 +101,7 @@ types and ignores any it doesn't render.
 
 ## Conversation chaining
 
-A `conversation` name (e.g. `sidekick-tom-2026-04-26`) is a stable
+A `conversation` name (e.g. `sidekick-example-2026-04-26`) is a stable
 identifier for a multi-turn thread. The backend SHOULD:
 
 1. On the first POST with a given `conversation`, treat it as a fresh
@@ -153,5 +153,5 @@ HTTP status codes:
 Hermes-agent's [`gateway/platforms/api_server.py`](https://github.com/NousResearch/hermes-agent/blob/main/gateway/platforms/api_server.py)
 implements this contract. Search for `_handle_responses` (the
 non-streaming + streaming entrypoint) and the `response.completed`
-SSE writer for the exact event shape. Tom and other contributors
-should treat this as the canonical reference.
+SSE writer for the exact event shape. Implementers should treat this
+as the canonical reference.

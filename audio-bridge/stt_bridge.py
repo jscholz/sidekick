@@ -84,11 +84,9 @@ MAX_PCM_QUEUE = 100
 # ±32767; ambient room noise on a Pi-attached USB mic tends to sit at
 # RMS 80-300, normal speech peaks 2000-8000, shouting 10k+.
 #
-# 2026-04-27: lowered from 800 → 300 after Jonathan's first run-through
-# couldn't fire barge on what felt like normal speaking volume —
-# evidently his desktop mic capture lands lower than the back-of-the-
-# envelope range. Tunable via SIDEKICK_VAD_RMS_THRESHOLD env var so we
-# don't have to ship a code change every time we move the bar.
+# Default 300 — some desktop mic captures land well below the
+# back-of-the-envelope range and won't fire barge at normal speaking
+# volume. Tunable via SIDEKICK_VAD_RMS_THRESHOLD env var.
 VAD_RMS_THRESHOLD = int(os.environ.get("SIDEKICK_VAD_RMS_THRESHOLD", "300"))
 
 # Consecutive 20 ms frames over threshold required to fire a barge.

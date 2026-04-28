@@ -108,7 +108,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8645
 PROTOCOL_VERSION = 1
 
-# ── session_changed polling (Phase 2) ─────────────────────────────────
+# ── session_changed polling ───────────────────────────────────────────
 # We watch state.db for compression-induced session_id rotations on the
 # chat_ids we know about, and emit a `session_changed` envelope to the
 # proxy when (session_id, title) changes for a known chat_id. This is
@@ -201,8 +201,8 @@ class SidekickAdapter(BasePlatformAdapter):
 
         # chat_ids we've seen at least one inbound message for in this process
         # lifetime. Used by send() to emit a synthetic ``session_changed`` on
-        # the *first* outbound for a fresh chat_id. Phase 2 hook will replace
-        # this with a real on-compression event.
+        # the *first* outbound for a fresh chat_id; a future on-compression
+        # callback would replace this synthetic emission.
         self._known_chat_ids: Set[str] = set()
 
         # Adapter-assigned message ids (returned via SendResult.message_id) so
@@ -510,8 +510,8 @@ class SidekickAdapter(BasePlatformAdapter):
         # Surface a session_changed envelope the first time we ever see this
         # chat_id outbound. Today the gateway resolves session_id internally
         # so we don't have a stable session_id to surface; emit the chat_id
-        # itself (the proxy already knows that) as a no-op stub. Phase 2 will
-        # replace this with a real session_id from the gateway hook.
+        # itself (the proxy already knows that) as a no-op stub. A future
+        # on-compression callback would replace this with a real session_id.
         if chat_id not in self._known_chat_ids:
             self._known_chat_ids.add(chat_id)
 
@@ -585,11 +585,11 @@ class SidekickAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "sidekick", "chat_id": chat_id}
 
     # ------------------------------------------------------------------
-    # session_changed polling (Phase 2)
+    # session_changed polling
     #
-    # Approach (b) from the platform-adapter plan: watch state.db for
-    # (session_id, title) transitions on the chat_ids we know about and
-    # emit a `session_changed` envelope when either changes. Picked over
+    # Watch state.db for (session_id, title) transitions on the chat_ids
+    # we know about and emit a `session_changed` envelope when either
+    # changes. Picked over
     # (a) hermes-side hooks (would require a hermes patch — explicit
     # opt-in only) and (c) PWA polling (more client-side complexity,
     # doesn't free push notifications). Trade-off: ~1s lag between a

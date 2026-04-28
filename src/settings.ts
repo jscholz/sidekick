@@ -156,7 +156,7 @@ const DEFAULTS = {
   wakeLock: true,
   commitPhrase: 'over',   // empty = commit-word disabled
   commitDelaySec: 1.5,
-  silenceSec: 15,  // raised 2026-04-25: 8s was triggering mid-sentence sends on slow-cadence dictation (Jonathan's run repro: "interaction" → 1.5s breath → "video" → DG endpointing slow-restart let timer expire). Interim-cancels-flush in voice.ts is the primary defense; this is safety-net headroom for DG dropouts where no interim arrives.
+  silenceSec: 15,  // 8s was triggering mid-sentence sends on slow-cadence dictation (e.g. "interaction" → ~1.5s breath → "video" — DG endpointing slow-restart let timer expire). Interim-cancels-flush in voice.ts is the primary defense; this is safety-net headroom for DG dropouts where no interim arrives.
   bargeIn: true,
   // Voice nav keywords — matched as a whole utterance at end-of-final,
   // short-circuited BEFORE draft append so they don't ship as messages.
