@@ -4,32 +4,21 @@
 //
 // The gateway owns sessions per (Platform.SIDEKICK, chat_id) and writes
 // every turn to state.db/messages keyed by the resolved session_id. We
-// resolve chat_id → session_id via the gateway's session-key shape:
+// resolve chat_id → session_id via the on-disk sessions.json index
+// (gateway/mirror.py keeps it in sync), then walk the parent_session_id
+// chain (in case the active session was compression-rotated) and read
+// messages.id-DESC ordered, mirroring the /api/hermes/sessions/<id>/messages
+// handler so the PWA renderer code path is identical.
 //
-//     session_key = `agent:main:sidekick:dm:<chat_id>`
-//
-// then walk the parent_session_id chain (in case the active session was
-// compression-rotated) and read messages.id-DESC ordered, mirroring the
-// /api/hermes/sessions/<id>/messages handler so the PWA renderer code
-// path is identical.
-//
-// Why duplicate the recursive CTE rather than import the hermes
-// version: the lookup PATH differs (hermes resolves slug → session_id
-// via response_store.db; we resolve session_key → session_id via
-// state.db), but the CTE body itself can be shared. We import
-// chainCteFromSession from the hermes module so the SQL stays in one
-// place.
-//
-// Like the legacy hermes endpoint, a missing chat_id returns 404 and
-// `[CONTEXT COMPACTION ...]` rows are filtered out so the visible
-// transcript stays clean.
+// Like the legacy hermes endpoint, a missing chat_id returns an empty
+// transcript (rather than 404) and `[CONTEXT COMPACTION ...]` rows are
+// filtered out so the visible transcript stays clean.
 
 import { sqlQuery } from '../../generic/sql.ts';
 import { HERMES_STATE_DB } from '../hermes/config.ts';
 import { chainCteFromSession } from '../hermes/cte.ts';
 import { client } from './client.ts';
-
-const SIDEKICK_KEY_PREFIX = 'agent:main:sidekick:dm:';
+import { resolveChatIdToSessionId } from './session-index.ts';
 
 export async function handleSidekickSessionMessages(req, res, chatId: string) {
   // Validate chat_id shape — IDB-minted UUIDs are URL-safe base16+dash,
@@ -53,13 +42,10 @@ export async function handleSidekickSessionMessages(req, res, chatId: string) {
   const beforeRaw = url.searchParams.get('before');
   const before = beforeRaw && /^\d+$/.test(beforeRaw) ? parseInt(beforeRaw, 10) : null;
   try {
-    // Resolve chat_id → session_id via the gateway's session_key shape.
-    // The gateway mutates this row in place across compression rotations,
-    // so the latest fork is what the lookup returns.
-    const sessionKey = `${SIDEKICK_KEY_PREFIX}${chatId}`;
-    const idRows = await sqlQuery(HERMES_STATE_DB,
-      `SELECT id FROM sessions WHERE session_key='${sessionKey}' LIMIT 1`);
-    const uuid = idRows[0]?.id || null;
+    // Resolve chat_id → session_id via sessions.json (the on-disk
+    // session_key registry). Returns the latest session_id; if it's been
+    // compression-rotated, the recursive CTE walks the parent chain.
+    const uuid = await resolveChatIdToSessionId(chatId);
     if (!uuid) {
       // No session for this chat_id yet — common case on a fresh chat
       // where the user opened the drawer entry but never sent. Return

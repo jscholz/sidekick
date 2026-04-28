@@ -680,30 +680,47 @@ class SidekickAdapter(BasePlatformAdapter):
     def _read_session_rows(self) -> list:
         """Synchronous sqlite read — runs in a worker thread. Returns
         ``[(chat_id, session_id, title), …]`` for every sidekick
-        session_key in state.db. Callers swallow exceptions."""
+        session in state.db. Callers swallow exceptions.
+
+        Lookup path: ``~/.hermes/sessions/sessions.json`` carries the
+        ``session_key → session_id`` mapping (kept in sync by
+        ``gateway/mirror.py``). state.db only knows about session_ids,
+        so we walk the JSON for sidekick keys, then read titles per
+        session_id from state.db. Costs an extra file read per poll —
+        negligible at our cadence."""
+        import json as _json
+
         if self._state_db_path is None or not self._state_db_path.exists():
             return []
-        # read-only URI: avoids any chance of write contention with the
-        # gateway's own writer thread.
+        sessions_index = self._state_db_path.parent / "sessions" / "sessions.json"
+        if not sessions_index.exists():
+            return []
+        try:
+            with open(sessions_index, encoding="utf-8") as f:
+                idx = _json.load(f)
+        except Exception:
+            return []
+        if not isinstance(idx, dict):
+            return []
+        chat_pairs: list = []  # (chat_id, session_id)
+        for key, entry in idx.items():
+            if not isinstance(key, str) or not key.startswith(SESSION_KEY_PREFIX):
+                continue
+            chat_id = key[len(SESSION_KEY_PREFIX):]
+            sid = (entry or {}).get("session_id") if isinstance(entry, dict) else None
+            if chat_id and sid:
+                chat_pairs.append((chat_id, sid))
+        if not chat_pairs:
+            return []
+        # Read titles for the session_ids we just collected.
+        # read-only URI: avoids any chance of write contention.
         uri = f"file:{self._state_db_path}?mode=ro"
-        # Trim length cap on title isn't enforced server-side; keeps
-        # log lines reasonable if someone names a chat War and Peace.
-        sql = """
-            SELECT
-                substr(session_key, ?) AS chat_id,
-                id                     AS session_id,
-                COALESCE(title, '')    AS title
-            FROM sessions
-            WHERE session_key LIKE ?
-        """
-        like = f"{SESSION_KEY_PREFIX}%"
-        # SQLite's substr is 1-indexed — the first character of chat_id
-        # in `agent:main:sidekick:dm:<chat_id>` is at position
-        # len(prefix) + 1.
-        substr_start = len(SESSION_KEY_PREFIX) + 1
+        ids_csv = ",".join(["?"] * len(chat_pairs))
+        sql = f"SELECT id, COALESCE(title, '') FROM sessions WHERE id IN ({ids_csv})"
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as conn:
-            cur = conn.execute(sql, (substr_start, like))
-            return [(r[0], r[1], r[2]) for r in cur.fetchall()]
+            cur = conn.execute(sql, [sid for _, sid in chat_pairs])
+            title_by_id = {row[0]: row[1] for row in cur.fetchall()}
+        return [(cid, sid, title_by_id.get(sid, "")) for cid, sid in chat_pairs]
 
 
 # ---------------------------------------------------------------------------

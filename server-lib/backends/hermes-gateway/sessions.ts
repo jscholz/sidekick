@@ -2,27 +2,20 @@
 //
 // Sources of truth:
 //   - PWA-side IDB owns the canonical chat_id list (each sidebar row IS
-//     a chat_id; "new chat" mints a UUID locally). The proxy never
-//     learned a row exists until the user sends the first message.
-//   - hermes' state.db `sessions` table maps each chat_id we've seen
-//     to the latest gateway session_id + compression-aware title.
+//     a chat_id; "new chat" mints a UUID locally). The proxy doesn't
+//     know a chat_id exists until the user sends the first message.
+//   - ~/.hermes/sessions/sessions.json maps every session_key (incl.
+//     `agent:main:sidekick:dm:<chat_id>`) to its current session_id.
+//   - state.db `sessions` table holds title + message_count + timestamps
+//     keyed by session_id.
 //
-// For v1 we enrich whatever PWA-side IDB sends us against state.db so
-// the drawer can show titles + last-message timestamps without each
-// PWA tab maintaining that metadata locally. The PWA can also fall
-// back to its own IDB cache when the adapter is unreachable.
-//
-// The chat_id <-> session_id mapping is stored under the standard
-// gateway session-key shape:
-//   `agent:main:sidekick:dm:<chat_id>`
-// We match on that prefix so the query is local-DB-only (no JOINs into
-// response_store.db; gateway-managed adapters don't write there).
+// For drawer enrichment we walk sessions.json for the sidekick prefix,
+// then JOIN those session_ids against state.db for the metadata.
 
 import { sqlQuery } from '../../generic/sql.ts';
 import { HERMES_STATE_DB } from '../hermes/config.ts';
 import { client } from './client.ts';
-
-const SIDEKICK_KEY_PREFIX = 'agent:main:sidekick:dm:';
+import { listSidekickChats, resolveChatIdToSessionId, SIDEKICK_KEY_PREFIX } from './session-index.ts';
 
 interface SidekickSessionRow {
   chat_id: string;
@@ -56,30 +49,50 @@ export async function handleSidekickSessionsList(req, res) {
   }
   const url = new URL(req.url, 'http://x');
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
-  // The session_key looks like `agent:main:sidekick:dm:<chat_id>`. Pull
-  // the chat_id off via substr(). state.db.sessions stores the active
-  // session row only — compression-rotated rows live under the same
-  // session_key (with the previous gateway behavior of mutating in
-  // place), so this query naturally returns the latest fork.
-  const sql = `
-    SELECT
-      substr(session_key, ${SIDEKICK_KEY_PREFIX.length + 1}) AS chat_id,
-      id AS session_id,
-      COALESCE(title, '') AS title,
-      COALESCE(message_count, 0) AS message_count,
-      COALESCE(last_message_at, updated_at, started_at) AS last_active_at,
-      started_at AS created_at
-    FROM sessions
-    WHERE session_key LIKE '${SIDEKICK_KEY_PREFIX}%'
-    ORDER BY COALESCE(last_message_at, updated_at, started_at) DESC
-    LIMIT ${limit}
-  `;
   let rows: SidekickSessionRow[] = [];
   try {
-    rows = await sqlQuery(HERMES_STATE_DB, sql);
+    // Walk sessions.json for every sidekick chat_id, then look up
+    // title + counts + timestamps in state.db.
+    const chats = await listSidekickChats(limit);
+    if (chats.length === 0) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ sessions: [] }));
+      return;
+    }
+    // Build a single SELECT against state.db keyed by session_id IN (...).
+    // Each session_id is a 24-char timestamp_hash literal (e.g.
+    // 20260428_095730_19b8b637) — strict-match safe to inline.
+    const idList = chats
+      .filter(c => /^[A-Za-z0-9_]{1,64}$/.test(c.session_id))
+      .map(c => `'${c.session_id}'`).join(',');
+    if (!idList) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ sessions: [] }));
+      return;
+    }
+    const dbRows = await sqlQuery(HERMES_STATE_DB, `
+      SELECT id AS session_id,
+             COALESCE(title, '') AS title,
+             COALESCE(message_count, 0) AS message_count,
+             started_at,
+             ended_at
+      FROM sessions
+      WHERE id IN (${idList})
+    `);
+    const dbBySessionId = new Map<string, any>();
+    for (const r of dbRows) dbBySessionId.set(r.session_id, r);
+    rows = chats.map(c => {
+      const meta = dbBySessionId.get(c.session_id) || {};
+      return {
+        chat_id: c.chat_id,
+        session_id: c.session_id,
+        title: meta.title || '',
+        message_count: meta.message_count || 0,
+        last_active_at: c.updated_at,
+        created_at: meta.started_at ? new Date(meta.started_at * 1000).toISOString() : null,
+      };
+    });
   } catch (e: any) {
-    // sessions table column names can drift — surface but don't 500
-    // (a fresh hermes install with no sidekick rows yet returns []).
     console.warn('[hermes-gateway] sessions list query failed:', e.message);
   }
   res.writeHead(200, { 'content-type': 'application/json' });
@@ -111,30 +124,25 @@ export async function handleSidekickSessionDelete(req, res, chatId: string) {
   // /forget is a graceful future hook. For now we just drop the DB row;
   // the next inbound message creates a fresh session under the same
   // chat_id automatically.
-  const sessionKey = `${SIDEKICK_KEY_PREFIX}${chatId}`;
-  // sqlite3 -json doesn't return rowcount on DELETE, so we round-trip
-  // a SELECT first to surface 404 vs 200 sensibly.
-  let rows: any[] = [];
-  try {
-    rows = await sqlQuery(HERMES_STATE_DB,
-      `SELECT id FROM sessions WHERE session_key='${sessionKey}' LIMIT 1`);
-  } catch (e: any) {
-    res.writeHead(500, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: e.message }));
-    return;
-  }
-  if (rows.length === 0) {
+  const sessionId = await resolveChatIdToSessionId(chatId);
+  if (!sessionId) {
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'not found' }));
     return;
   }
+  if (!/^[A-Za-z0-9_]{1,64}$/.test(sessionId)) {
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'derived session_id failed validation' }));
+    return;
+  }
   try {
+    // Delete the state.db rows. sessions.json is owned by the gateway —
+    // it'll get rewritten on the next session creation; the orphan key
+    // there is harmless until then.
     await sqlQuery(HERMES_STATE_DB,
-      `DELETE FROM sessions WHERE session_key='${sessionKey}'`);
-    // Best-effort: also drop the messages rows for this session so the
-    // next chat_id reuse doesn't accidentally inherit history.
+      `DELETE FROM sessions WHERE id='${sessionId}'`);
     await sqlQuery(HERMES_STATE_DB,
-      `DELETE FROM messages WHERE session_id='${rows[0].id}'`);
+      `DELETE FROM messages WHERE session_id='${sessionId}'`);
   } catch (e: any) {
     res.writeHead(500, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: e.message }));
