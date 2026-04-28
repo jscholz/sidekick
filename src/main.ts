@@ -2605,15 +2605,28 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
     return;
   }
 
-  if (text) {
-    let bubble = finalizeStreamingBubble(text);
+  // reply_final is "this bubble is done streaming" — but adapters
+  // differ in whether the final envelope carries the full text. The
+  // legacy hermes /v1/responses adapter packed final text into the
+  // last event (`response.completed`) so handleReplyFinal could just
+  // use env.text. The hermes-gateway adapter (matching telegram /
+  // slack / signal protocol shape) sends text only via reply_delta
+  // and treats reply_final as a pure terminator. So `text` here is
+  // often empty even when the bubble has streamed content visible
+  // on screen — fall back to the streaming bubble's accumulated
+  // text in that case.
+  const accumulated = (streamingEl && streamingEl.dataset.text) || '';
+  const finalText = text || accumulated;
+
+  if (finalText) {
+    let bubble = finalizeStreamingBubble(finalText);
     if (!bubble) {
-      bubble = chat.addLine(getAgentLabel(), text, 'agent', { markdown: true, replyId });
+      bubble = chat.addLine(getAgentLabel(), finalText, 'agent', { markdown: true, replyId });
     }
     playFeedback('receive');
 
     try {
-      const cards = parseCardsFromText(text);
+      const cards = parseCardsFromText(finalText);
       for (const c of cards) attachCard(bubble, c);
     } catch (e) { log('card parse err:', e.message); }
 
@@ -2622,6 +2635,8 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
     clearStreamingIndicator();
     for (const b of imageBlocks) attachCardToLatestAgentBubble(b);
   } else {
+    // Truly empty turn (no streamed text, no images, no text in the
+    // final envelope). Clear the placeholder so it doesn't linger.
     clearStreamingIndicator();
   }
 }

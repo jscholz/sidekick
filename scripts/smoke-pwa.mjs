@@ -44,20 +44,43 @@ const ctx = await chromium.launchPersistentContext(userDataDir, {
 });
 const page = await ctx.pages()[0] || await ctx.newPage();
 
-// Surface page console errors immediately — they're the most useful
-// diagnostic when an assertion fails.
+// Surface page console errors + warnings immediately. Also keep a
+// sliding ring of the LAST N console lines so we can dump them on
+// failure for context (helps spot 'backend: loading X' / 'connected'
+// timing issues that disappear into logs).
+const consoleRing = [];
+const RING_CAP = 200;
 page.on('console', (msg) => {
+  const line = `[${msg.type()}] ${msg.text()}`;
+  consoleRing.push(line);
+  if (consoleRing.length > RING_CAP) consoleRing.shift();
   if (msg.type() === 'error') log(`page-error: ${msg.text()}`);
 });
 page.on('pageerror', (err) => log(`page-pageerror: ${err.message}`));
 
 let exitCode = 0;
 try {
-  log(`navigating ${URL}`);
-  await page.goto(URL, { waitUntil: 'domcontentloaded' });
+  log(`navigating ${URL}?debug=1`);
+  await page.goto(`${URL}?debug=1`, { waitUntil: 'domcontentloaded' });
 
   log('waiting for composer input');
   await page.waitForSelector('#composer-input', { timeout: 10_000 });
+
+  // Wait for backend to actually report connected before sending. The
+  // header shows "Connected" / "Disconnected"; without this, fast
+  // smokes can fire send() before the EventSource has registered with
+  // the proxy, and sendTypedMessage early-returns on
+  // !backend.isConnected().
+  log('waiting for backend connected status');
+  try {
+    await page.waitForFunction(
+      () => /Connected/.test(document.body.innerText),
+      null,
+      { timeout: 10_000, polling: 250 },
+    );
+  } catch {
+    log('  (warning: never saw "Connected" text — proceeding anyway)');
+  }
 
   // Clean slate: hit the new-chat button so we exercise the
   // newSession() path that just got fixed.
@@ -82,34 +105,79 @@ try {
   await page.fill('#composer-input', 'hi');
   await page.click('#composer-send');
 
-  log(`turn 1: waiting for assistant bubble (≤${TIMEOUT_PER_TURN}ms)`);
-  // chat.ts builds bubbles as `<div class="line {role}">…</div>` where
-  // role is `agent` (for assistant replies) or `user`.
-  const assistantSel = '.line.agent';
+  log(`turn 1: waiting for FINALIZED assistant bubble (≤${TIMEOUT_PER_TURN}ms)`);
+  // chat.ts builds bubbles as `<div class="line {role}">…</div>`. The
+  // streaming/thinking indicator is `.line.agent.streaming.pending`; we
+  // want a finalized bubble (no `.streaming`, no `.pending`). Matching
+  // just `.line.agent` previously matched the placeholder and reported
+  // the indicator's "thinking…" label as the reply — false PASS.
+  const finalAgentSel = '.line.agent:not(.streaming):not(.pending)';
   const userSel = '.line.user';
 
   try {
-    await page.waitForSelector(assistantSel, { timeout: TIMEOUT_PER_TURN });
+    await page.waitForSelector(finalAgentSel, { timeout: TIMEOUT_PER_TURN });
   } catch (e) {
     const composerState = await page.locator('#composer-input').inputValue().catch(() => '?');
-    const userBubbles = await page.locator(userSel).count();
-    const agentBubbles = await page.locator(assistantSel).count();
+    // chat.ts uses 's0' for user lines, not 'user'. Match permissively.
+    const userBubbles = await page.locator('.line.s0, .line.user').count();
+    const allAgent = await page.locator('.line.agent').count();
+    const streamingAgent = await page.locator('.line.agent.streaming, .line.agent.pending').count();
+    const finalAgent = await page.locator(finalAgentSel).count();
     const allLines = await page.locator('.line').count();
-    const stuckSending = await page.locator(':text("sending")').count();
-    fail(`turn 1: no .line.agent within ${TIMEOUT_PER_TURN}ms.\n` +
+    // Dump every .line's class + text so we can see exactly what's in the DOM.
+    const lineDump = await page.evaluate(() => {
+      const out = [];
+      document.querySelectorAll('.line').forEach((el, i) => {
+        const cls = el.className;
+        const text = (el.textContent || '').replace(/\s+/g, ' ').slice(0, 100);
+        out.push(`    [${i}] class=${JSON.stringify(cls)} text=${JSON.stringify(text)}`);
+      });
+      return out.join('\n');
+    });
+    // Also: did backend.connect() complete? Console messages can hint.
+    const transcriptHTML = await page.locator('#transcript').innerHTML().catch(() => '(no #transcript)');
+    const consoleTail = consoleRing.slice(-50).map(l => `    ${l}`).join('\n');
+    fail(`turn 1: no FINALIZED .line.agent within ${TIMEOUT_PER_TURN}ms.\n` +
          `  composer value: ${JSON.stringify(composerState)}\n` +
-         `  user bubbles: ${userBubbles}\n` +
-         `  agent bubbles: ${agentBubbles}\n` +
+         `  user bubbles (.line.s0|.line.user): ${userBubbles}\n` +
+         `  agent bubbles total: ${allAgent}\n` +
+         `  agent bubbles still streaming/pending: ${streamingAgent}\n` +
+         `  agent bubbles finalized: ${finalAgent}\n` +
          `  total .line elements: ${allLines}\n` +
-         `  'sending…' present: ${stuckSending > 0}`);
+         `  -- .line dump --\n${lineDump || '    (none)'}\n` +
+         `  -- last ${Math.min(30, consoleRing.length)} page-console lines --\n${consoleTail || '    (none)'}\n` +
+         `  -- #transcript HTML (truncated) --\n  ${transcriptHTML.slice(0, 300)}`);
   }
-  log('turn 1: assistant bubble appeared ✓');
+  // First-message-ever in a fresh chat draws TWO bubbles: the gateway's
+  // home-channel onboarding nudge ("📬 No home channel is set…") then
+  // the agent's actual greeting. Wait for BOTH so we don't mistake
+  // a partial render for success — pre-fix, the nudge would render
+  // and the second bubble would be wiped by reply_final's empty-text
+  // codepath. Allow extra time for the second bubble.
+  log('turn 1: waiting for SECOND finalized agent bubble (real reply, not nudge)');
+  try {
+    await page.waitForFunction(
+      (sel) => document.querySelectorAll(sel).length >= 2,
+      finalAgentSel,
+      { timeout: TIMEOUT_PER_TURN, polling: 250 },
+    );
+  } catch {
+    const finalCount = await page.locator(finalAgentSel).count();
+    log(`  (got ${finalCount} finalized — expected 2; might be a model that skipped the nudge in this version)`);
+  }
 
-  const replyText = await page.locator(assistantSel).last().innerText().catch(() => '');
-  log(`turn 1: reply text "${replyText.slice(0, 80).replace(/\n/g, ' ')}"`);
+  // Dump every finalized agent bubble's text so failure analysis is easy.
+  const agentTexts = await page.locator(`${finalAgentSel} .text`).allInnerTexts().catch(() => []);
+  for (let i = 0; i < agentTexts.length; i++) {
+    const t = agentTexts[i].slice(0, 100).replace(/\n/g, ' ');
+    log(`turn 1: agent[${i}] "${t}"`);
+  }
 
-  if (!replyText || replyText.trim().length === 0) {
-    fail('turn 1: assistant bubble found but empty');
+  if (agentTexts.length === 0 || agentTexts.every(t => !t.trim())) {
+    fail('turn 1: no finalized agent bubble has any text');
+  }
+  if (agentTexts.some(t => /^(thinking|using \w+|pending)…?$/i.test(t.trim()))) {
+    fail(`turn 1: at least one bubble is still a placeholder: ${JSON.stringify(agentTexts)}`);
   }
 
   log('PASS');
