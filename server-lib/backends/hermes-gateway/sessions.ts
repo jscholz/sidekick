@@ -12,6 +12,9 @@
 // For drawer enrichment we walk sessions.json for the sidekick prefix,
 // then JOIN those session_ids against state.db for the metadata.
 
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
 import { sqlQuery } from '../../generic/sql.ts';
 import { HERMES_STATE_DB } from '../hermes/config.ts';
 import { client } from './client.ts';
@@ -150,9 +153,6 @@ export async function handleSidekickSessionDelete(req, res, chatId: string) {
     return;
   }
   try {
-    // Delete the state.db rows. sessions.json is owned by the gateway —
-    // it'll get rewritten on the next session creation; the orphan key
-    // there is harmless until then.
     await sqlQuery(HERMES_STATE_DB,
       `DELETE FROM sessions WHERE id='${sessionId}'`);
     await sqlQuery(HERMES_STATE_DB,
@@ -162,6 +162,38 @@ export async function handleSidekickSessionDelete(req, res, chatId: string) {
     res.end(JSON.stringify({ error: e.message }));
     return;
   }
+  // Best-effort cleanup of sessions.json and the transcript jsonl. The
+  // gateway is the canonical writer of sessions.json; it'll re-derive
+  // the file on the next session-create, so a failure here is
+  // recoverable. We still scrub directly because waiting for the next
+  // create can leave an orphan visible in the drawer for hours.
+  await scrubSessionsIndexAndJsonl(chatId, sessionId);
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ ok: true }));
+}
+
+async function scrubSessionsIndexAndJsonl(chatId: string, sessionId: string): Promise<void> {
+  const hermesHome = path.dirname(HERMES_STATE_DB);
+  const sessionsDir = path.join(hermesHome, 'sessions');
+  const indexPath = path.join(sessionsDir, 'sessions.json');
+  const key = `${SIDEKICK_KEY_PREFIX}${chatId}`;
+  try {
+    const raw = await fs.readFile(indexPath, 'utf-8');
+    const idx = JSON.parse(raw);
+    if (idx && typeof idx === 'object' && key in idx) {
+      delete idx[key];
+      const tmp = `${indexPath}.tmp.${process.pid}.${Date.now()}`;
+      await fs.writeFile(tmp, JSON.stringify(idx, null, 2), 'utf-8');
+      await fs.rename(tmp, indexPath);
+    }
+  } catch (e: any) {
+    console.warn('[hermes-gateway] sessions.json scrub failed:', e.message);
+  }
+  try {
+    await fs.unlink(path.join(sessionsDir, `${sessionId}.jsonl`));
+  } catch (e: any) {
+    if (e.code !== 'ENOENT') {
+      console.warn('[hermes-gateway] jsonl scrub failed:', e.message);
+    }
+  }
 }
