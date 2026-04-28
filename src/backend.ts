@@ -53,6 +53,14 @@ export async function loadAdapter() {
         adapter = m.hermesAdapter;
         break;
       }
+      case 'hermes-gateway': {
+        // Phase-3 platform-adapter backend; talks to the proxy's
+        // /api/sidekick/* surface. Coexists with 'hermes' (legacy
+        // /v1/responses path) until Phase 4 cleanup.
+        const m = await import('./backends/hermes-gateway.ts');
+        adapter = m.hermesGatewayAdapter;
+        break;
+      }
       default:
         throw new Error(`unknown backend: ${name}`);
     }

@@ -22,7 +22,10 @@ app:
 
 # ── Backend selection ─────────────────────────────────────────────────
 backend:
-  # SIDEKICK_BACKEND — 'hermes' | 'openclaw' | 'zeroclaw' | 'openai-compat'
+  # SIDEKICK_BACKEND — 'hermes' | 'hermes-gateway' | 'openclaw' | 'zeroclaw' | 'openai-compat'
+  # 'hermes-gateway' (Phase-3) is the new platform-adapter path: chat
+  # routing via /api/sidekick/* with chat_ids minted in PWA IDB.
+  # Requires the hermes plugin from hermes-plugin/sidekick_platform.py.
   type: hermes
 
   # Per-backend options below. Only the one matching `type` is used;
