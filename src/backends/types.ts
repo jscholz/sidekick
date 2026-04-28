@@ -116,7 +116,50 @@
  * @property {(e: ToolEvent) => void} [onToolEvent]
  * @property {(a: ActivityEvent) => void} [onActivity]
  * @property {(n: NotificationEvent) => void} [onNotification]
+ * @property {(c: ToolCallEvent) => void} [onToolCall]
+ * @property {(r: ToolResultEvent) => void} [onToolResult]
  */
+
+// ─── Tool-event surfacing (Phase 3) ─────────────────────────────────────────
+//
+// Distinct from the existing ToolEvent (canvas.show etc.) — those are
+// side-channel UI signals from the agent. ToolCallEvent / ToolResultEvent
+// surface the agent's tool USAGE itself (web_search, run_terminal,
+// browser_extract, …) as inline transcript rows so the user can see what
+// the agent did during a turn. The hermes-gateway adapter is the only
+// adapter that emits these today — others leave the callbacks unset.
+//
+// Adapter is faithful relay: it does NOT filter or summarize. The PWA's
+// agentActivity setting (off / summary / full) decides what to render.
+
+/** A tool invocation as it begins. Paired with a ToolResultEvent by callId. */
+export interface ToolCallEvent {
+  /** Stable id; the matching ToolResultEvent carries the same value. */
+  callId: string;
+  /** Tool name (e.g. "web_search", "browser_extract"). */
+  toolName: string;
+  /** JSON-friendly args dict. Empty {} when adapter couldn't serialize. */
+  args: Record<string, unknown>;
+  /** Stringified args fallback when serialization failed; absent on the happy path. */
+  argsRepr?: string;
+  /** ISO-8601 UTC start time. */
+  startedAt: string;
+  /** chat_id the tool ran under. */
+  conversation: string;
+}
+
+/** Result of a previously-emitted ToolCallEvent (matched via callId). */
+export interface ToolResultEvent {
+  callId: string;
+  /** Tool's return value as a string; null if the tool returned None. */
+  result: string | null;
+  /** Currently always null — hermes surfaces errors inside `result`. Reserved. */
+  error: string | null;
+  /** True when the adapter trimmed `result` to fit the wire budget. */
+  truncated: boolean;
+  durationMs: number;
+  conversation: string;
+}
 
 /**
  * @typedef {Object} SendOpts

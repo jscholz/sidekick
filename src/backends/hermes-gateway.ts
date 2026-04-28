@@ -174,7 +174,8 @@ function startStreamChannel(): void {
     handleEnvelope(type, env, chatId);
   };
   for (const t of ['reply_delta', 'reply_final', 'image', 'typing',
-                   'notification', 'session_changed', 'error']) {
+                   'notification', 'session_changed', 'error',
+                   'tool_call', 'tool_result']) {
     streamES.addEventListener(t, onEvent as any);
   }
   streamES.onerror = (e) => {
@@ -270,6 +271,52 @@ function handleEnvelope(type: string, env: any, chatId: string): void {
       subs?.onActivity?.({ working: false, conversation: chatId });
       return;
 
+    case 'tool_call': {
+      // Faithful relay — PWA decides visibility via the agentActivity
+      // setting. callId ties this to the matching tool_result envelope
+      // so concurrent tool calls don't get cross-wired.
+      const callId = typeof env.call_id === 'string' ? env.call_id : '';
+      const toolName = typeof env.tool_name === 'string' ? env.tool_name : '';
+      if (!callId || !toolName) return;
+      const args = (env.args && typeof env.args === 'object') ? env.args : {};
+      const argsRepr = typeof env._args_repr === 'string' ? env._args_repr : undefined;
+      const startedAt = typeof env.started_at === 'string'
+        ? env.started_at
+        : new Date().toISOString();
+      subs?.onToolCall?.({
+        callId,
+        toolName,
+        args,
+        argsRepr,
+        startedAt,
+        conversation: chatId,
+      });
+      // A tool call IS confirmation the agent is doing something — flip
+      // the activity indicator to "working" if a stream-delta hasn't
+      // already done it. Cheap; the shell's two-state indicator is
+      // idempotent.
+      subs?.onActivity?.({ working: true, detail: 'tool', conversation: chatId });
+      return;
+    }
+
+    case 'tool_result': {
+      const callId = typeof env.call_id === 'string' ? env.call_id : '';
+      if (!callId) return;
+      const result = typeof env.result === 'string' ? env.result : null;
+      const error = typeof env.error === 'string' ? env.error : null;
+      const truncated = !!env._truncated;
+      const durationMs = typeof env.duration_ms === 'number' ? env.duration_ms : 0;
+      subs?.onToolResult?.({
+        callId,
+        result,
+        error,
+        truncated,
+        durationMs,
+        conversation: chatId,
+      });
+      return;
+    }
+
     default:
       diag(`hermes-gateway: ignored envelope type=${type}`);
   }
@@ -284,7 +331,8 @@ export const hermesGatewayAdapter = {
     streaming: true,
     sessions: true,           // chat_id provides multi-session semantics
     models: false,            // not exposed via the gateway adapter (yet)
-    toolEvents: false,        // image envelope is a placeholder; no canvas wiring v1
+    toolEvents: true,         // tool_call / tool_result envelopes (Phase 3); image is also tool-like
+
     history: true,            // /api/sidekick/sessions/<chat_id>/messages
     attachments: false,       // wire shape allows it, no PWA composer support yet
     sessionBrowsing: true,    // /api/sidekick/sessions

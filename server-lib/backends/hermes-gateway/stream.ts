@@ -26,8 +26,10 @@
 //   data: <json envelope verbatim>
 //
 // Event types fanned out: reply_delta, reply_final, image, typing,
-// notification, session_changed, error. All carry chat_id so the PWA
-// can route to the right view.
+// notification, session_changed, error, tool_call, tool_result. All
+// carry chat_id so the PWA can route to the right view. tool_call /
+// tool_result are observational (Phase 3) — the PWA decides whether
+// to render them based on the agentActivity setting.
 //
 // Replay ring: when no PWA tabs are subscribed, recent envelopes are
 // held in a small ring so a tab opened seconds-after-fire still
@@ -49,6 +51,8 @@ const FANOUT_TYPES = new Set<string>([
   'notification',
   'session_changed',
   'error',
+  'tool_call',
+  'tool_result',
 ]);
 
 // Bumped from 32 → 128: traffic is heavier now (every reply_delta

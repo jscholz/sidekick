@@ -108,6 +108,29 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8645
 PROTOCOL_VERSION = 1
 
+# ── tool-event hook plumbing ──────────────────────────────────────────
+# pre_tool_call / post_tool_call hooks fire from worker threads (the
+# agent dispatches tools via run_in_executor — see model_tools.py).
+# We need a module-level reference to the live adapter so the sync
+# hook callbacks can schedule envelope sends onto the adapter's
+# event loop via asyncio.run_coroutine_threadsafe. The adapter sets
+# this in connect() (after capturing its loop) and clears it in
+# disconnect(). When None, hook handlers drop silently — non-sidekick
+# deployments still load the plugin but never fire envelopes.
+_active_adapter: Optional["SidekickAdapter"] = None
+
+# Cap on the result string we put into a tool_result envelope. Tools
+# can return arbitrarily large blobs (web_extract / browse). The PWA
+# does its own per-tool truncation for display, but we cap here too
+# so a runaway result can't blow up the WS frame budget.
+TOOL_RESULT_MAX_BYTES = 50 * 1024
+
+
+def _iso_from_epoch(t: float) -> str:
+    """Render an epoch-seconds timestamp as ISO-8601 UTC."""
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(t, tz=_dt.timezone.utc).isoformat()
+
 # ── session_changed polling ───────────────────────────────────────────
 # We watch state.db for compression-induced session_id rotations on the
 # chat_ids we know about, and emit a `session_changed` envelope to the
@@ -221,6 +244,22 @@ class SidekickAdapter(BasePlatformAdapter):
         # so the adapter doesn't need a separate env var.
         self._state_db_path: Optional[Path] = self._resolve_state_db_path()
 
+        # Tool-event support (Phase 3). Hooks fire sync from worker threads;
+        # we need the adapter's event loop to schedule envelope sends.
+        # Captured in connect() once the loop is actually running.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Cache of session_id → chat_id resolved from sessions.json. Hot-
+        # path lookup: we rebuild on miss so a freshly-created session is
+        # picked up the moment its first tool fires.
+        self._sid_to_chat_id_cache: Dict[str, str] = {}
+        # Per-tool_call_id: start time + chat_id, populated in
+        # pre_tool_call and consumed in post_tool_call. Bounded by the
+        # number of in-flight tools (typically 1, occasionally a few for
+        # parallel tool calls). Stale entries (no matching post hook)
+        # are unlikely but harmless — capped via the housekeeping check
+        # below if it ever grows unreasonably.
+        self._inflight_tool_calls: Dict[str, Tuple[float, str]] = {}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -263,6 +302,14 @@ class SidekickAdapter(BasePlatformAdapter):
         await self._site.start()
         self._mark_connected()
 
+        # Capture the running event loop + register as the live adapter so
+        # synchronous tool-event hooks (which fire from worker threads via
+        # asyncio.run_in_executor in run_agent.py) can schedule envelope
+        # sends back onto our loop via run_coroutine_threadsafe.
+        self._loop = asyncio.get_running_loop()
+        global _active_adapter
+        _active_adapter = self
+
         logger.info(
             "[sidekick] WS server listening on %s:%d (token=%s***)",
             self._host,
@@ -292,6 +339,14 @@ class SidekickAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Stop accepting new connections, close the active proxy client."""
+        # Drop the module-level live-adapter pointer FIRST so any in-flight
+        # hook callback that fires during shutdown becomes a silent no-op
+        # rather than racing against a half-closed loop / socket.
+        global _active_adapter
+        if _active_adapter is self:
+            _active_adapter = None
+        self._loop = None
+
         # Cancel the session poller before tearing down the WS so it can't
         # fire envelopes into a half-closed socket.
         if self._session_poll_task is not None:
@@ -585,6 +640,173 @@ class SidekickAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "sidekick", "chat_id": chat_id}
 
     # ------------------------------------------------------------------
+    # Tool-event emission (Phase 3)
+    #
+    # pre_tool_call / post_tool_call hooks fire from worker threads —
+    # the agent dispatches every non-async tool via run_in_executor in
+    # run_agent.py. We can't `await` from there, so we schedule envelope
+    # sends onto the adapter's event loop with run_coroutine_threadsafe.
+    # If the loop's gone (mid-shutdown) the schedule no-ops and the
+    # event is dropped — non-critical observational data.
+    #
+    # The PWA gates rendering off the agentActivity setting, so the
+    # adapter is intentionally promiscuous: it relays every sidekick
+    # tool call/result faithfully and lets the client decide visibility.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _serialize_args_for_envelope(
+        args: Any,
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Coerce a tool-call args dict into a JSON-serializable shape
+        for the envelope. Returns (args_dict, args_repr_fallback).
+
+        Order:
+          1. If already a dict and round-trips through json: pass through.
+          2. Else stringify with default=str and reparse.
+          3. Else give up — return ({}, "<string repr>") so the PWA can
+             show *something* instead of an empty args block.
+        """
+        if not isinstance(args, dict):
+            try:
+                return {}, json.dumps(args, default=str, ensure_ascii=False)
+            except Exception:
+                return {}, repr(args)
+        try:
+            json.dumps(args, ensure_ascii=False)
+            return args, None
+        except (TypeError, ValueError):
+            pass
+        try:
+            stringified = json.dumps(args, default=str, ensure_ascii=False)
+            reparsed = json.loads(stringified)
+            if isinstance(reparsed, dict):
+                return reparsed, None
+            return {}, stringified
+        except Exception:
+            try:
+                return {}, repr(args)
+            except Exception:
+                return {}, "<unrepresentable>"
+
+    def _schedule_envelope(self, env: Dict[str, Any]) -> None:
+        """Thread-safe envelope dispatch. Called from sync hook
+        callbacks running on worker threads."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        coro = self._safe_send_envelope(env)
+        try:
+            asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError:
+            # Loop in a non-running state mid-shutdown; drop silently.
+            with contextlib.suppress(Exception):
+                coro.close()
+
+    def on_pre_tool_call(
+        self,
+        *,
+        tool_name: str,
+        args: Any,
+        task_id: str = "",
+        session_id: str = "",
+        tool_call_id: str = "",
+        **_kwargs: Any,
+    ) -> None:
+        """Hook callback. Sync, fires from worker thread. No-op for
+        non-sidekick sessions."""
+        if not session_id or not tool_call_id:
+            return
+        chat_id = self._resolve_chat_id_from_session_id(session_id)
+        if not chat_id:
+            return
+        # Stamp the start time + chat_id so the post hook can compute
+        # duration_ms without re-resolving anything.
+        started = time.time()
+        # Bound the in-flight map so a long-running session with weirdly
+        # mismatched pre/post pairs can't grow it without limit. 256 is
+        # well above any realistic concurrent-tool count.
+        if len(self._inflight_tool_calls) > 256:
+            self._inflight_tool_calls.clear()
+        self._inflight_tool_calls[tool_call_id] = (started, chat_id)
+
+        args_dict, args_repr = self._serialize_args_for_envelope(args)
+        envelope: Dict[str, Any] = {
+            "type": "tool_call",
+            "chat_id": chat_id,
+            "call_id": tool_call_id,
+            "tool_name": tool_name,
+            "args": args_dict,
+            "started_at": _iso_from_epoch(started),
+        }
+        if args_repr is not None:
+            envelope["_args_repr"] = args_repr
+        self._schedule_envelope(envelope)
+
+    def on_post_tool_call(
+        self,
+        *,
+        tool_name: str,
+        args: Any,
+        result: Any,
+        task_id: str = "",
+        session_id: str = "",
+        tool_call_id: str = "",
+        **_kwargs: Any,
+    ) -> None:
+        """Hook callback. Sync, fires from worker thread. No-op when
+        there's no matching pre_tool_call entry (filters non-sidekick)."""
+        if not tool_call_id:
+            return
+        entry = self._inflight_tool_calls.pop(tool_call_id, None)
+        if entry is None:
+            # Either pre fired in a non-sidekick session (and we filtered
+            # out), or the agent path skipped the pre hook (edge case).
+            # Re-resolve to be safe; fall through silently if still not
+            # ours.
+            chat_id = self._resolve_chat_id_from_session_id(session_id)
+            if not chat_id:
+                return
+            duration_ms = 0
+        else:
+            started, chat_id = entry
+            duration_ms = max(0, int((time.time() - started) * 1000))
+
+        # Cap result string size — see TOOL_RESULT_MAX_BYTES rationale.
+        result_str: Optional[str]
+        truncated = False
+        if result is None:
+            result_str = None
+        elif isinstance(result, str):
+            result_str = result
+        else:
+            try:
+                result_str = json.dumps(result, default=str, ensure_ascii=False)
+            except Exception:
+                result_str = repr(result)
+        if isinstance(result_str, str):
+            encoded = result_str.encode("utf-8", errors="replace")
+            if len(encoded) > TOOL_RESULT_MAX_BYTES:
+                # Decode a clean prefix; ignore errors so we don't split
+                # a UTF-8 sequence mid-byte.
+                result_str = encoded[:TOOL_RESULT_MAX_BYTES].decode(
+                    "utf-8", errors="ignore"
+                )
+                truncated = True
+
+        envelope: Dict[str, Any] = {
+            "type": "tool_result",
+            "chat_id": chat_id,
+            "call_id": tool_call_id,
+            "result": result_str,
+            "error": None,
+            "duration_ms": duration_ms,
+        }
+        if truncated:
+            envelope["_truncated"] = True
+        self._schedule_envelope(envelope)
+
+    # ------------------------------------------------------------------
     # session_changed polling
     #
     # Watch state.db for (session_id, title) transitions on the chat_ids
@@ -677,17 +899,11 @@ class SidekickAdapter(BasePlatformAdapter):
                 "title": current[1],
             })
 
-    def _read_session_rows(self) -> list:
-        """Synchronous sqlite read — runs in a worker thread. Returns
-        ``[(chat_id, session_id, title), …]`` for every sidekick
-        session in state.db. Callers swallow exceptions.
-
-        Lookup path: ``~/.hermes/sessions/sessions.json`` carries the
-        ``session_key → session_id`` mapping (kept in sync by
-        ``gateway/mirror.py``). state.db only knows about session_ids,
-        so we walk the JSON for sidekick keys, then read titles per
-        session_id from state.db. Costs an extra file read per poll —
-        negligible at our cadence."""
+    def _read_sidekick_chat_pairs(self) -> list:
+        """Walk sessions.json once and return ``[(chat_id, session_id), …]``
+        for every sidekick DM session. Shared by the session poller and
+        the tool-event hook chat_id resolver. Costs one small file read
+        per call (cached at the call site as needed)."""
         import json as _json
 
         if self._state_db_path is None or not self._state_db_path.exists():
@@ -702,16 +918,61 @@ class SidekickAdapter(BasePlatformAdapter):
             return []
         if not isinstance(idx, dict):
             return []
-        chat_pairs: list = []  # (chat_id, session_id)
+        pairs: list = []
         for key, entry in idx.items():
             if not isinstance(key, str) or not key.startswith(SESSION_KEY_PREFIX):
                 continue
             chat_id = key[len(SESSION_KEY_PREFIX):]
             sid = (entry or {}).get("session_id") if isinstance(entry, dict) else None
             if chat_id and sid:
-                chat_pairs.append((chat_id, sid))
+                pairs.append((chat_id, sid))
+        return pairs
+
+    def _resolve_chat_id_from_session_id(self, session_id: str) -> Optional[str]:
+        """Map a hermes session_id back to its sidekick chat_id, if any.
+
+        Cache-then-rebuild: hot path is the cache hit; on miss we walk
+        sessions.json once (cheap — small JSON, parsed in this thread).
+        Non-sidekick sessions naturally fail to resolve and the caller
+        treats that as "not for us" — that's the filter for tool calls
+        coming from telegram / whatsapp / etc. running on the same
+        gateway. Safe to call from worker threads (no asyncio).
+        """
+        if not session_id:
+            return None
+        cached = self._sid_to_chat_id_cache.get(session_id)
+        if cached is not None:
+            return cached
+        # Miss: rebuild the full sid → chat_id mapping. Cheap; sessions.json
+        # has at most a few dozen rows for a typical sidekick deployment.
+        try:
+            pairs = self._read_sidekick_chat_pairs()
+        except Exception:
+            return None
+        new_cache = {sid: cid for cid, sid in pairs}
+        self._sid_to_chat_id_cache = new_cache
+        return new_cache.get(session_id)
+
+    def _read_session_rows(self) -> list:
+        """Synchronous sqlite read — runs in a worker thread. Returns
+        ``[(chat_id, session_id, title), …]`` for every sidekick
+        session in state.db. Callers swallow exceptions.
+
+        Lookup path: ``~/.hermes/sessions/sessions.json`` carries the
+        ``session_key → session_id`` mapping (kept in sync by
+        ``gateway/mirror.py``). state.db only knows about session_ids,
+        so we walk the JSON for sidekick keys, then read titles per
+        session_id from state.db. Costs an extra file read per poll —
+        negligible at our cadence."""
+        if self._state_db_path is None or not self._state_db_path.exists():
+            return []
+        chat_pairs = self._read_sidekick_chat_pairs()
         if not chat_pairs:
             return []
+        # Refresh the sid → chat_id cache opportunistically on every poll
+        # so the tool-event resolver gets warm data without an extra file
+        # read on hot tool firings.
+        self._sid_to_chat_id_cache = {sid: cid for cid, sid in chat_pairs}
         # Read titles for the session_ids we just collected.
         # read-only URI: avoids any chance of write contention.
         uri = f"file:{self._state_db_path}?mode=ro"
@@ -735,8 +996,42 @@ class SidekickAdapter(BasePlatformAdapter):
 
 
 def register(ctx) -> None:  # noqa: ANN001 — PluginContext type is internal
-    """Hermes plugin entry point. No-op today (see module docstring)."""
-    logger.debug(
-        "[sidekick] plugin register() called — adapter wiring is handled by "
-        "the gateway patch. Nothing to register at the PluginContext level."
-    )
+    """Hermes plugin entry point.
+
+    Adapter wiring itself is handled by the gateway patch (the plugin
+    system has no register_platform_adapter API yet). What we DO use
+    PluginContext for: pre_tool_call / post_tool_call hooks (Phase 3
+    tool-event surfacing). Hooks dispatch to the live SidekickAdapter
+    via a module-level reference set in connect(); when no adapter is
+    live (or the session isn't a sidekick DM) the callbacks are silent
+    no-ops.
+    """
+
+    def _pre(**kwargs: Any) -> None:
+        adapter = _active_adapter
+        if adapter is None:
+            return
+        try:
+            adapter.on_pre_tool_call(**kwargs)
+        except Exception:
+            logger.exception("[sidekick] pre_tool_call hook crashed")
+
+    def _post(**kwargs: Any) -> None:
+        adapter = _active_adapter
+        if adapter is None:
+            return
+        try:
+            adapter.on_post_tool_call(**kwargs)
+        except Exception:
+            logger.exception("[sidekick] post_tool_call hook crashed")
+
+    try:
+        ctx.register_hook("pre_tool_call", _pre)
+        ctx.register_hook("post_tool_call", _post)
+    except Exception:
+        logger.exception(
+            "[sidekick] failed to register pre/post_tool_call hooks; "
+            "tool-event envelopes will not be emitted"
+        )
+        return
+    logger.debug("[sidekick] registered pre_tool_call / post_tool_call hooks")
