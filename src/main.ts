@@ -1932,6 +1932,18 @@ async function boot() {
         const on = !!(s as any)[key];
         b.setAttribute('aria-checked', on ? 'true' : 'false');
         b.classList.toggle('on', on);
+        // Tooltip — pulls the hotkey live from settings so a rebind in
+        // the settings panel reflects here on next menu open. Mac/iOS
+        // get the ⌘ glyph for native feel; everywhere else the literal.
+        const hk = key === 'micCall' ? s.hotkeyCallMode : s.hotkeyAutoSend;
+        const isMac = /(Mac|iPhone|iPad)/i.test(navigator.platform);
+        const prettyHk = isMac
+          ? hk.replace(/Cmd/gi, '⌘').replace(/Shift/gi, '⇧').replace(/Alt/gi, '⌥').replace(/Ctrl/gi, '⌃').replace(/\+/g, '')
+          : hk;
+        const desc = key === 'micCall'
+          ? 'Call mode — full-duplex WebRTC voice (vs. push-to-record memo)'
+          : 'Auto-send — dispatch on end-of-utterance (vs. drafting into composer)';
+        b.title = `${desc} · ${prettyHk}`;
       });
     }
     // Mic button tooltip + a data-mode attribute on the wrap so CSS can

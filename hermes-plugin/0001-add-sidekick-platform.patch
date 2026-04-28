@@ -1,4 +1,4 @@
-From 939f98efeb4ba75a99463fe4f59241ad8f7c30fe Mon Sep 17 00:00:00 2001
+From 495d5958bcbe435aad0f0044643a572ccce9de11 Mon Sep 17 00:00:00 2001
 From: Sidekick <noreply@example.invalid>
 Date: Tue, 28 Apr 2026 09:50:24 -0400
 Subject: [PATCH] local: register Platform.SIDEKICK + adapter factory branch
@@ -16,9 +16,10 @@ Also adds:
   allowlist plumbing (SIDEKICK_PLATFORM_ALLOWED_USERS /
   SIDEKICK_PLATFORM_ALLOW_ALL_USERS).
 ---
- gateway/config.py | 10 ++++++++++
- gateway/run.py    | 16 ++++++++++++++++
- 2 files changed, 26 insertions(+)
+ gateway/config.py       | 10 ++++++++++
+ gateway/run.py          | 16 ++++++++++++++++
+ hermes_cli/platforms.py |  1 +
+ 3 files changed, 27 insertions(+)
 
 diff --git a/gateway/config.py b/gateway/config.py
 index 67ebf734..a047ee5a 100644
@@ -96,6 +97,18 @@ index c59ca6fc..9a4f224c 100644
              }
              if os.getenv(platform_env_map.get(platform, ""), "").strip():
                  return "ignore"
+diff --git a/hermes_cli/platforms.py b/hermes_cli/platforms.py
+index 1fc3a3a8..521ff89d 100644
+--- a/hermes_cli/platforms.py
++++ b/hermes_cli/platforms.py
+@@ -38,6 +38,7 @@ PLATFORMS: OrderedDict[str, PlatformInfo] = OrderedDict([
+     ("qqbot",          PlatformInfo(label="💬 QQBot",           default_toolset="hermes-qqbot")),
+     ("webhook",        PlatformInfo(label="🔗 Webhook",         default_toolset="hermes-webhook")),
+     ("api_server",     PlatformInfo(label="🌐 API Server",      default_toolset="hermes-api-server")),
++    ("sidekick",       PlatformInfo(label="🎙️ Sidekick",        default_toolset="hermes-cli")),
+ ])
+ 
+ 
 -- 
 2.47.3
 
