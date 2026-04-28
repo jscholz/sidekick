@@ -122,6 +122,28 @@ export async function create(title?: string): Promise<Conversation> {
   return conv;
 }
 
+/** Insert a row for a chat_id we learned about externally (e.g. cross-
+ *  device sync via server's listSessions). No-op if the row already
+ *  exists — this is for filling gaps, not for overwriting local state. */
+export async function hydrate(chat_id: string, title?: string): Promise<Conversation> {
+  const existing = await get(chat_id);
+  if (existing) return existing;
+  const now = Date.now();
+  const conv: Conversation = {
+    chat_id,
+    title: title || 'New chat',
+    created_at: now,
+    last_message_at: now,
+  };
+  const db = await openDB();
+  try {
+    await reqP(db.transaction(STORE_CONV, 'readwrite').objectStore(STORE_CONV).put(conv));
+  } finally {
+    db.close();
+  }
+  return conv;
+}
+
 export async function get(chat_id: string): Promise<Conversation | null> {
   const db = await openDB();
   try {

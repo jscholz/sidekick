@@ -612,46 +612,79 @@ export const hermesGatewayAdapter = {
   },
 
   async listSessions(_limit = 50) {
-    // Source-of-truth = PWA IDB. We then enrich with proxy
-    // metadata (titles + last_active_at + message counts) when the
-    // proxy can answer; on degraded paths the IDB rows are still
-    // returned so the drawer doesn't go blank.
+    // Server is the source of truth for the cross-device session list.
+    // Local IDB is fallback for offline + locally-minted-but-not-yet-
+    // sent rows. The previous left-join on local IDB silently dropped
+    // every server chat the user created on a different device — a
+    // chat created on Mac never entered iOS-Safari's IDB, so it
+    // wouldn't appear when viewed there. After a clear-site-data the
+    // drawer would render empty even with plenty of server sessions.
     const local = await conversations.list();
+    const localById = new Map(local.map(c => [c.chat_id, c]));
     let enrich: SessionsResponse['sessions'] = [];
     let unconfigured = false;
+    let serverReachable = false;
     try {
       const r = await fetch(`${apiBase()}/sessions?limit=200`);
       if (r.ok) {
         const d = (await r.json()) as SessionsResponse;
         enrich = d.sessions || [];
         unconfigured = !!d.unconfigured;
+        serverReachable = true;
       }
     } catch (e: any) {
-      diag(`hermes-gateway.listSessions enrichment failed: ${e.message}`);
+      diag(`hermes-gateway.listSessions: server unreachable, falling back to local-only: ${e.message}`);
     }
-    const byId = new Map<string, SessionsResponse['sessions'][number]>();
-    for (const row of enrich) byId.set(row.chat_id, row);
 
-    const merged = local.map((conv) => {
-      const e = byId.get(conv.chat_id);
-      const lastActive = e?.last_active_at != null
+    if (!serverReachable) {
+      // Offline / proxy down — render whatever we have locally so the
+      // drawer doesn't go blank.
+      return local.map(conv => ({
+        id: conv.chat_id,
+        title: conv.title || 'New chat',
+        lastMessageAt: Math.floor(conv.last_message_at / 1000),
+        messageCount: 0,
+      }));
+    }
+
+    // Spine = server rows. Iterate each server chat and merge in any
+    // local metadata we have for it. This is what makes cross-device
+    // chats visible.
+    const merged = enrich.map(e => {
+      const localConv = localById.get(e.chat_id);
+      const lastActive = e.last_active_at != null
         ? (typeof e.last_active_at === 'number' ? e.last_active_at
            : Math.floor(new Date(e.last_active_at).getTime() / 1000))
-        : Math.floor(conv.last_message_at / 1000);
+        : (localConv ? Math.floor(localConv.last_message_at / 1000) : 0);
       return {
-        id: conv.chat_id,
-        title: (e?.title || conv.title || 'New chat'),
+        id: e.chat_id,
+        title: e.title || localConv?.title || 'New chat',
         lastMessageAt: lastActive,
-        messageCount: e?.message_count || 0,
+        messageCount: e.message_count || 0,
       };
     });
 
+    // Append local-only rows the server doesn't know about yet — chats
+    // the user just minted but hasn't sent in. Without this, the
+    // newly-created drawer entry would vanish on the first refresh
+    // (server doesn't have it yet → not in `enrich` → dropped).
+    const serverIds = new Set(enrich.map(e => e.chat_id));
+    for (const conv of local) {
+      if (!serverIds.has(conv.chat_id)) {
+        merged.push({
+          id: conv.chat_id,
+          title: conv.title || 'New chat',
+          lastMessageAt: Math.floor(conv.last_message_at / 1000),
+          messageCount: 0,
+        });
+      }
+    }
+    // Resort: server may already be sorted but the appended local-only
+    // rows could be older OR newer than the server's tail.
+    merged.sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+
     // Surface the unconfigured state via a synthetic top row so the
     // drawer renders a clear hint without needing a new chrome path.
-    // Distinct id namespace (`__sidekick:hint:*`) so click handlers
-    // can ignore it. Removed for v1 if the merged list is non-empty —
-    // hint is most useful on a fresh install where the drawer would
-    // otherwise be blank with no explanation.
     if (unconfigured && merged.length === 0) {
       merged.unshift({
         id: '__sidekick:hint:unconfigured',
@@ -675,6 +708,16 @@ export const hermesGatewayAdapter = {
     // need a token-monotonic guard like hermes.ts because the active
     // chat_id is the single source of truth and IDB write is atomic.
     activeChatId = id;
+    // Lazily hydrate the local IDB row if this is a server-side chat
+    // we've never touched on this device (cross-device, or after a
+    // clear-site-data on a device that previously had it). Without
+    // this, conversations.setActive/updateLastMessageAt downstream
+    // would silently no-op on missing rows.
+    try {
+      await conversations.hydrate(id);
+    } catch (e: any) {
+      diag(`hermes-gateway.resumeSession: IDB hydrate failed: ${e.message}`);
+    }
     await conversations.setActive(id);
     bubbleReplyIds.clear();
     // Fetch transcript via the proxy. The endpoint resolves chat_id →
