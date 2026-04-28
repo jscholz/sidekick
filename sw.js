@@ -2,7 +2,7 @@
  * Service worker — caches the app shell so iOS PWA survives app switches.
  * Strategy: cache-first for app shell assets, network-first for API calls.
  */
-const CACHE_NAME = 'v2.109';
+const CACHE_NAME = 'v2.110';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -98,7 +98,28 @@ self.addEventListener('fetch', (e) => {
        '/spotify-check', '/screenshot', '/canvas/show', '/transcribe'].includes(url.pathname)) return;
   if (url.origin !== self.location.origin) return;
 
-  // App shell — cache-first, fall back to network (and update cache)
+  // /build/* — NETWORK-FIRST. Compiled JS bundle modules. Every code
+  // change rebuilds these; cache-first served stale modules across SW
+  // updates (new SW activates, page header shows new CACHE_NAME, but
+  // the in-memory JS is from the OLD cached bundle until a SECOND
+  // reload). Network-first guarantees fresh code on reload while
+  // still falling back to cache when offline.
+  if (url.pathname.startsWith('/build/')) {
+    e.respondWith(
+      fetch(e.request).then(response => {
+        if (response.ok) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(e.request, clone));
+        }
+        return response;
+      }).catch(() => caches.match(e.request))
+    );
+    return;
+  }
+
+  // App shell (HTML, CSS, icons, manifest) — cache-first, fall back to
+  // network. These rarely change relative to JS modules so the offline
+  // benefit outweighs staleness risk.
   e.respondWith(
     caches.match(e.request).then(cached => {
       const fetchPromise = fetch(e.request).then(response => {
