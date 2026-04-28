@@ -36,6 +36,14 @@
 // catches the message. Bounded at RECENT_CAP — the channel is
 // user-visible state, not a durable bus, and a fresh install opening
 // hours later shouldn't replay a backlog.
+//
+// Each entry carries a monotonic `id` so reconnecting subscribers
+// (mobile-Safari background-kill, network handoff, etc.) can resume
+// replay from a cursor via the SSE `Last-Event-ID` header — replay
+// only entries with id > that cursor. Without the cursor a fresh
+// subscriber gets the full ring (legacy behavior). When the missed
+// window exceeds RECENT_CAP entries the client falls back to a
+// transcript reconcile path; the ring is best-effort, not durable.
 
 import { client } from './client.ts';
 
@@ -61,12 +69,20 @@ const FANOUT_TYPES = new Set<string>([
 // mid-burst sees the recent context, not so large the ring becomes
 // a backlog.
 const RECENT_CAP = 128;
-const recent: Envelope[] = [];
+// Each ring entry is tagged with a monotonic id so subscribers can
+// resume replay from a known cursor via the SSE `Last-Event-ID`
+// header. Ids are process-local — they don't survive proxy restart,
+// which is fine: clients fall back to "no Last-Event-ID" semantics
+// (replay the whole ring).
+const recent: { id: number; env: Envelope }[] = [];
+let lastId = 0;
 const subscribers = new Set<{ res: any; ka: NodeJS.Timeout }>();
 
 function broadcast(env: Envelope): void {
+  lastId++;
+  const id = lastId;
   const evtName = typeof env.type === 'string' ? env.type : 'message';
-  const frame = `event: ${evtName}\ndata: ${JSON.stringify(env)}\n\n`;
+  const frame = `id: ${id}\nevent: ${evtName}\ndata: ${JSON.stringify(env)}\n\n`;
   for (const sub of subscribers) {
     try { sub.res.write(frame); }
     catch { detach(sub); }
@@ -74,7 +90,7 @@ function broadcast(env: Envelope): void {
   // Push into the recent ring AFTER attempting broadcast so a freshly-
   // attached tab doesn't replay something it already saw via the live
   // path. Bound the ring at RECENT_CAP entries.
-  recent.push(env);
+  recent.push({ id, env });
   if (recent.length > RECENT_CAP) recent.shift();
 }
 
@@ -105,13 +121,22 @@ export function handleSidekickStream(req, res): void {
     'X-Accel-Buffering': 'no',
   });
   res.write('retry: 5000\n\n');
-  // Replay anything still in the ring so a tab opened a few seconds
-  // after a broadcast still sees the message. Tabs that were attached
-  // when the original broadcast went out de-dupe via the envelope's
-  // message_id when present (reply_delta / reply_final carry one).
-  for (const env of recent) {
-    const evtName = typeof env.type === 'string' ? env.type : 'message';
-    res.write(`event: ${evtName}\ndata: ${JSON.stringify(env)}\n\n`);
+  // SSE `Last-Event-ID`: when the client reconnects (auto-retry, manual
+  // forceReconnect on visibility/online, etc.), the EventSource sends
+  // back the most recent id it saw. Replay only entries strictly newer
+  // than that cursor so the client doesn't re-render duplicates. Node
+  // lower-cases header names, so headers['last-event-id'] is the right
+  // key. Anything missing or unparseable falls back to "fresh
+  // subscriber" — replay the whole ring like before.
+  const lastEventIdRaw = req.headers['last-event-id'];
+  const lastEventId = typeof lastEventIdRaw === 'string'
+    ? Number.parseInt(lastEventIdRaw, 10)
+    : NaN;
+  const replayFrom = Number.isFinite(lastEventId) ? lastEventId : -1;
+  for (const entry of recent) {
+    if (entry.id <= replayFrom) continue;
+    const evtName = typeof entry.env.type === 'string' ? entry.env.type : 'message';
+    res.write(`id: ${entry.id}\nevent: ${evtName}\ndata: ${JSON.stringify(entry.env)}\n\n`);
   }
   const ka = setInterval(() => {
     try { res.write(': ka\n\n'); }

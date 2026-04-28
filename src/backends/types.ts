@@ -118,6 +118,14 @@
  * @property {(n: NotificationEvent) => void} [onNotification]
  * @property {(c: ToolCallEvent) => void} [onToolCall]
  * @property {(r: ToolResultEvent) => void} [onToolResult]
+ * @property {(e: {messages: SessionMessage[]; conversation: string; firstId?: number|null; hasMore?: boolean}) => void} [onResume]
+ *   Adapter-driven transcript replay. Fires when the adapter has
+ *   refetched a session's history and wants the shell to re-render —
+ *   currently only the hermes-gateway adapter, when its persistent SSE
+ *   channel has been down long enough that the server's replay ring
+ *   may have rolled over. The shell handles this the same way as a
+ *   drawer-click resume (clear + re-render); other adapters can leave
+ *   it unset.
  */
 
 // ─── Tool-event surfacing (Phase 3) ─────────────────────────────────────────

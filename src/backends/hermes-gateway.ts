@@ -63,8 +63,25 @@ let healthTimer: ReturnType<typeof setTimeout> | null = null;
 const HEALTH_INTERVAL_MS = 30_000;
 /** Persistent stream EventSource — every adapter envelope arrives here.
  *  EventSource auto-reconnects on transient failures (5s retry hint set
- *  by the server), so we open once on connect() and let it handle redial. */
+ *  by the server), so we open once on connect() and let it handle redial.
+ *  Mobile-Safari background-kill / cellular handoff / suspended radio do
+ *  NOT trigger native retry reliably, so OS lifecycle listeners
+ *  (visibility/online/pageshow) call forceReconnect() to recreate it. */
 let streamES: EventSource | null = null;
+/** Wired-once flag for the OS-lifecycle listeners (visibility/online/
+ *  pageshow). Bound on the first connect() so we don't stack duplicate
+ *  handlers across reconnect cycles. */
+let lifecycleHandlersBound = false;
+/** Debounce token for reconcileActiveChat — coalesces the burst of
+ *  forceReconnect calls a typical foreground transition produces
+ *  (visibility, then online, then pageshow within the same tick). */
+let reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+/** Wall-clock of the last forceReconnect (or initial connect) — drives
+ *  the "down for >10s" reconcile decision. Updated whenever
+ *  forceReconnect runs so a long PWA-backgrounded interval shows up as
+ *  a large gap when the next forceReconnect fires (Date.now() minus the
+ *  previous reconnect time). */
+let lastReconnectAt = 0;
 
 function newReplyId(): string {
   return `sk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -145,14 +162,22 @@ function stopHealthPoll(): void {
 }
 
 /** Open the persistent stream channel — the single source of inbound
- *  envelopes for ALL chats. Idempotent: calling twice keeps the existing
- *  source. EventSource handles reconnect via the `retry: 5000` hint the
- *  server emits, so we don't manage the lifecycle ourselves beyond open
- *  / close on connect / disconnect. */
+ *  envelopes for ALL chats. Safe to call repeatedly: an existing
+ *  EventSource is closed first so we never stack two listeners writing
+ *  the same envelope twice. EventSource handles transient retry via
+ *  the server's `retry: 5000` hint; OS-lifecycle events
+ *  (visibility/online/pageshow) call this directly through
+ *  forceReconnect because mobile-Safari background-kill silently
+ *  breaks the source without firing onerror. */
 function startStreamChannel(): void {
-  if (streamES) return;
+  if (streamES) {
+    log('hermes-gateway: stream channel already open, replacing');
+    try { streamES.close(); } catch {}
+    streamES = null;
+  }
   try {
     streamES = new EventSource(`${apiBase()}/stream`);
+    log('hermes-gateway: stream channel (re)opened');
   } catch (e: any) {
     diag(`hermes-gateway: stream EventSource open failed: ${e.message}`);
     return;
@@ -179,8 +204,13 @@ function startStreamChannel(): void {
     streamES.addEventListener(t, onEvent as any);
   }
   streamES.onerror = (e) => {
-    // EventSource auto-reconnects; just log so transient blips are
-    // visible without closing the source (closing would prevent retry).
+    // EventSource auto-reconnects on transient errors (DNS hiccup,
+    // brief WiFi gap) using the server's `retry: 5000` hint, so we
+    // intentionally do NOT call forceReconnect here — calling close()
+    // would defeat native retry. The OS-lifecycle listeners
+    // (visibility/online/pageshow) are the belt-and-suspenders path
+    // for the mobile-Safari background-kill case where native retry
+    // doesn't fire at all.
     diag(`hermes-gateway: stream errored (will retry): ${(e as any)?.message || ''}`);
   };
 }
@@ -191,6 +221,118 @@ function stopStreamChannel(): void {
     streamES = null;
   }
   bubbleReplyIds.clear();
+}
+
+/** Force a fresh stream channel. Used by OS-lifecycle listeners
+ *  (visibility/online/pageshow) — these fire on mobile-Safari foreground
+ *  transitions where the underlying EventSource has been silently killed
+ *  but no `onerror` fires. Also fires the reconcile pass once the new
+ *  channel has had time to flush its ring replay. */
+export function forceReconnect(): void {
+  // Time since the LAST forceReconnect — proxies "how long was the
+  // channel possibly down?" iOS Safari batches visibility events on
+  // foreground, so the first call after a long background interval
+  // is the one whose gap matters.
+  const gapMs = lastReconnectAt > 0 ? Date.now() - lastReconnectAt : 0;
+  lastReconnectAt = Date.now();
+  startStreamChannel();
+  scheduleReconcile(gapMs);
+}
+
+/** Debounced active-chat reconcile. Several lifecycle events
+ *  (visibility, then online, then pageshow) typically fire in the same
+ *  tick on a foreground transition; coalesce so resumeSession only runs
+ *  once. The 500ms delay also lets the server's ring replay finish so
+ *  we don't fight it. `gapMs` is the time since the previous reconnect
+ *  — only large gaps (>10s) trigger a transcript refetch; short flips
+ *  ride the ring replay. */
+const RECONCILE_GAP_MS = 10_000;
+let pendingReconcileGapMs = 0;
+function scheduleReconcile(gapMs: number): void {
+  // Take the LARGEST gap of any coalesced burst — visibility might
+  // fire with gap=8s, then online a tick later with gap=0s; the 8s is
+  // the one that matters.
+  pendingReconcileGapMs = Math.max(pendingReconcileGapMs, gapMs);
+  if (reconcileTimer) clearTimeout(reconcileTimer);
+  reconcileTimer = setTimeout(() => {
+    reconcileTimer = null;
+    const gap = pendingReconcileGapMs;
+    pendingReconcileGapMs = 0;
+    reconcileActiveChat(gap).catch((e: any) => {
+      diag(`hermes-gateway: reconcile failed: ${e.message}`);
+    });
+  }, 500);
+}
+
+/** Refetch + replay the active chat's transcript when the stream channel
+ *  has been down long enough that the server's 128-entry replay ring may
+ *  not cover what we missed. Skips when:
+ *    - no active chat (nothing to reconcile against)
+ *    - no shell subscription (adapter not wired up)
+ *    - the gap since the previous reconnect is short (<10s) — ring
+ *      replay via Last-Event-ID should have caught us up.
+ *  When fired, delegates to the SAME path the drawer-click resume uses
+ *  (`onResume` callback → shell clears + re-renders). The shell already
+ *  knows how to reconcile a fresh transcript dump, so we don't need an
+ *  incremental diff; the brief "loading…" flash is acceptable for the
+ *  rare iOS-backgrounding case. */
+async function reconcileActiveChat(gapMs: number): Promise<void> {
+  if (!activeChatId || !subs?.onResume) return;
+  if (gapMs < RECONCILE_GAP_MS) {
+    diag(`hermes-gateway: reconcile skipped (gap ${gapMs}ms < ${RECONCILE_GAP_MS}ms)`);
+    return;
+  }
+  log(`hermes-gateway: reconciling active chat ${activeChatId} after ${gapMs}ms gap`);
+  try {
+    const r = await fetch(
+      `${apiBase()}/sessions/${encodeURIComponent(activeChatId)}/messages`,
+    );
+    if (!r.ok) {
+      diag(`hermes-gateway: reconcile HTTP ${r.status}`);
+      return;
+    }
+    const d = await r.json();
+    const messages = Array.isArray(d.messages) ? d.messages : [];
+    // Clear in-flight bubble state — the shell will repaint from
+    // history, so any half-rendered bubble we were streaming into is
+    // now stale. The dedupe guard sits in the shell's onResume
+    // handler (it clears + re-renders the chat).
+    bubbleReplyIds.clear();
+    subs.onResume({
+      messages,
+      conversation: activeChatId,
+      firstId: d.firstId ?? null,
+      hasMore: !!d.hasMore,
+    });
+  } catch (e: any) {
+    diag(`hermes-gateway: reconcile fetch failed: ${e.message}`);
+  }
+}
+
+/** Bind OS-lifecycle listeners ONCE per page. Mobile-Safari kills
+ *  EventSource silently when the PWA is backgrounded, the radio
+ *  suspends, or the device hands off cell→wifi; native EventSource
+ *  retry doesn't fire reliably in those cases. Visibility/online/
+ *  pageshow are the canonical "we just came back to life" signals. */
+function bindLifecycleHandlers(): void {
+  if (lifecycleHandlersBound) return;
+  lifecycleHandlersBound = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      log('hermes-gateway: visibilitychange → forceReconnect');
+      forceReconnect();
+    }
+  });
+  window.addEventListener('online', () => {
+    log('hermes-gateway: online → forceReconnect');
+    forceReconnect();
+  });
+  window.addEventListener('pageshow', (e) => {
+    if ((e as PageTransitionEvent).persisted) {
+      log('hermes-gateway: pageshow(persisted) → forceReconnect');
+      forceReconnect();
+    }
+  });
 }
 
 function handleEnvelope(type: string, env: any, chatId: string): void {
@@ -364,6 +506,11 @@ export const hermesGatewayAdapter = {
     }
     startHealthPoll();
     startStreamChannel();
+    // OS-lifecycle hardening: visibility/online/pageshow trigger a
+    // forceReconnect because mobile-Safari silently kills the
+    // EventSource on background / radio suspend / network handoff
+    // without firing onerror. Bound once per page lifetime.
+    bindLifecycleHandlers();
   },
 
   disconnect() {

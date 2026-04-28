@@ -660,6 +660,22 @@ async function boot() {
     // runtime takes effect on the next event without re-wiring.
     onToolCall: (e) => activityRow.appendToolCall(e.conversation, e),
     onToolResult: (e) => activityRow.appendToolResult(e.conversation, e),
+    // Adapter-driven reconcile: hermes-gateway fires this when its
+    // persistent SSE channel has been down long enough that the
+    // server's replay ring may have rolled over. Re-render the active
+    // chat from the freshly-fetched transcript via the same path the
+    // drawer-click resume uses (clear + replay) — clearing also
+    // sidesteps live-vs-history dedupe, since any half-rendered bubble
+    // is wiped before the new transcript paints.
+    onResume: (e: any) => {
+      if (!e?.conversation) return;
+      const messages = Array.isArray(e.messages) ? e.messages : [];
+      const pagination = {
+        firstId: e.firstId ?? null,
+        hasMore: !!e.hasMore,
+      };
+      replaySessionMessages(e.conversation, messages, pagination);
+    },
   });
   // Show/hide the sessions section inside the sidebar based on the
   // active backend's capabilities (sidebar itself is always visible).
