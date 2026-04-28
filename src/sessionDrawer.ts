@@ -558,6 +558,18 @@ async function resume(id: string) {
         log(`[resume-trace] resume(${id.slice(0,8)}) SERVER-CB DROPPED (newer click → ${optimisticActiveId?.slice(0,8) ?? 'null'})  Δt=${Date.now()-t0}ms`);
         return;
       }
+      // Cache-matched optimization: if the cache cb already rendered
+      // the same N messages and the server returned the same N, the
+      // server cb would just chat.clear() + re-render the IDENTICAL
+      // content — visible as a 500ms-later blank-flicker for every
+      // cached chat click. Skip the re-render entirely. (Pagination
+      // state (firstId/hasMore) IS new info from the server, but for
+      // a cache-matched count it's almost certainly the same too;
+      // not worth a redundant render.)
+      if (cached && cached.messages.length === messages.length) {
+        log(`[resume-trace] resume(${id.slice(0,8)}) SERVER-CB SKIPPED (cache matched, ${messages.length}msg)  Δt=${Date.now()-t0}ms`);
+        return;
+      }
       log(`[resume-trace] resume(${id.slice(0,8)}) SERVER-CB FIRING onResumeCb  Δt=${Date.now()-t0}ms`);
       onResumeCb?.(id, messages, pagination);
       refresh();
