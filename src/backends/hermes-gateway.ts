@@ -282,6 +282,7 @@ async function reconcileActiveChat(gapMs: number): Promise<void> {
     diag(`hermes-gateway: reconcile skipped (gap ${gapMs}ms < ${RECONCILE_GAP_MS}ms)`);
     return;
   }
+  log(`[resume-trace] reconcileActiveChat firing for ${activeChatId.slice(0,8)} (gap ${gapMs}ms)`);
   log(`hermes-gateway: reconciling active chat ${activeChatId} after ${gapMs}ms gap`);
   try {
     const r = await fetch(

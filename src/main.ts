@@ -669,6 +669,7 @@ async function boot() {
     onResume: (e: any) => {
       if (!e?.conversation) return;
       const messages = Array.isArray(e.messages) ? e.messages : [];
+      log(`[resume-trace] adapter.onResume fired for ${e.conversation.slice(0,8)} (${messages.length}msg) — reconcile path`);
       const pagination = {
         firstId: e.firstId ?? null,
         hasMore: !!e.hasMore,
@@ -2241,6 +2242,7 @@ function replaySessionMessages(
   messages: any[],
   pagination?: { firstId: number | null; hasMore: boolean }
 ) {
+  log(`[resume-trace] replaySessionMessages(${id?.slice(0,8) ?? 'null'}, ${messages?.length ?? 0}msg)  viewed=${(sessionDrawer.getViewed() || 'null')?.slice(0,8)}`);
   chat.clear();
   // Tool activity rows are turn-scoped + chat-scoped; resuming a session
   // wipes the on-screen turn surface, so wipe activity state too.

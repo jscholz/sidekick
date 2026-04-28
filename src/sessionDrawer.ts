@@ -340,6 +340,7 @@ function renderRow(s: any, activeId: string): HTMLLIElement {
   body.appendChild(snippet);
   body.appendChild(meta);
   body.onclick = () => {
+    log(`[resume-trace] click on row ${s.id?.slice(0,8) ?? 'null'}  optActive=${optimisticActiveId?.slice(0,8) ?? 'null'}`);
     // Optimistic highlight: flip the active class synchronously at click
     // time. resume() is async (cache read + server fetch) and on a cache
     // miss can take 5-10s, which was leaving the highlight stale long
@@ -499,8 +500,10 @@ async function promptDelete(s: any) {
 let resumeInFlight: { id: string; promise: Promise<void> } | null = null;
 
 async function resume(id: string) {
+  const t0 = Date.now();
+  log(`[resume-trace] resume(${id.slice(0,8)}) ENTRY  optActive=${optimisticActiveId?.slice(0,8) ?? 'null'}  inFlight=${resumeInFlight?.id?.slice(0,8) ?? 'null'}`);
   if (resumeInFlight?.id === id) {
-    diag(`sessionDrawer: resume ${id} already in flight, skipping`);
+    log(`[resume-trace] resume(${id.slice(0,8)}) DEDUP — already in flight`);
     return resumeInFlight.promise;
   }
   // Claim the optimistic active id immediately so refresh() paints the
@@ -510,8 +513,10 @@ async function resume(id: string) {
   const promise = (async () => {
     // 1. Paint from cached transcript if we have one — instant feel.
     const cached = await sessionCache.getMessagesCache(id);
+    log(`[resume-trace] resume(${id.slice(0,8)}) cache lookup done  cached=${cached?.messages?.length ?? 0}msg  optActive=${optimisticActiveId?.slice(0,8) ?? 'null'}  Δt=${Date.now()-t0}ms`);
     if (cached?.messages?.length) {
       log(`sessionDrawer: resumed ${id} from cache (${cached.messages.length} messages)`);
+      log(`[resume-trace] resume(${id.slice(0,8)}) CACHE-CB FIRING onResumeCb`);
       onResumeCb?.(id, cached.messages);
       refresh();
     }
@@ -531,9 +536,10 @@ async function resume(id: string) {
       // completion order, last-callback-wins (Jonathan's "click A
       // sometimes goes A→B→A→B" repro 2026-04-28).
       if (optimisticActiveId !== id) {
-        diag(`sessionDrawer: resume ${id} server cb dropped (newer click → ${optimisticActiveId})`);
+        log(`[resume-trace] resume(${id.slice(0,8)}) SERVER-CB DROPPED (newer click → ${optimisticActiveId?.slice(0,8) ?? 'null'})  Δt=${Date.now()-t0}ms`);
         return;
       }
+      log(`[resume-trace] resume(${id.slice(0,8)}) SERVER-CB FIRING onResumeCb  Δt=${Date.now()-t0}ms`);
       onResumeCb?.(id, messages, pagination);
       refresh();
     } catch (e: any) {
