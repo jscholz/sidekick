@@ -1157,9 +1157,22 @@ async function boot() {
         // wedged 3-minute memos in permanent-retry: each attempt timed
         // out before Deepgram could respond, queue never drained.
         const timeoutMs = blob.size > 1_000_000 ? 60_000 : 15_000;
+        // Per-user keyterm biasing for batch transcribe. Same IDB list the
+        // WebRTC offer ships; bridge accepts repeated `?keyterms=…&keyterms=…`
+        // and merges into the Deepgram spec like the streaming path does.
+        // Without this, memo-mode transcription runs un-biased even if the
+        // user has chips configured (was the case for "clawdian" miss).
+        let kt: string[] = [];
+        try {
+          const { readList } = await import('./keyterms.ts');
+          kt = (await readList()) || [];
+        } catch {}
+        const url = kt.length
+          ? `/transcribe?${kt.map(t => 'keyterms=' + encodeURIComponent(t)).join('&')}`
+          : '/transcribe';
         let res;
         try {
-          res = await fetchWithTimeout('/transcribe', {
+          res = await fetchWithTimeout(url, {
             method: 'POST', headers: { 'Content-Type': mimeType }, body: blob,
             timeoutMs,
           });
@@ -1656,6 +1669,16 @@ async function boot() {
       // Capture pointer so move/up route here even if finger drifts
       // onto the memo bar — needed for drag-to-discard during HOLD.
       try { btnMic.setPointerCapture(e.pointerId); } catch {}
+      // Immediate visual feedback. startVoice() has multiple awaits
+      // (closing prior call, MediaRecorder boot) so the .active class
+      // would otherwise flip 100-300ms later — user perceives the
+      // first click as a no-op. Set the class synchronously so the
+      // red filled state appears on the same frame as the press.
+      // The memo path's "actually-listening" pulse (.listening) still
+      // fires later when MediaRecorder genuinely starts recording —
+      // two-state visual remains correct.
+      try { btnMic.classList.add('active'); } catch {}
+      log('[mic] pointerdown — startVoice fired (state=recording, t0=', pressStartedAt.toFixed(0), ')');
       void startVoice();
       try {
         status.setStatus('Listening — release after a moment to send, or tap to keep recording', 'live');
@@ -1701,6 +1724,7 @@ async function boot() {
       try { btnMic.releasePointerCapture(e.pointerId); } catch {}
       capturedPointerId = null;
 
+      log('[mic] pointerup — dur=', dur.toFixed(0), 'ms, classify=', dur < TAP_THRESHOLD_MS ? 'TAP' : 'HOLD');
       if (dur < TAP_THRESHOLD_MS && !isCancel) {
         // TAP → keep recording in toggle mode. Next tap stops it.
         micState = 'recording_toggle';
@@ -1938,6 +1962,16 @@ async function boot() {
       if (!isShortcut && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || (t as any).isContentEditable)) return;
     }
     const s = settings.get();
+    // Diagnostic: every Cmd/Ctrl+Shift+<letter> keydown logs what we saw
+    // vs the three configured bindings. Lets us see whether the handler
+    // fires at all for ⌘⇧D and (if so) why no match. Cheap; only triggers
+    // for shortcut-shaped combos so it doesn't spam normal typing.
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.length === 1) {
+      log('[hotkey] keydown',
+        'meta=', e.metaKey, 'ctrl=', e.ctrlKey, 'shift=', e.shiftKey,
+        'alt=', e.altKey, 'key=', JSON.stringify(e.key),
+        'bindings=', { call: s.hotkeyCallMode, auto: s.hotkeyAutoSend, mic: s.hotkeyToggleMic });
+    }
     const matches = (combo: string): boolean => {
       if (!combo) return false;
       const parts = combo.split('+').map(p => p.trim().toLowerCase()).filter(Boolean);

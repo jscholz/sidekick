@@ -37,7 +37,13 @@ let weatherFetchedAt = 0;
 /** @type {HTMLElement|null} */
 let rootEl = null;
 let tickTimer = null;
-let expanded = false;
+/** Expanded state persisted to localStorage so it survives reload —
+ *  same pattern the sidebar uses (`sidekick.sidebar.expanded`). Default
+ *  collapsed on virgin load. */
+const AMBIENT_PREF_KEY = 'sidekick.ambient.expanded';
+let expanded = (() => {
+  try { return localStorage.getItem(AMBIENT_PREF_KEY) === '1'; } catch { return false; }
+})();
 
 async function loadWeather() {
   const now = Date.now();
@@ -60,6 +66,7 @@ export function init() {
   rootEl.className = 'ambient-widget';
   rootEl.addEventListener('click', () => {
     expanded = !expanded;
+    try { localStorage.setItem(AMBIENT_PREF_KEY, expanded ? '1' : '0'); } catch {}
     render();
   });
   document.body.appendChild(rootEl);

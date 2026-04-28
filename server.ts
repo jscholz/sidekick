@@ -639,6 +639,12 @@ async function handleTranscribe(req, res) {
     }
     try {
       const upstream = new URL('/v1/transcribe', AUDIO_BRIDGE_UPSTREAM);
+      // Forward the PWA's query string (specifically ?keyterms=…&keyterms=…)
+      // through to the bridge. Without this, per-user keyterm biasing on
+      // memo / batch transcription is silently dropped — bridge sees an
+      // empty query and falls back to the configured base spec.
+      const incomingQuery = req.url.includes('?') ? req.url.slice(req.url.indexOf('?') + 1) : '';
+      if (incomingQuery) upstream.search = incomingQuery;
       const bridgeRes = await fetch(upstream.toString(), {
         method: 'POST',
         headers: { 'Content-Type': contentType },
@@ -970,7 +976,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && req.url.startsWith('/tts')) return handleTts(req, res);
   if (req.method === 'POST' && req.url.startsWith('/gen-image')) return handleGenImage(req, res);
   if (req.method === 'POST' && req.url === '/canvas/show') return handleCanvasShow(req, res);
-  if (req.method === 'POST' && req.url === '/transcribe') return handleTranscribe(req, res);
+  if (req.method === 'POST' && (req.url === '/transcribe' || req.url.startsWith('/transcribe?'))) return handleTranscribe(req, res);
   if (req.method === 'GET' && req.url.startsWith('/weather')) return handleWeather(req, res);
   if (req.method === 'GET' && req.url.startsWith('/link-preview')) return handleLinkPreview(req, res);
   if (req.method === 'GET' && req.url.startsWith('/spotify-check')) return handleSpotifyCheck(req, res);
