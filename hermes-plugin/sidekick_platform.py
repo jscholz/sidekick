@@ -1,17 +1,11 @@
 """Sidekick platform adapter for hermes-agent.
 
 Runs an aiohttp WebSocket server bound to localhost. The sidekick proxy
-(Node.js, port 3001) connects as a single persistent client and multiplexes
+(Node.js) connects as a single persistent client and multiplexes
 per-conversation traffic over the WS using ``chat_id``-tagged JSON envelopes.
 
-Why this exists
----------------
-Sidekick previously used hermes' OpenAI-compatible ``/v1/responses`` HTTP
-endpoint for chat. That path has session-bloat / cold-start / compression
-duplication issues because it is fundamentally a **completion** API being
-used as a **chat** UI. Switching to a real platform adapter (peer of
-telegram/slack/signal) lets the gateway own chat_id → session_id mapping
-natively, which is what telegram/slack/etc. do — the bugs disappear.
+Sidekick is a peer of telegram / slack / signal — the gateway owns the
+chat_id → session_id mapping natively.
 
 Wire protocol
 -------------
@@ -52,31 +46,21 @@ Outbound (adapter → proxy)::
 
 The proxy fans these out to the right PWA WebSocket(s) by chat_id.
 
-Limitations / Phase 1 scope
----------------------------
-* Single connected proxy client. Second connection replaces the first
-  (same-host single-user assumption).
+Limitations
+-----------
+* Single connected proxy client. A second connection cleanly drops the
+  first (same-host single-user assumption).
 * No reply_to threading, no media beyond URL-encoded images.
-* ``session_changed`` is wired in Phase 2 via state.db polling (see
-  ``_session_poll_loop``). Lives entirely inside this file — no hermes
-  patches required. Trade-off: ~1.5s lag between compression and the
-  PWA seeing the new title, vs the cleaner-but-invasive option of
-  patching hermes to expose an ``on_session_compressed`` callback.
+* ``session_changed`` is detected via state.db polling
+  (``_session_poll_loop``) — no hermes core patches required for it.
+  Trade-off: ~1.5s lag between compression and the PWA seeing the new
+  title.
 
 Install
 -------
-This file targets a hermes patch that adds ``Platform.SIDEKICK`` and the
-adapter-factory branch. See ``0001-add-sidekick-platform.patch`` next to
-this file. Without that patch the adapter will fail to import.
-
-Once the patch is applied:
-
-  cp sidekick_platform.py ~/.hermes/plugins/sidekick/__init__.py
-  cp plugin.yaml          ~/.hermes/plugins/sidekick/plugin.yaml
-  echo "plugins:\n  enabled:\n    - sidekick" >> ~/.hermes/config.yaml
-  systemctl --user restart hermes-gateway
-
-Or run ``hermes plugins enable sidekick``.
+This adapter requires a hermes patch that registers
+``Platform.SIDEKICK`` and the adapter-factory branch. See
+``0001-add-sidekick-platform.patch`` and ``README.md`` next to this file.
 
 Plugin shape note
 -----------------
