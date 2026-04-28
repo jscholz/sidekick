@@ -28,6 +28,26 @@ import { waitForReady, openSidebar, clickNewChat, send, deleteChat, SEL, assert 
 export const NAME = 'drawer-switch';
 export const DESCRIPTION = 'Drawer click switches chat view on FIRST click — 5 chats, top→bottom→top';
 export const STATUS = 'implemented';
+// Drawer click → resume() → render. No LLM needed. Mock backend
+// pre-populates 5 chats and serves canned transcripts.
+export const BACKEND = 'mocked';
+
+export function MOCK_SETUP(mock) {
+  // Pre-populate 5 chats with distinct user-message markers.
+  const labels = ['alpha', 'beta', 'gamma', 'delta', 'epsilon'];
+  for (let i = 0; i < 5; i++) {
+    const id = `mock-chat-${labels[i]}`;
+    const marker = `marker-${labels[i]}`;
+    mock.addChat(id, {
+      title: `Chat ${labels[i]}`,
+      messages: [
+        { role: 'user', content: marker, timestamp: Date.now() / 1000 - (5 - i) * 60 },
+        { role: 'assistant', content: `Reply to ${labels[i]}`, timestamp: Date.now() / 1000 - (5 - i) * 60 + 1 },
+      ],
+      lastActiveAt: Date.now() - (5 - i) * 60_000,
+    });
+  }
+}
 
 const N = 5;
 
@@ -92,7 +112,7 @@ async function assertSwitched(page, expect, forbid, { timeout = 5000, holdMs = 6
   }
 }
 
-export default async function run({ page, log, ctx }) {
+export default async function run({ page, log, ctx, mock }) {
   // Throttle the history endpoint so cache-cb and server-cb callbacks
   // overlap — that's the race window where Jonathan sees clicks
   // missing or bouncing back. Localhost without throttling completes
@@ -106,21 +126,30 @@ export default async function run({ page, log, ctx }) {
   await waitForReady(page);
   await openSidebar(page);
 
-  // Build 5 fresh chats with distinct user-message markers.
-  const chats = [];
   const labels = ['alpha', 'beta', 'gamma', 'delta', 'epsilon'];
-  for (let i = 0; i < N; i++) {
-    const label = labels[i];
-    const marker = `marker-${label}-${Math.random().toString(36).slice(2, 8)}`;
-    log(`setup chat[${i}] ${label} marker=${marker}`);
-    const idP = captureNextChatId(page);
-    await clickNewChat(page);
-    const id = await idP;
-    await send(page, marker);
-    await page.waitForSelector(SEL.agentFinal, { timeout: 60_000 });
-    // Wait briefly for session_changed to land + drawer refresh.
-    await page.waitForTimeout(400);
-    chats.push({ id, marker });
+  let chats;
+  if (mock) {
+    // Mock mode — chats are pre-populated by MOCK_SETUP. Just enumerate.
+    log('mock mode: using pre-populated chats from MOCK_SETUP');
+    chats = labels.slice(0, N).map(label => ({
+      id: `mock-chat-${label}`,
+      marker: `marker-${label}`,
+    }));
+  } else {
+    // Real-backend mode — create 5 chats by sending real messages.
+    chats = [];
+    for (let i = 0; i < N; i++) {
+      const label = labels[i];
+      const marker = `marker-${label}-${Math.random().toString(36).slice(2, 8)}`;
+      log(`setup chat[${i}] ${label} marker=${marker}`);
+      const idP = captureNextChatId(page);
+      await clickNewChat(page);
+      const id = await idP;
+      await send(page, marker);
+      await page.waitForSelector(SEL.agentFinal, { timeout: 60_000 });
+      await page.waitForTimeout(400);
+      chats.push({ id, marker });
+    }
   }
 
   // Sanity: drawer should have all N rows.

@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 import {
   launchBrowser, attachConsoleCapture, dumpLines, DEFAULT_URL,
 } from './smoke/lib.mjs';
+import { installMockBackend } from './smoke/mock-backend.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SMOKE_DIR = path.join(__dirname, 'smoke');
@@ -39,6 +40,10 @@ const SMOKE_DIR = path.join(__dirname, 'smoke');
 const argv = process.argv.slice(2);
 const HEADED = argv.includes('--headed');
 const INCLUDE_STUBS = argv.includes('--include-stubs');
+// --real-backend forces every scenario to run against the live hermes
+// stack regardless of its declared BACKEND. Default mode honors each
+// scenario's BACKEND export ('mocked' | 'real' | 'either').
+const FORCE_REAL = argv.includes('--real-backend');
 const filter = argv.filter(a => !a.startsWith('--'));
 
 function logRunner(msg) { console.log(`[smoke] ${msg}`); }
@@ -56,6 +61,8 @@ async function loadScenarios() {
       name: mod.NAME || f.replace(/\.mjs$/, ''),
       description: mod.DESCRIPTION || '',
       status: mod.STATUS || 'unknown',
+      backend: mod.BACKEND || 'either',  // 'mocked' | 'real' | 'either'
+      mockSetup: mod.MOCK_SETUP || null,  // optional (mock) => void
       run: mod.default,
     });
   }
@@ -70,9 +77,21 @@ async function runOne(scenario) {
   let failMessage = null;
   const fail = (msg) => { failMessage = msg; throw new Error(msg); };
 
+  // Decide backend: real if scenario demands it OR --real-backend flag.
+  // Otherwise mocked (default for everything except LLM-shape tests).
+  const useRealBackend =
+    FORCE_REAL || scenario.backend === 'real';
+  let mock = null;
+  if (!useRealBackend) {
+    mock = await installMockBackend(page);
+    if (typeof scenario.mockSetup === 'function') {
+      await scenario.mockSetup(mock);
+    }
+  }
+
   try {
-    await scenario.run({ page, log, fail, url: DEFAULT_URL, ctx });
-    return { status: 'pass', durationMs: Date.now() - start };
+    await scenario.run({ page, log, fail, url: DEFAULT_URL, ctx, mock });
+    return { status: 'pass', durationMs: Date.now() - start, mode: useRealBackend ? 'real' : 'mocked' };
   } catch (e) {
     const tail = getConsole(30).map(l => `      ${l}`).join('\n');
     let lineDump = '';
@@ -84,6 +103,7 @@ async function runOne(scenario) {
       stack: e.stack,
       consoleTail: tail,
       lineDump,
+      mode: useRealBackend ? 'real' : 'mocked',
     };
   } finally {
     await cleanup();

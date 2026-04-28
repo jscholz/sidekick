@@ -12,6 +12,10 @@ import { waitForReady, clickNewChat, send, deleteChat, SEL, assert } from './lib
 export const NAME = 'tool-turn';
 export const DESCRIPTION = 'Tool-using prompt → activity row + finalized reply';
 export const STATUS = 'implemented';
+// Tool turn requires a real model to decide to call a tool. Mock can't
+// simulate Phase 3's tool_call/tool_result envelopes faithfully (that's
+// the thing we're testing).
+export const BACKEND = 'real';
 
 const TOOL_PROMPT = 'Search the web for today\'s weather in London and tell me the high temperature.';
 

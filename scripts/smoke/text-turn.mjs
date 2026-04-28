@@ -20,6 +20,10 @@ import { waitForReady, clickNewChat, send, deleteChat, SEL, assert } from './lib
 export const NAME = 'text-turn';
 export const DESCRIPTION = 'Fresh chat → "hi" → finalized agent bubble with non-placeholder text';
 export const STATUS = 'implemented';
+// Exercises the real LLM round-trip — needs hermes, can't be mocked
+// without simulating Phase 3's reply_delta/reply_final shape, which is
+// what we're testing.
+export const BACKEND = 'real';
 
 function captureNextChatId(page) {
   return new Promise((resolve, reject) => {
