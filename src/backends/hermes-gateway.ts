@@ -7,7 +7,7 @@
  * stay live; the user picks one via the backend setting.
  *
  * Wire path:
- *   PWA → POST /api/sidekick/messages {chat_id, text}
+ *   PWA → POST /api/sidekick/messages {chat_id, text}    (fire-and-forget)
  *           ↓ (proxy WS client)
  *   hermes platform adapter (in-process, ws://127.0.0.1:8645)
  *           ↓
@@ -16,9 +16,20 @@
  *   adapter → reply_delta / reply_final / image / typing /
  *             session_changed / notification envelopes back over WS
  *           ↓
- *   proxy mirrors as SSE (event=type, data=envelope verbatim)
+ *   proxy fans every envelope onto /api/sidekick/stream (one
+ *   persistent SSE channel for the lifetime of the PWA tab).
  *           ↓
- *   we parse here; emit normalized BackendAdapter events.
+ *   we parse here; emit normalized BackendAdapter events. Each
+ *   envelope carries chat_id; events for the active view stream
+ *   into the live UI, events for background views accumulate as
+ *   system rows in those threads.
+ *
+ * Why a single persistent stream instead of per-POST SSE: hermes
+ * platform adapters emit multiple `send()` calls per turn (bootstrap
+ * nudges, the actual reply, possibly tool-result-as-text). The old
+ * per-POST SSE closed on the first reply_final and dropped every
+ * subsequent bubble. There are no turn boundaries on the wire —
+ * telegram/slack/signal adapters are designed the same way.
  *
  * chat_id allocation: PWA-local UUID per conversation, stored in IDB
  * via src/conversations.ts. The proxy / adapter never mint chat_ids
@@ -35,28 +46,53 @@ import * as conversations from '../conversations.ts';
 
 let subs: any = null;
 let connected = false;
-let inflight: AbortController | null = null;
 /** Active chat_id memoized in-process. Hydrated on connect() from IDB.
  *  setCurrentSessionId / resumeSession / newSession / first-message
  *  paths all funnel through this so lookups don't hit IDB on the
  *  hot path. */
 let activeChatId: string | null = null;
-/** Per-turn streaming state. The adapter sends `reply_delta` with the
- *  FULL cumulative text per envelope (BasePlatformAdapter contract),
- *  so we can pass `text` straight through as `cumulativeText`. */
-let currentReplyId: string | null = null;
+/** Per-bubble streaming state, keyed off the envelope's message_id so
+ *  multiple in-flight bubbles (across the same or different chats)
+ *  stream cleanly without colliding. The map gets cleared on each
+ *  bubble's reply_final so it doesn't grow unbounded. */
+const bubbleReplyIds = new Map<string, string>();
 /** Health-poll handle. We use GET /api/sidekick/sessions as a cheap
  *  liveness probe — its handler is the same one the drawer calls, so
  *  there's no separate health route to mount. */
 let healthTimer: ReturnType<typeof setTimeout> | null = null;
 const HEALTH_INTERVAL_MS = 30_000;
-/** Persistent notifications EventSource. EventSource auto-reconnects
- *  on transient failures (5s retry hint set by the server), so we
- *  open once on connect() and let it handle redial. */
-let notifyES: EventSource | null = null;
+/** Persistent stream EventSource — every adapter envelope arrives here.
+ *  EventSource auto-reconnects on transient failures (5s retry hint set
+ *  by the server), so we open once on connect() and let it handle redial. */
+let streamES: EventSource | null = null;
 
 function newReplyId(): string {
   return `sk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Resolve a stable replyId for a streaming bubble. The adapter sends
+ *  its own message_id on every reply_delta / reply_final for a bubble,
+ *  so use that as the map key. Falls back to a synthetic id keyed on
+ *  chat_id when message_id is missing — the shell still stitches
+ *  delta + final by replyId, so cohesion within one bubble is
+ *  preserved either way. */
+function replyIdFor(env: any, chatId: string): string {
+  const msgId = typeof env?.message_id === 'string' && env.message_id
+    ? env.message_id
+    : `chat:${chatId}`;
+  let id = bubbleReplyIds.get(msgId);
+  if (!id) {
+    id = newReplyId();
+    bubbleReplyIds.set(msgId, id);
+  }
+  return id;
+}
+
+function clearBubble(env: any, chatId: string): void {
+  const msgId = typeof env?.message_id === 'string' && env.message_id
+    ? env.message_id
+    : `chat:${chatId}`;
+  bubbleReplyIds.delete(msgId);
 }
 
 function apiBase(): string {
@@ -108,93 +144,52 @@ function stopHealthPoll(): void {
   if (healthTimer) { clearTimeout(healthTimer); healthTimer = null; }
 }
 
-/** Open the persistent notifications channel. Idempotent — calling
- *  twice keeps the existing source. EventSource handles reconnect via
- *  the `retry: 5000` hint the server emits, so we don't manage the
- *  lifecycle ourselves beyond open / close on connect / disconnect. */
-function startNotificationsChannel(): void {
-  if (notifyES) return;
+/** Open the persistent stream channel — the single source of inbound
+ *  envelopes for ALL chats. Idempotent: calling twice keeps the existing
+ *  source. EventSource handles reconnect via the `retry: 5000` hint the
+ *  server emits, so we don't manage the lifecycle ourselves beyond open
+ *  / close on connect / disconnect. */
+function startStreamChannel(): void {
+  if (streamES) return;
   try {
-    notifyES = new EventSource(`${apiBase()}/notifications`);
+    streamES = new EventSource(`${apiBase()}/stream`);
   } catch (e: any) {
-    diag(`hermes-gateway: notifications EventSource open failed: ${e.message}`);
+    diag(`hermes-gateway: stream EventSource open failed: ${e.message}`);
     return;
   }
-  notifyES.addEventListener('notification', (ev: MessageEvent) => {
+  // The server emits one event per envelope, with event-name = envelope.type.
+  // Listen explicitly for each type we care about; unknown event names are
+  // ignored by EventSource if no listener is bound, which is the desired
+  // behavior (forward-compat).
+  const onEvent = (ev: MessageEvent) => {
     let env: any;
     try { env = JSON.parse(ev.data); }
     catch {
-      diag('hermes-gateway: notifications non-JSON frame ignored');
+      diag('hermes-gateway: stream non-JSON frame ignored');
       return;
     }
+    const type = (env && typeof env.type === 'string') ? env.type : ev.type;
     const chatId = typeof env?.chat_id === 'string' ? env.chat_id : '';
     if (!chatId) return;
-    const kind = typeof env?.kind === 'string' ? env.kind : 'unknown';
-    const content = typeof env?.content === 'string' ? env.content : '';
-    log(`hermes-gateway: notification kind=${kind} chat_id=${chatId}`);
-    subs?.onNotification?.({ chatId, kind, content });
-    // Bump the drawer ordering so the chat with the freshest notification
-    // floats up. last_message_at semantically tracks "most-recent
-    // activity" — a cron-pushed message qualifies.
-    conversations.updateLastMessageAt(chatId, Date.now()).catch(() => {});
-  });
-  notifyES.onerror = (e) => {
+    handleEnvelope(type, env, chatId);
+  };
+  for (const t of ['reply_delta', 'reply_final', 'image', 'typing',
+                   'notification', 'session_changed', 'error']) {
+    streamES.addEventListener(t, onEvent as any);
+  }
+  streamES.onerror = (e) => {
     // EventSource auto-reconnects; just log so transient blips are
     // visible without closing the source (closing would prevent retry).
-    diag(`hermes-gateway: notifications stream errored (will retry): ${(e as any)?.message || ''}`);
+    diag(`hermes-gateway: stream errored (will retry): ${(e as any)?.message || ''}`);
   };
 }
 
-function stopNotificationsChannel(): void {
-  if (notifyES) {
-    try { notifyES.close(); } catch {}
-    notifyES = null;
+function stopStreamChannel(): void {
+  if (streamES) {
+    try { streamES.close(); } catch {}
+    streamES = null;
   }
-}
-
-// ─── SSE parsing ─────────────────────────────────────────────────────────────
-
-/** Parse the SSE stream from POST /api/sidekick/messages. Each event
- *  is one envelope verbatim; SSE event name == envelope.type. We map
- *  type → BackendAdapter event the same way hermes.ts does for
- *  /v1/responses, but with a much smaller event vocabulary. */
-async function parseSSE(response: Response, chatId: string): Promise<void> {
-  if (!response.body) return;
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  while (true) {
-    let chunk;
-    try { chunk = await reader.read(); }
-    catch (e) { diag(`hermes-gateway: SSE read error: ${(e as Error).message}`); break; }
-    if (chunk.done) break;
-    buffer += decoder.decode(chunk.value, { stream: true });
-    let idx: number;
-    while ((idx = buffer.indexOf('\n\n')) >= 0) {
-      const rawEvent = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      if (rawEvent.trim()) dispatchSSEEvent(rawEvent, chatId);
-    }
-  }
-}
-
-function dispatchSSEEvent(raw: string, chatId: string): void {
-  let eventName = 'message';
-  const dataLines: string[] = [];
-  for (const line of raw.split('\n')) {
-    if (line.startsWith('event:')) eventName = line.slice(6).trim();
-    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
-  }
-  if (dataLines.length === 0) return;
-  const data = dataLines.join('\n');
-  let payload: any;
-  try { payload = JSON.parse(data); }
-  catch {
-    diag(`hermes-gateway: non-JSON data in event=${eventName}: ${data.slice(0, 80)}`);
-    return;
-  }
-  const type = payload.type || eventName;
-  handleEnvelope(type, payload, chatId);
+  bubbleReplyIds.clear();
 }
 
 function handleEnvelope(type: string, env: any, chatId: string): void {
@@ -206,18 +201,23 @@ function handleEnvelope(type: string, env: any, chatId: string): void {
     case 'reply_delta': {
       const text = typeof env.text === 'string' ? env.text : '';
       if (!text) return;
-      if (!currentReplyId) currentReplyId = newReplyId();
+      const replyId = replyIdFor(env, chatId);
       subs?.onActivity?.({ working: true, detail: 'streaming', conversation: chatId });
       // Adapter contract guarantees `text` is the full cumulative text
-      // for this turn — pass straight through as cumulativeText.
-      subs?.onDelta?.({ replyId: currentReplyId, cumulativeText: text, conversation: chatId });
+      // for this bubble — pass straight through as cumulativeText.
+      subs?.onDelta?.({ replyId, cumulativeText: text, conversation: chatId });
       return;
     }
 
     case 'reply_final': {
-      const replyId = currentReplyId || newReplyId();
+      const replyId = replyIdFor(env, chatId);
       const finalText = typeof env.text === 'string' ? env.text : '';
-      currentReplyId = null;
+      clearBubble(env, chatId);
+      // Note: working=false here means "this bubble is done." If the
+      // adapter sends a follow-up bubble (bootstrap nudge → reply, or
+      // tool-result-as-text), the next reply_delta will flip activity
+      // back on. The shell's two-state thinking indicator can flicker
+      // briefly between bubbles — acceptable.
       subs?.onActivity?.({ working: false, conversation: chatId });
       subs?.onFinal?.({ replyId, text: finalText, conversation: chatId });
       // Bump last_message_at so the drawer sort surfaces this row even
@@ -251,16 +251,17 @@ function handleEnvelope(type: string, env: any, chatId: string): void {
 
     case 'notification': {
       // Push notification (cron, /background result, scheduled
-      // reminder). Normally arrives via the dedicated notifications
-      // EventSource (see startNotificationsChannel above) — but the
-      // adapter MAY emit one mid-turn on the per-message SSE if a
-      // background event lands while a turn is streaming, so handle it
-      // here too. Idempotent at the shell level (system rows are
-      // append-only; minor duplication is fine).
+      // reminder). May target ANY chat_id, not just the active one;
+      // shell decides what to render where (system row in the matching
+      // thread, badge on the drawer entry, etc.).
       const kind = typeof env.kind === 'string' ? env.kind : 'unknown';
       const content = typeof env.content === 'string' ? env.content : '';
-      log(`hermes-gateway: notification (in-stream) for ${chatId}: ${kind}`);
+      log(`hermes-gateway: notification kind=${kind} chat_id=${chatId}`);
       subs?.onNotification?.({ chatId, kind, content });
+      // Bump the drawer ordering so the chat with the freshest
+      // notification floats up. last_message_at semantically tracks
+      // "most-recent activity" — a cron-pushed message qualifies.
+      conversations.updateLastMessageAt(chatId, Date.now()).catch(() => {});
       return;
     }
 
@@ -314,13 +315,12 @@ export const hermesGatewayAdapter = {
       log('hermes-gateway: probe failed — is the proxy running?');
     }
     startHealthPoll();
-    startNotificationsChannel();
+    startStreamChannel();
   },
 
   disconnect() {
-    if (inflight) { try { inflight.abort(); } catch {} inflight = null; }
     stopHealthPoll();
-    stopNotificationsChannel();
+    stopStreamChannel();
     connected = false;
   },
 
@@ -350,24 +350,20 @@ export const hermesGatewayAdapter = {
     }
     const chatId = activeChatId!;
 
-    // Single in-flight per session — barge-in cancels the previous
-    // SSE read but does NOT cancel the agent run (proxy /messages
-    // handler keeps the WS subscription alive on PWA disconnect, by
-    // design — see server-lib/backends/hermes-gateway/messages.ts).
-    if (inflight) { try { inflight.abort(); } catch {} }
-    inflight = new AbortController();
-
     const body: Record<string, any> = { chat_id: chatId, text };
     if (Array.isArray(opts.attachments) && opts.attachments.length) {
       body.attachments = opts.attachments;
     }
 
+    // Fire-and-forget — the proxy returns 202 once the WS frame is
+    // queued. Reply envelopes arrive on the persistent stream
+    // channel via onDelta / onFinal callbacks. We don't await an
+    // SSE here.
     try {
       const res = await fetch(`${apiBase()}/messages`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'accept': 'text/event-stream' },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
-        signal: inflight.signal,
       });
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
@@ -378,19 +374,15 @@ export const hermesGatewayAdapter = {
         } catch {}
         throw new Error(`Sidekick HTTP ${res.status}: ${detail}`);
       }
+      // Optimistic activity flip — flips back to working=true on the
+      // first reply_delta / typing envelope. Pre-confirm "we sent it"
+      // so the UI shows a live indicator even if the agent takes a
+      // moment before its first stream tick.
       subs?.onActivity?.({ working: true, detail: 'pending', conversation: chatId });
-      await parseSSE(res, chatId);
     } catch (e: any) {
-      if (e.name === 'AbortError') {
-        diag('hermes-gateway: request aborted');
-        subs?.onActivity?.({ working: false, conversation: chatId });
-        return;
-      }
       diag(`hermes-gateway.sendMessage failed: ${e.message}`);
       subs?.onActivity?.({ working: false, conversation: chatId });
       throw e;
-    } finally {
-      inflight = null;
     }
   },
 
@@ -401,7 +393,7 @@ export const hermesGatewayAdapter = {
     const conv = await conversations.create();
     await conversations.setActive(conv.chat_id);
     activeChatId = conv.chat_id;
-    currentReplyId = null;
+    bubbleReplyIds.clear();
     log(`hermes-gateway: new session (chat_id=${conv.chat_id})`);
   },
 
@@ -420,7 +412,7 @@ export const hermesGatewayAdapter = {
   async setCurrentSessionId(chat_id: string | null) {
     activeChatId = chat_id;
     await conversations.setActive(chat_id);
-    currentReplyId = null;
+    bubbleReplyIds.clear();
   },
 
   async listSessions(_limit = 50) {
@@ -488,7 +480,7 @@ export const hermesGatewayAdapter = {
     // chat_id is the single source of truth and IDB write is atomic.
     activeChatId = id;
     await conversations.setActive(id);
-    currentReplyId = null;
+    bubbleReplyIds.clear();
     // Fetch transcript via the proxy. The endpoint resolves chat_id →
     // session_id by looking up state.db.sessions.session_key, then walks
     // the parent_session_id chain so compression rotations show their
