@@ -360,6 +360,13 @@ async def handle_transcribe(request: "web.Request") -> "web.Response":
     must indicate the mime so providers can decode appropriately; we
     default to ``audio/webm`` to match what the PWA records.
 
+    Per-request keyterms: the PWA may send `?keyterms=foo&keyterms=bar`
+    (or repeated `keyterms` form values) in the query string. We merge
+    them into the configured provider spec the same way the streaming
+    path merges `peer.extra["keyterms"]` in `stt_bridge._run_stt`, so
+    memos and dictate-batch get the same vocabulary biasing as call mode.
+    Empty / missing list → falls back to the configured base spec.
+
     On NotImplementedError (placeholder providers like local_whisper)
     we return 501 so callers can surface a clear "this provider doesn't
     support batch yet" message.
@@ -376,13 +383,46 @@ async def handle_transcribe(request: "web.Request") -> "web.Response":
     if not audio:
         return _err("empty body", status=400, code="empty_body")
 
+    # Per-request keyterm biasing — accepts repeated `?keyterms=…&keyterms=…`
+    # so the PWA can ship the same IDB list it sends with the WebRTC offer
+    # without re-encoding into a single param. Stripped + dedup'd
+    # case-insensitive to match signaling.handle_offer's normalization.
+    req_keyterms_raw = request.query.getall("keyterms", [])
+    seen_kt: set[str] = set()
+    req_keyterms: list[str] = []
+    for t in req_keyterms_raw:
+        s = str(t).strip()
+        if s and s.lower() not in seen_kt:
+            seen_kt.add(s.lower())
+            req_keyterms.append(s)
+
     # Lazy import so a config without webrtc deps still serves /v1/rtc/health.
     # Importing the package (not just the module) triggers self-registration
     # of the bundled deepgram adapter via providers/__init__.py.
     from providers import get_stt_provider
 
+    base_spec = _VOICE_CONFIG.stt
+    if req_keyterms:
+        from dataclasses import replace
+        merged_options = dict(base_spec.options)
+        existing_lc = {str(t).strip().lower() for t in merged_options.get("keyterms", []) or []}
+        existing = list(merged_options.get("keyterms", []) or [])
+        for t in req_keyterms:
+            if t.lower() not in existing_lc:
+                existing.append(t)
+                existing_lc.add(t.lower())
+        merged_options["keyterms"] = existing
+        spec = replace(base_spec, options=merged_options)
+        logger.info(
+            "[transcribe] keyterms=%d (req=%d, base=%d)",
+            len(existing), len(req_keyterms),
+            len(base_spec.options.get("keyterms", []) or []),
+        )
+    else:
+        spec = base_spec
+
     try:
-        provider = get_stt_provider(_VOICE_CONFIG.stt)
+        provider = get_stt_provider(spec)
     except KeyError as e:
         return _err(str(e), status=500, code="unknown_provider")
 

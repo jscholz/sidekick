@@ -70,7 +70,11 @@ export async function readList(): Promise<string[] | null> {
   }
 }
 
-/** Persist the given list to IDB. Overwrites any prior list. */
+/** Persist the given list to IDB. Overwrites any prior list.
+ *  Logs to console on success/failure so the chip-UI commit path is
+ *  observable from DevTools — Jonathan reported "adding chips fires no
+ *  console output" 2026-04-28; without observability, an IDB write
+ *  failure (quota, private mode, schema mismatch) was silent. */
 export async function writeList(terms: string[]): Promise<void> {
   try {
     const db = await openDB();
@@ -80,8 +84,11 @@ export async function writeList(terms: string[]): Promise<void> {
       updatedAt: Date.now(),
     }));
     db.close();
-  } catch {
+    console.log(`[keyterms] writeList ok: ${terms.length} term(s)`,
+      terms.length ? terms.slice(0, 5).join(', ') + (terms.length > 5 ? ` (+${terms.length - 5})` : '') : '(empty)');
+  } catch (e) {
     // Best-effort: storage quota / private mode failures shouldn't break the UI.
+    console.warn('[keyterms] writeList failed:', e);
   }
 }
 
@@ -91,13 +98,20 @@ export async function writeList(terms: string[]): Promise<void> {
  *  surface as an empty list — the user can still type new chips. */
 export async function loadOrSeed(): Promise<string[]> {
   const saved = await readList();
-  if (saved !== null) return saved;
+  if (saved !== null) {
+    console.log(`[keyterms] loadOrSeed: ${saved.length} from IDB`,
+      saved.length ? saved.slice(0, 5).join(', ') + (saved.length > 5 ? ` (+${saved.length - 5})` : '') : '(empty)');
+    return saved;
+  }
   let seeded: string[] = [];
   try {
     const { fetchWithTimeout } = await import('./util/fetchWithTimeout.ts');
     const r = await fetchWithTimeout('/api/keyterms', { timeoutMs: 5_000 });
     if (r.ok) seeded = parseSeedBody(await r.text());
-  } catch {}
+  } catch (e) {
+    console.warn('[keyterms] seed fetch failed:', e);
+  }
+  console.log(`[keyterms] loadOrSeed: seeded ${seeded.length} from /api/keyterms`);
   await writeList(seeded);
   return seeded;
 }

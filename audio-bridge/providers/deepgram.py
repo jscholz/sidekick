@@ -96,9 +96,19 @@ class DeepgramSTT(STTProvider):
         # client libraries and the header version is rock-solid.
         headers = {"Authorization": f"Token {self._api_key}"}
 
+        # Log keyterm count + first few terms — the only way to verify
+        # per-peer biasing actually reaches Deepgram. Without this the
+        # only signal was an unlogged query string and we couldn't tell
+        # streaming vs spec-mutation bugs apart. Trim to first 5 terms
+        # to keep the log line bounded for users with long lists.
+        kt_preview = ", ".join(self._keyterms[:5])
+        if len(self._keyterms) > 5:
+            kt_preview += f", … (+{len(self._keyterms) - 5} more)"
         logger.info(
-            "[deepgram-stt] opening %s model=%s rate=%d",
-            DEEPGRAM_WS_URL, self._model, self._sample_rate,
+            "[deepgram-stt] opening %s model=%s lang=%s rate=%d keyterms=%d%s",
+            DEEPGRAM_WS_URL, self._model, self._language, self._sample_rate,
+            len(self._keyterms),
+            f" [{kt_preview}]" if self._keyterms else "",
         )
 
         # Use the websockets connect API; old/new versions disagree on
@@ -193,15 +203,28 @@ class DeepgramSTT(STTProvider):
             "language": self._language,
             "smart_format": "true" if self._smart_format else "false",
         }
-        url = f"{DEEPGRAM_REST_URL}?{urllib.parse.urlencode(params)}"
+        qs = urllib.parse.urlencode(params)
+        # Deepgram supports repeated &keyterm=... params on /listen for
+        # batch the same way as streaming. Without this, memo/dictate
+        # blobs sent to the REST endpoint ran un-biased even though
+        # streaming was correctly biased — same provider, two paths,
+        # different behaviour. Mirror the streaming URL builder.
+        for kw in self._keyterms:
+            qs += "&keyterm=" + urllib.parse.quote(str(kw))
+        url = f"{DEEPGRAM_REST_URL}?{qs}"
         headers = {
             "Authorization": f"Token {self._api_key}",
             "Content-Type": mime or "audio/webm",
         }
 
+        kt_preview = ", ".join(self._keyterms[:5])
+        if len(self._keyterms) > 5:
+            kt_preview += f", … (+{len(self._keyterms) - 5} more)"
         logger.info(
-            "[deepgram-stt] batch transcribe bytes=%d mime=%s model=%s",
+            "[deepgram-stt] batch transcribe bytes=%d mime=%s model=%s keyterms=%d%s",
             len(audio), mime, self._model,
+            len(self._keyterms),
+            f" [{kt_preview}]" if self._keyterms else "",
         )
 
         async with aiohttp.ClientSession() as session:
