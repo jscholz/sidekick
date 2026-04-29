@@ -250,6 +250,21 @@ export function load() {
   return current;
 }
 
+// Cross-tab sync: when ANOTHER tab calls set() → save() → localStorage,
+// the `storage` event fires here. Refresh the in-memory cache so the
+// next get() call returns the new value. Doesn't re-fire hydrate's DOM
+// handlers — UI controls in this tab will still show old values until
+// next render — but the SETTING value used by consumers (composer,
+// activity row, voice pipelines) is now correct. Acceptable for v1;
+// fuller fix would emit a settings-changed event the consumers
+// subscribe to.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.key !== STORAGE_KEY) return;
+    load();
+  });
+}
+
 export function save() {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(current)); } catch {}
 }
