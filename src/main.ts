@@ -1125,6 +1125,11 @@ async function boot() {
         return;
       }
       diag('reset history: new-chat button');
+      // Capture the about-to-rotate-from session id so the drawer-cleanup
+      // pass below doesn't accidentally delete it (lastMessageAt is
+      // fresh, but messageCount may still be 0 in the cached list if the
+      // server's listSessions hasn't caught up to the just-sent turn).
+      const priorActive = backend.getCurrentSessionId?.() ?? null;
       // Intentionally do NOT stop streaming or cancel memo — new-chat is a
       // conversation rotation, not a full reset. Users expect to stay in
       // whatever audio mode they were in (streaming stays green, memo bar
@@ -1159,6 +1164,23 @@ async function boot() {
       // active highlight (new one isn't in response_store.db yet —
       // the optimistic placeholder row covers it).
       sessionDrawer.refresh();
+      // Background cleanup: drop any OTHER stale 0-msg chats in the
+      // drawer. These accumulated from old sidebar usage before the
+      // empty-chat no-op guard was added. Fire-and-forget so the
+      // rotation feels snappy; refresh again when the deletes settle
+      // so the drawer self-heals visibly.
+      const newActive = backend.getCurrentSessionId?.() ?? null;
+      const empties = sessionDrawer.getCachedSessions().filter(s =>
+        s.messageCount === 0 && s.id !== priorActive && s.id !== newActive,
+      );
+      if (empties.length > 0) {
+        diag(`new-chat: cleaning ${empties.length} stale empty chat(s) from drawer`);
+        Promise.all(
+          empties.map(s => (backend as any).deleteSession?.(s.id).catch((e: any) =>
+            diag(`new-chat cleanup: deleteSession(${s.id}) failed: ${e.message}`),
+          )),
+        ).then(() => sessionDrawer.refresh());
+      }
       // On mobile, collapse the sidebar so the user sees the fresh chat —
       // otherwise the expanded drawer hides the transition and the action
       // feels like it didn't land. Desktop keeps the drawer open (session
