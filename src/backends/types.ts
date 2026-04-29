@@ -116,6 +116,12 @@
  * @property {(e: ToolEvent) => void} [onToolEvent]
  * @property {(a: ActivityEvent) => void} [onActivity]
  * @property {(n: NotificationEvent) => void} [onNotification]
+ * @property {(e: {conversation: string; sessionId: string; title: string}) => void} [onSessionChanged]
+ *   Fired when a session_changed envelope arrives — gateway-driven
+ *   title rotation (e.g. compression auto-numbering, post-first-message
+ *   titling). Adapter has already updated its local state; the shell
+ *   uses this to trigger a drawer re-render so the new title surfaces
+ *   without waiting for the next list poll.
  * @property {(c: ToolCallEvent) => void} [onToolCall]
  * @property {(r: ToolResultEvent) => void} [onToolResult]
  * @property {(e: {messages: SessionMessage[]; conversation: string; firstId?: number|null; hasMore?: boolean}) => void} [onResume]

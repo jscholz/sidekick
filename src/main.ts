@@ -656,6 +656,12 @@ async function boot() {
     onToolEvent: handleToolEvent,
     onActivity: handleActivity,
     onNotification: handleNotification,
+    onSessionChanged: () => {
+      // Adapter has already updated its local state (IDB title etc).
+      // Re-render the drawer so the new title surfaces immediately
+      // — without this the user only sees it on next list poll.
+      sessionDrawer.refresh();
+    },
     // Phase 3 — surface tool calls / results as inline activity rows.
     // Renderer reads settings.agentActivity per call, so toggling at
     // runtime takes effect on the next event without re-wiring.

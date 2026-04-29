@@ -383,13 +383,22 @@ function handleEnvelope(type: string, env: any, chatId: string): void {
     }
 
     case 'session_changed': {
-      // Compression rotated the gateway session. Update the local
-      // title so the drawer reflects whatever auto-numbered name the
-      // adapter sent (e.g. "My project" → "My project #2"). No special
-      // UI affordance for "compressed" state in v1.
-      if (typeof env.title === 'string' && env.title) {
-        conversations.updateTitle(chatId, env.title).catch(() => {});
+      // Compression rotated the gateway session, or hermes finished
+      // titling the chat after the first message. Update the local
+      // IDB title and notify the shell so the drawer re-renders in
+      // place. Without the callback, the new title only surfaces on
+      // the next list poll / page reload (UX bug — Jonathan reported
+      // 2026-04-28; pinned by smoke title-update.mjs).
+      const newTitle = typeof env.title === 'string' ? env.title : '';
+      if (newTitle) {
+        conversations.updateTitle(chatId, newTitle).catch(() => {});
       }
+      const sessionId = typeof env.session_id === 'string' ? env.session_id : '';
+      subs?.onSessionChanged?.({
+        conversation: chatId,
+        sessionId,
+        title: newTitle,
+      });
       return;
     }
 

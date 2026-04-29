@@ -160,7 +160,13 @@ export async function installMockBackend(page) {
     // envelopes → next stream connect serves them via the ring.
     const lastEventId = route.request().headers()['last-event-id'];
     const cursor = lastEventId ? Number.parseInt(lastEventId, 10) : -1;
-    let body = 'retry: 5000\n\n';
+    // Tests need live envelopes (pushReply / pushSessionChanged) to
+    // reach the PWA quickly. Real proxy uses retry: 5000; the mock
+    // stream serves a one-shot ring dump and closes, so the
+    // EventSource reconnects on the retry interval and picks up
+    // any envelopes pushed since. Shorten to 200ms so live envelopes
+    // land within an assertion window of ~1s.
+    let body = 'retry: 200\n\n';
     for (const entry of recent) {
       if (entry.id <= cursor) continue;
       body += `id: ${entry.id}\nevent: ${entry.env.type}\ndata: ${JSON.stringify(entry.env)}\n\n`;
@@ -218,8 +224,14 @@ export async function installMockBackend(page) {
       broadcast({ type: 'reply_delta', chat_id: chatId, text, message_id: messageId });
       broadcast({ type: 'reply_final', chat_id: chatId, message_id: messageId });
     },
-    /** Push a session_changed envelope (e.g. for title-update tests). */
+    /** Push a session_changed envelope (e.g. for title-update tests).
+     *  Also updates the in-memory chat's title to match — mimics what
+     *  real hermes does (state.db title column updated alongside the
+     *  envelope), so the next listSessions response carries the new
+     *  title and the drawer's refresh catches up. */
     pushSessionChanged(chatId, title, sessionId = `mock-${chatId}`) {
+      const chat = chats.get(chatId);
+      if (chat) chat.title = title;
       broadcast({ type: 'session_changed', chat_id: chatId, session_id: sessionId, title });
     },
     /** Inspect/snapshot. */
