@@ -652,6 +652,7 @@ async function boot() {
           // install path where no snapshot existed.
           const restoredSid = chat.getRestoredViewedSessionId();
           const sid = restoredSid || backend.getCurrentSessionId?.();
+          let bootRendered = false;
           if (sid) {
             // If we restored a session from snapshot, seed the drawer
             // highlight immediately — before resumeSession's network
@@ -662,9 +663,36 @@ async function boot() {
             if (restoredSid) sessionDrawer.setViewed(restoredSid);
             try {
               const { messages } = await backend.resumeSession(sid);
-              if (messages.length) replaySessionMessages(sid, messages);
+              if (messages.length) {
+                replaySessionMessages(sid, messages);
+                bootRendered = true;
+              }
             } catch (e: any) {
               diag(`boot: resume ${sid} failed: ${e.message}`);
+            }
+          }
+          // Boot-UX (Jonathan 2026-04-29): if nothing got rendered above
+          // (no snapshot, OR snapshot's session no longer exists, OR
+          // adapter's activeChatId points to an unsent stub), pick the
+          // most recent existing session and show it. Avoids the
+          // "selected stub but body shows another chat" divergence and
+          // gives the user a sane landing state on fresh installs that
+          // already have history (cross-device, cross-platform).
+          if (!bootRendered) {
+            try {
+              const sessions = await backend.listSessions(50);
+              if (sessions.length > 0) {
+                const mostRecent = sessions[0];
+                diag(`boot: no rendered session, picking most recent: ${mostRecent.id}`);
+                const result: any = await backend.resumeSession(mostRecent.id);
+                replaySessionMessages(
+                  mostRecent.id,
+                  result.messages || [],
+                  { firstId: result.firstId ?? null, hasMore: !!result.hasMore },
+                );
+              }
+            } catch (e: any) {
+              diag(`boot: most-recent fallback failed: ${e.message}`);
             }
           }
         } else {

@@ -554,6 +554,14 @@ export const hermesGatewayAdapter = {
       activeChatId = conv.chat_id;
     }
     const chatId = activeChatId!;
+    // Lazy-allocate from newSession() leaves no IDB row; first send
+    // is the moment we know the chat is "real". Hydrate creates the
+    // conversations row if missing so the drawer's listSessions
+    // merge can surface it immediately (its server-side state.db
+    // row also lands during this turn). Idempotent no-op for
+    // existing rows.
+    try { await conversations.hydrate(chatId); }
+    catch (e: any) { diag(`hermes-gateway.sendMessage: IDB hydrate failed: ${e.message}`); }
 
     const body: Record<string, any> = { chat_id: chatId, text };
     if (Array.isArray(opts.attachments) && opts.attachments.length) {
@@ -592,14 +600,20 @@ export const hermesGatewayAdapter = {
   },
 
   async newSession() {
-    // Mint a fresh chat_id locally + flip active. The proxy / adapter
-    // learns about it the moment the user sends their first message
-    // under it; until then nothing crosses the wire.
-    const conv = await conversations.create();
-    await conversations.setActive(conv.chat_id);
-    activeChatId = conv.chat_id;
+    // Mint a fresh chat_id LOCALLY without writing the IDB conversation
+    // row (Option B — lazy-create). The drawer's listSessions merge
+    // appends local IDB rows for chats not on the server; if we wrote
+    // a row here, every "New chat" click would surface as an empty
+    // "New chat / 0 msgs" stub before the user even sent anything.
+    // Instead: hold the chat_id in memory + active pointer, and let
+    // the row materialize when the first message lands (state.db on
+    // server side via plugin's get_or_create_session, IDB on this
+    // side via conversations.hydrate from resumeSession or via
+    // updateLastMessageAt's create-if-missing semantics).
+    activeChatId = conversations.mintChatId();
+    await conversations.setActive(activeChatId);
     bubbleReplyIds.clear();
-    log(`hermes-gateway: new session (chat_id=${conv.chat_id})`);
+    log(`hermes-gateway: new session (chat_id=${activeChatId})`);
   },
 
   getCurrentSessionId() {

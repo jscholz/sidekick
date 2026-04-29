@@ -67,7 +67,14 @@ function reqP<T = any>(r: IDBRequest<T>): Promise<T> {
 
 /** RFC4122-ish v4 UUID. crypto.randomUUID is available in all modern
  *  browsers; the fallback covers ancient Safari (<15.4) and any
- *  insecure-context / unit-test environment without crypto. */
+ *  insecure-context / unit-test environment without crypto.
+ *  Exported as `mintChatId` so the adapter can lazy-allocate a
+ *  chat_id without writing the IDB conversation row (Option B —
+ *  drawer never shows empty stubs). */
+export function mintChatId(): string {
+  return uuid();
+}
+
 function uuid(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
