@@ -33,7 +33,18 @@ interface SidekickSessionRow {
   message_count: number;
   last_active_at: string | null;
   created_at: string | null;
+  /** Snippet of the first user message in this session, truncated to
+   *  ~80 chars. Lets the drawer fall back to a meaningful label when
+   *  hermes hasn't generated a title yet (model error / blip / race).
+   *  Null when there's no user message on disk yet. */
+  first_user_message: string | null;
 }
+
+/** Max length for the first-user-message snippet exposed to the drawer.
+ *  Tuned to fit a single drawer row at typical font sizes; the actual
+ *  width is constrained by CSS but truncating at the source keeps the
+ *  payload small. */
+const FIRST_USER_MESSAGE_SNIPPET_MAX = 80;
 
 /** GET /api/sidekick/sessions
  *
@@ -88,15 +99,23 @@ export async function handleSidekickSessionsList(req, res) {
     // but state.db is written async and may have failed silently — see
     // gateway/session.py:817 vs :833). Drop those orphans so the drawer
     // never surfaces ghosts.
+    // Subquery picks the EARLIEST user-role message per session by id
+    // ASC LIMIT 1 — id is the messages PK and monotonic per insert, so
+    // it's a stable proxy for "first turn". COALESCE to NULL stays
+    // NULL (sqlite3's -json driver emits null for unset cells), which
+    // the drawer treats as "no snippet, fall back to chat id".
     const dbRows = await sqlQuery(HERMES_STATE_DB, `
-      SELECT id AS session_id,
-             COALESCE(source, '') AS source,
-             COALESCE(title, '') AS title,
-             COALESCE(message_count, 0) AS message_count,
-             started_at,
-             ended_at
-      FROM sessions
-      WHERE id IN (${idList})
+      SELECT s.id AS session_id,
+             COALESCE(s.source, '') AS source,
+             COALESCE(s.title, '') AS title,
+             COALESCE(s.message_count, 0) AS message_count,
+             s.started_at,
+             s.ended_at,
+             (SELECT m.content FROM messages m
+              WHERE m.session_id = s.id AND m.role = 'user'
+              ORDER BY m.id ASC LIMIT 1) AS first_user_msg
+      FROM sessions s
+      WHERE s.id IN (${idList})
     `);
     const dbBySessionId = new Map<string, any>();
     for (const r of dbRows) dbBySessionId.set(r.session_id, r);
@@ -105,6 +124,13 @@ export async function handleSidekickSessionsList(req, res) {
     for (const c of chats) {
       const meta = dbBySessionId.get(c.session_id);
       if (!meta) { droppedOrphans++; continue; }
+      // Truncate the snippet at the proxy boundary so the drawer
+      // doesn't have to know the limit. Keep the original null when
+      // there's no user message yet (drawer falls back to chat id).
+      const rawSnippet = typeof meta.first_user_msg === 'string' ? meta.first_user_msg : null;
+      const snippet = rawSnippet
+        ? rawSnippet.slice(0, FIRST_USER_MESSAGE_SNIPPET_MAX)
+        : null;
       rows.push({
         chat_id: c.chat_id,
         session_id: c.session_id,
@@ -113,6 +139,7 @@ export async function handleSidekickSessionsList(req, res) {
         message_count: meta.message_count || 0,
         last_active_at: c.updated_at,
         created_at: meta.started_at ? new Date(meta.started_at * 1000).toISOString() : null,
+        first_user_message: snippet,
       });
     }
     if (droppedOrphans > 0) {

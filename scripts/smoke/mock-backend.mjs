@@ -50,15 +50,25 @@ export async function installMockBackend(page) {
       return route.fallback();
     }
     if (route.request().method() !== 'GET') return route.fallback();
-    const sessions = Array.from(chats.values()).map(c => ({
-      chat_id: c.chatId,
-      session_id: `mock-${c.chatId}`,
-      source: c.source || 'sidekick',
-      title: c.title,
-      last_active_at: new Date(c.lastActiveAt).toISOString(),
-      message_count: c.messages.length,
-      created_at: new Date(c.lastActiveAt).toISOString(),
-    }));
+    const sessions = Array.from(chats.values()).map(c => {
+      // Mirror the proxy's first_user_message derivation: pick the
+      // first role='user' message and truncate to 80 chars. Lets the
+      // drawer fall back to a snippet when title is still empty.
+      const firstUser = c.messages.find(m => m.role === 'user');
+      const firstUserMessage = firstUser
+        ? String(firstUser.content || '').slice(0, 80)
+        : null;
+      return {
+        chat_id: c.chatId,
+        session_id: `mock-${c.chatId}`,
+        source: c.source || 'sidekick',
+        title: c.title,
+        last_active_at: new Date(c.lastActiveAt).toISOString(),
+        message_count: c.messages.length,
+        created_at: new Date(c.lastActiveAt).toISOString(),
+        first_user_message: firstUserMessage,
+      };
+    });
     sessions.sort((a, b) => (b.last_active_at || '').localeCompare(a.last_active_at || ''));
     await route.fulfill({
       status: 200,
@@ -209,12 +219,15 @@ export async function installMockBackend(page) {
 
   return {
     /** Add a synthetic chat to the mock's in-memory state. The PWA
-     *  drawer will list it; clicking it returns the canned messages. */
+     *  drawer will list it; clicking it returns the canned messages.
+     *  Use `??` for `title` so callers can pre-seed an empty-string
+     *  title (untitled-chat scenarios), which `||` would otherwise
+     *  swap for the "Mock chat" default. */
     addChat(chatId, opts = {}) {
       chats.set(chatId, {
         chatId,
         source: opts.source || 'sidekick',
-        title: opts.title || 'Mock chat',
+        title: opts.title ?? 'Mock chat',
         messages: opts.messages || [],
         lastActiveAt: opts.lastActiveAt || Date.now(),
       });

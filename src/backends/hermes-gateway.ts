@@ -125,6 +125,11 @@ interface SessionsResponse {
     message_count?: number;
     last_active_at?: string | number | null;
     created_at?: string | number | null;
+    /** Snippet of the first user message in the session, truncated to
+     *  ~80 chars by the proxy. Drawer falls back to this when title
+     *  is empty (hermes hasn't generated one yet — model error or
+     *  race). Replaced once a `session_changed` envelope arrives. */
+    first_user_message?: string | null;
   }>;
   unconfigured?: boolean;
 }
@@ -661,11 +666,15 @@ export const hermesGatewayAdapter = {
 
     if (!serverReachable) {
       // Offline / proxy down — render whatever we have locally so the
-      // drawer doesn't go blank.
+      // drawer doesn't go blank. No first_user_message snippet
+      // available locally (PWA doesn't cache transcripts in the
+      // conversations IDB), so just fall back to "New chat" via the
+      // title field; the drawer renders that directly.
       return local.map(conv => ({
         id: conv.chat_id,
         source: 'sidekick',
         title: conv.title || 'New chat',
+        snippet: '',
         lastMessageAt: Math.floor(conv.last_message_at / 1000),
         messageCount: 0,
       }));
@@ -680,6 +689,18 @@ export const hermesGatewayAdapter = {
         ? (typeof e.last_active_at === 'number' ? e.last_active_at
            : Math.floor(new Date(e.last_active_at).getTime() / 1000))
         : (localConv ? Math.floor(localConv.last_message_at / 1000) : 0);
+      // Title fallback chain: server-side title wins (the eventual
+      // hermes-generated one), else local IDB title (cross-device
+      // shadow), else fall through to the snippet (first user message
+      // truncated to 80 chars). Only when both are empty AND there's
+      // no snippet do we substitute "New chat" as a last-resort
+      // placeholder. The local IDB defaults to "New chat" on hydrate
+      // (conversations.ts:141) — treat that exact string as a
+      // placeholder, not a real user-set title, so it doesn't shadow
+      // the snippet for chats hermes hasn't titled yet.
+      const localTitle = localConv?.title === 'New chat' ? '' : (localConv?.title || '');
+      const title = e.title || localTitle || '';
+      const snippet = e.first_user_message || '';
       return {
         id: e.chat_id,
         // source = platform that owns this chat (sidekick / telegram /
@@ -687,7 +708,8 @@ export const hermesGatewayAdapter = {
         // legacy single-platform default). Drawer uses this to render
         // a source badge on non-sidekick rows + go composer-read-only.
         source: e.source || 'sidekick',
-        title: e.title || localConv?.title || 'New chat',
+        title: title || (snippet ? '' : 'New chat'),
+        snippet,
         lastMessageAt: lastActive,
         messageCount: e.message_count || 0,
       };
@@ -704,6 +726,9 @@ export const hermesGatewayAdapter = {
           id: conv.chat_id,
           source: 'sidekick',  // local-only chats are always sidekick-minted
           title: conv.title || 'New chat',
+          // Local-only chats have no server-side snippet — they exist
+          // because the user just minted a chat and hasn't sent yet.
+          snippet: '',
           lastMessageAt: Math.floor(conv.last_message_at / 1000),
           messageCount: 0,
         });
@@ -720,6 +745,7 @@ export const hermesGatewayAdapter = {
         id: '__sidekick:hint:unconfigured',
         source: 'sidekick',
         title: 'Sidekick proxy missing SIDEKICK_PLATFORM_TOKEN — sends will 503',
+        snippet: '',
         lastMessageAt: Math.floor(Date.now() / 1000),
         messageCount: 0,
       });
