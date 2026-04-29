@@ -111,12 +111,31 @@ first — it documents the long-lived patch branches, the rebase
 workflow before `pip install -U hermes-agent`, and the upstream-PR
 plan. Don't add patches without updating that ledger.
 
-## Restarting hermes during development
+## Restarting services during development
 
-If a hermes-agent code change needs to take effect, restart the
-gateway:
+**Two long-running services**:
+- `hermes-gateway.service` — hermes-agent (Python, in `~/.hermes/hermes-agent/`)
+- `sidekick.service` — sidekick proxy (`server.ts` + `server-lib/`)
+
+If you change Python code under `~/.hermes/hermes-agent/`, restart
+hermes-gateway. If you change anything under `server-lib/` or
+`server.ts`, **restart sidekick.service**. The PWA bundle
+(`build/*`) is served by the proxy and re-loaded on browser hard-
+reload, so frontend changes don't need a service restart — just
+`npm run build` + reload — but proxy code is loaded once at process
+start.
+
 ```
-systemctl --user restart hermes-gateway
+systemctl --user restart hermes-gateway   # after hermes-agent code changes
+systemctl --user restart sidekick         # after proxy code changes
 ```
-The user (Jonathan) has consented to autonomous restarts during dev
-sessions. State.db / sessions.json survive the restart.
+
+**Gotcha**: smoke tests using the mock backend (`BACKEND='mocked'`)
+intercept HTTP at the BROWSER side via Playwright `page.route()`,
+so they bypass the proxy entirely. They will pass even if the
+deployed proxy is running stale code. To verify a proxy fix is
+actually live, hit the proxy directly with `curl` after restart, or
+run a `BACKEND='real'` smoke scenario.
+
+State.db / sessions.json / IDB survive both restarts. The user
+(Jonathan) has consented to autonomous restarts during dev sessions.
