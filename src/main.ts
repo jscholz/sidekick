@@ -1131,6 +1131,13 @@ async function boot() {
       activityRow.clearAll();
       draft.dismiss();
       voiceMemos.clearAll().catch(() => {});
+      // Clear remaining input surfaces atomically. Without this,
+      // typed-but-unsent text survives the new-chat click and
+      // prepends to the next typed message. Synthetic `input` event
+      // re-runs autoResize + updateSendButtonState in one go.
+      composerInput.value = '';
+      composerInput.dispatchEvent(new Event('input'));
+      attachments.clear();
       historyLoaded = false;
       // newSession is async — it mints a chat_id and awaits an IDB write.
       // Without awaiting, getCurrentSessionId() below returns the PRIOR
