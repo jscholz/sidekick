@@ -28,6 +28,15 @@ saves a multi-hour thrash later.
   guesses. Spend 5 minutes reading the spec; don't reverse-engineer
   it from one or two endpoints. (CONTRACT.md exists for this reason.)
 
+- **Read API docs before writing API code.** Every recurring problem
+  on this codebase has traced back to misunderstanding or misusing
+  someone else's API. If you're calling a library or external
+  service, find its docs FIRST — `~/.hermes/hermes-agent/gateway/`
+  for hermes, the official docs for npm packages, the project's
+  own CONTRACT.md / docs/ for in-tree contracts. "I'll figure it
+  out from the type signatures" is the path to the multi-hour
+  thrash.
+
 - **For bugs at integration boundaries, write a failing test first.**
   The test pins the misbehavior at the lowest layer where it's
   observable. Adding instrumentation to "see what's happening" is
