@@ -9,8 +9,11 @@ ExecStart=%h/code/sidekick/audio-bridge/.venv/bin/python bridge.py
 Environment=SIDEKICK_AUDIO_HOST=127.0.0.1
 Environment=SIDEKICK_AUDIO_PORT=8643
 Environment=SIDEKICK_PROXY_URL=http://127.0.0.1:3001
-Environment=DEEPGRAM_API_KEY=
-Environment=DG_API_KEY=
+# DEEPGRAM_API_KEY / DG_API_KEY: NOT defined here. Inject via a
+# systemd drop-in (~/.config/systemd/user/sidekick-audio.service.d/*.conf)
+# so secrets stay out of this committed reference unit:
+#   [Service]
+#   Environment=DEEPGRAM_API_KEY=...
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal
