@@ -775,5 +775,54 @@ export function applyCapabilities() {
   const section = document.getElementById('sb-sessions-section');
   const enabled = backend.capabilities().sessionBrowsing;
   if (section) section.style.display = enabled ? '' : 'none';
-  if (enabled) refresh();
+  if (enabled) {
+    refresh();
+    startListPolling();
+  } else {
+    stopListPolling();
+  }
+}
+
+// ── Background refresh polling ──────────────────────────────────────
+//
+// Cross-platform sessions (telegram, slack, etc.) don't fire a sidekick-
+// targeted `session_changed` envelope when they get activity — only
+// chats hermes-plugin owns (Platform.SIDEKICK) do. To get sub-1s lag
+// for "telegram chat just got a new message" → drawer reflects it,
+// we'd need a hermes-plugin extension that emits cross-platform
+// session_activity envelopes. Pragmatic v1: poll listSessions every
+// few seconds while the tab is foregrounded. ~3-5s lag for non-
+// sidekick chats; sidekick chats already update live via the existing
+// session_changed handler so nothing changes for the primary path.
+//
+// Pauses when document.visibilityState !== 'visible' so a backgrounded
+// PWA isn't doing useless work. Resumes on visibility-change.
+
+const POLL_INTERVAL_MS = 5000;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollVisibilityBound = false;
+
+function pollTick(): void {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+  if (!backend.capabilities().sessionBrowsing) return;
+  refresh().catch((e: any) => diag(`sessionDrawer poll: refresh failed: ${e?.message}`));
+}
+
+function startListPolling(): void {
+  if (pollTimer) return;
+  pollTimer = setInterval(pollTick, POLL_INTERVAL_MS);
+  if (!pollVisibilityBound && typeof document !== 'undefined') {
+    pollVisibilityBound = true;
+    document.addEventListener('visibilitychange', () => {
+      // On returning to visible, kick a refresh immediately so the
+      // user doesn't wait up to POLL_INTERVAL_MS for the next tick.
+      if (document.visibilityState === 'visible' && backend.capabilities().sessionBrowsing) {
+        refresh().catch(() => {});
+      }
+    });
+  }
+}
+
+function stopListPolling(): void {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 }
