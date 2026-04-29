@@ -252,16 +252,28 @@ export function load() {
 
 // Cross-tab sync: when ANOTHER tab calls set() → save() → localStorage,
 // the `storage` event fires here. Refresh the in-memory cache so the
-// next get() call returns the new value. Doesn't re-fire hydrate's DOM
-// handlers — UI controls in this tab will still show old values until
-// next render — but the SETTING value used by consumers (composer,
-// activity row, voice pipelines) is now correct. Acceptable for v1;
-// fuller fix would emit a settings-changed event the consumers
-// subscribe to.
+// next get() call returns the new value, then dispatch a custom event
+// on `window` so hydrate() can re-sync the visible DOM controls in
+// this tab. Without the custom-event step, page B's <select>/<input>
+// elements would still show the OLD value until full reload (the
+// consumers like activityRow.ts read settings.get() per call so they
+// pick up the new value automatically; the settings panel's own
+// controls are the only thing that needs the DOM nudge).
+//
+// Caveats:
+//  - Chip-based settings (keyterms, preferred-models) are NOT
+//    re-synced from this event. Keyterms live in IDB (per-user, not
+//    in localStorage) so the storage event is irrelevant. Preferred-
+//    models live on the server. The custom event re-applies the
+//    `current` snapshot to standard form controls only.
+//  - Visible side-effects of settings (theme class, font size CSS
+//    var, applyTtsEngineVisibility) are re-applied on the cross-tab
+//    path so tab B looks consistent without reload.
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (e) => {
     if (e.key !== STORAGE_KEY) return;
     load();
+    window.dispatchEvent(new CustomEvent('sidekick:settings-changed'));
   });
 }
 
@@ -332,34 +344,54 @@ export function hydrate(handlers: {
   const setTheme = $sel('set-theme');
   const setAgentActivity = $sel('set-agent-activity');
 
-  // Initial values
-  if (setStreamEngine) setStreamEngine.value = current.streamingEngine;
-  if (setAutoFallback) setAutoFallback.checked = current.autoFallback;
-  if (setTtsEngine) setTtsEngine.value = current.ttsEngine;
-  if (setAudioFeedback) setAudioFeedback.value = String(Math.round(current.audioFeedbackVolume * 100));
-  if (setAudioFeedbackVal) setAudioFeedbackVal.textContent = audioFeedbackLabel(current.audioFeedbackVolume);
-  if (setVoice) setVoice.value = current.voice;
-  if (setWake) setWake.checked = current.wakeLock;
-  if (setCommitPhrase) setCommitPhrase.value = current.commitPhrase;
-  if (setCommitDelay) setCommitDelay.value = String(current.commitDelaySec);
-  if (setCommitDelayVal) setCommitDelayVal.textContent = `${current.commitDelaySec}s`;
-  if (setSilence) setSilence.value = String(current.silenceSec);
-  if (setSilenceVal) setSilenceVal.textContent = current.silenceSec === 0 ? 'Off' : `${current.silenceSec}s`;
-  if (setNavPrev) setNavPrev.value = current.navPrev;
-  if (setNavNext) setNavNext.value = current.navNext;
-  if (setNavPause) setNavPause.value = current.navPause;
-  if (setBarge) setBarge.checked = current.bargeIn;
-  // Sensitivity slider is the INVERSE of threshold. Map threshold 0..0.5 onto
-  // slider 100..0 so "100%" = fire on any sound, "0%" = basically never.
-  if (setBargeSens) setBargeSens.value = String(thresholdToSensitivity(current.bargeThreshold));
-  if (setBargeSensVal) setBargeSensVal.textContent = `${thresholdToSensitivity(current.bargeThreshold)}%`;
-  if (setFontSize) setFontSize.value = String(current.contentSize);
-  if (setFontSizeVal) setFontSizeVal.textContent = `${current.contentSize}px`;
-  if (setTheme) setTheme.value = current.theme;
-  if (setAgentActivity) setAgentActivity.value = current.agentActivity;
-  if (setHotkeyCall) setHotkeyCall.value = current.hotkeyCallMode;
-  if (setHotkeyAutoSend) setHotkeyAutoSend.value = current.hotkeyAutoSend;
-  if (setHotkeyMic) setHotkeyMic.value = current.hotkeyToggleMic;
+  // Apply `current` snapshot to every form control + label. Called
+  // once at hydrate time and again on the cross-tab `sidekick:settings-
+  // changed` event so two PWA tabs stay visibly in sync without reload.
+  // Pure DOM writes — does NOT fire onchange handlers (the cross-tab
+  // path's source of truth is `current`, already updated by load()).
+  function applyToDOM() {
+    if (setStreamEngine) setStreamEngine.value = current.streamingEngine;
+    if (setAutoFallback) setAutoFallback.checked = current.autoFallback;
+    if (setTtsEngine) setTtsEngine.value = current.ttsEngine;
+    if (setAudioFeedback) setAudioFeedback.value = String(Math.round(current.audioFeedbackVolume * 100));
+    if (setAudioFeedbackVal) setAudioFeedbackVal.textContent = audioFeedbackLabel(current.audioFeedbackVolume);
+    if (setVoice) setVoice.value = current.voice;
+    if (setWake) setWake.checked = current.wakeLock;
+    if (setCommitPhrase) setCommitPhrase.value = current.commitPhrase;
+    if (setCommitDelay) setCommitDelay.value = String(current.commitDelaySec);
+    if (setCommitDelayVal) setCommitDelayVal.textContent = `${current.commitDelaySec}s`;
+    if (setSilence) setSilence.value = String(current.silenceSec);
+    if (setSilenceVal) setSilenceVal.textContent = current.silenceSec === 0 ? 'Off' : `${current.silenceSec}s`;
+    if (setNavPrev) setNavPrev.value = current.navPrev;
+    if (setNavNext) setNavNext.value = current.navNext;
+    if (setNavPause) setNavPause.value = current.navPause;
+    if (setBarge) setBarge.checked = current.bargeIn;
+    // Sensitivity slider is the INVERSE of threshold. Map threshold 0..0.5 onto
+    // slider 100..0 so "100%" = fire on any sound, "0%" = basically never.
+    if (setBargeSens) setBargeSens.value = String(thresholdToSensitivity(current.bargeThreshold));
+    if (setBargeSensVal) setBargeSensVal.textContent = `${thresholdToSensitivity(current.bargeThreshold)}%`;
+    if (setFontSize) setFontSize.value = String(current.contentSize);
+    if (setFontSizeVal) setFontSizeVal.textContent = `${current.contentSize}px`;
+    if (setTheme) setTheme.value = current.theme;
+    if (setAgentActivity) setAgentActivity.value = current.agentActivity;
+    if (setHotkeyCall) setHotkeyCall.value = current.hotkeyCallMode;
+    if (setHotkeyAutoSend) setHotkeyAutoSend.value = current.hotkeyAutoSend;
+    if (setHotkeyMic) setHotkeyMic.value = current.hotkeyToggleMic;
+  }
+  applyToDOM();
+
+  // Cross-tab sync: re-apply on `sidekick:settings-changed` so the
+  // <select> / <input> elements catch up after another tab wrote to
+  // localStorage. Also re-apply visual side-effects (theme handler,
+  // font size CSS var, TTS engine row visibility) so the page LOOKS
+  // consistent — not just the form controls. handlers.onThemeChange
+  // is the canonical "make the theme stick" callback in main.ts.
+  window.addEventListener('sidekick:settings-changed', () => {
+    applyToDOM();
+    applyVisuals();
+    applyTtsEngineVisibility();
+    if (handlers.onThemeChange) handlers.onThemeChange();
+  });
 
   // Change handlers
   if (setStreamEngine) setStreamEngine.onchange = () => {
