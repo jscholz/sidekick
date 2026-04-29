@@ -107,12 +107,7 @@ let optimisticActiveId: string | null = null;
  *  there's a chat on screen, even one that's not yet persisted. */
 let viewedSessionId: string | null = null;
 export function setViewed(id: string | null) {
-  const prev = viewedSessionId;
   viewedSessionId = id;
-  if (prev !== id) {
-    const stack = (new Error()).stack?.split('\n').slice(2, 4).map(s => s.trim()).join(' / ') || 'unknown';
-    log(`[chat-trace] setViewed ${prev?.slice(0,8) ?? 'null'} → ${id?.slice(0,8) ?? 'null'} caller=${stack}`);
-  }
 }
 export function getViewed(): string | null { return viewedSessionId; }
 
@@ -131,8 +126,6 @@ function fmtRelativeTime(epochSec: number): string {
  *  drawer that's meant to feel instant. With the cache, the first tap
  *  paints in <100ms and the server fetch reconciles afterwards. */
 export async function refresh() {
-  const stack = (new Error()).stack?.split('\n').slice(2, 4).map(s => s.trim()).join(' / ') || 'unknown';
-  log(`[chat-trace] sessionDrawer.refresh()  viewed=${viewedSessionId?.slice(0,8) ?? 'null'} optActive=${optimisticActiveId?.slice(0,8) ?? 'null'} caller=${stack}`);
   const listEl = document.getElementById('sessions-list');
   if (!listEl) return;
   if (!backend.capabilities().sessionBrowsing) { listEl.innerHTML = ''; return; }
@@ -349,7 +342,6 @@ function renderRow(s: any, activeId: string): HTMLLIElement {
   body.appendChild(snippet);
   body.appendChild(meta);
   body.onclick = () => {
-    log(`[resume-trace] click on row ${s.id?.slice(0,8) ?? 'null'}  optActive=${optimisticActiveId?.slice(0,8) ?? 'null'}`);
     // Optimistic highlight: flip the active class synchronously at click
     // time. resume() is async (cache read + server fetch) and on a cache
     // miss can take 5-10s, which was leaving the highlight stale long
@@ -509,10 +501,7 @@ async function promptDelete(s: any) {
 let resumeInFlight: { id: string; promise: Promise<void> } | null = null;
 
 async function resume(id: string) {
-  const t0 = Date.now();
-  log(`[resume-trace] resume(${id.slice(0,8)}) ENTRY  optActive=${optimisticActiveId?.slice(0,8) ?? 'null'}  inFlight=${resumeInFlight?.id?.slice(0,8) ?? 'null'}`);
   if (resumeInFlight?.id === id) {
-    log(`[resume-trace] resume(${id.slice(0,8)}) DEDUP — already in flight`);
     return resumeInFlight.promise;
   }
   // Claim the optimistic active id immediately so refresh() paints the
@@ -522,7 +511,6 @@ async function resume(id: string) {
   const promise = (async () => {
     // 1. Paint from cached transcript if we have one — instant feel.
     const cached = await sessionCache.getMessagesCache(id);
-    log(`[resume-trace] resume(${id.slice(0,8)}) cache lookup done  cached=${cached?.messages?.length ?? 0}msg  optActive=${optimisticActiveId?.slice(0,8) ?? 'null'}  Δt=${Date.now()-t0}ms`);
     if (cached?.messages?.length) {
       // Stale-callback guard: same logic as the server cb path. If a
       // newer click has set optimisticActiveId to a different id while
@@ -530,11 +518,8 @@ async function resume(id: string) {
       // SUPERSEDED chat over the user's just-clicked one. Without this
       // the user sees A→B→A flicker on rapid clicks even when each
       // click's id is correctly captured at click time.
-      if (optimisticActiveId !== id) {
-        log(`[resume-trace] resume(${id.slice(0,8)}) CACHE-CB DROPPED (newer click → ${optimisticActiveId?.slice(0,8) ?? 'null'})`);
-      } else {
+      if (optimisticActiveId === id) {
         log(`sessionDrawer: resumed ${id} from cache (${cached.messages.length} messages)`);
-        log(`[resume-trace] resume(${id.slice(0,8)}) CACHE-CB FIRING onResumeCb`);
         onResumeCb?.(id, cached.messages);
         refresh();
       }
@@ -554,10 +539,7 @@ async function resume(id: string) {
       // user sees the chat flicker through every clicked id in
       // completion order, last-callback-wins (Jonathan's "click A
       // sometimes goes A→B→A→B" repro 2026-04-28).
-      if (optimisticActiveId !== id) {
-        log(`[resume-trace] resume(${id.slice(0,8)}) SERVER-CB DROPPED (newer click → ${optimisticActiveId?.slice(0,8) ?? 'null'})  Δt=${Date.now()-t0}ms`);
-        return;
-      }
+      if (optimisticActiveId !== id) return;
       // Cache-matched optimization: if the cache cb already rendered
       // the same N messages and the server returned the same N, the
       // server cb would just chat.clear() + re-render the IDENTICAL
@@ -566,11 +548,7 @@ async function resume(id: string) {
       // state (firstId/hasMore) IS new info from the server, but for
       // a cache-matched count it's almost certainly the same too;
       // not worth a redundant render.)
-      if (cached && cached.messages.length === messages.length) {
-        log(`[resume-trace] resume(${id.slice(0,8)}) SERVER-CB SKIPPED (cache matched, ${messages.length}msg)  Δt=${Date.now()-t0}ms`);
-        return;
-      }
-      log(`[resume-trace] resume(${id.slice(0,8)}) SERVER-CB FIRING onResumeCb  Δt=${Date.now()-t0}ms`);
+      if (cached && cached.messages.length === messages.length) return;
       onResumeCb?.(id, messages, pagination);
       refresh();
     } catch (e: any) {
