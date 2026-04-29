@@ -120,6 +120,7 @@ interface SessionsResponse {
   sessions: Array<{
     chat_id: string;
     session_id?: string | null;
+    source?: string;            // 'sidekick' | 'telegram' | 'slack' | … (added 2026-04-29 for cross-platform drawer)
     title?: string | null;
     message_count?: number;
     last_active_at?: string | number | null;
@@ -649,6 +650,7 @@ export const hermesGatewayAdapter = {
       // drawer doesn't go blank.
       return local.map(conv => ({
         id: conv.chat_id,
+        source: 'sidekick',
         title: conv.title || 'New chat',
         lastMessageAt: Math.floor(conv.last_message_at / 1000),
         messageCount: 0,
@@ -666,6 +668,11 @@ export const hermesGatewayAdapter = {
         : (localConv ? Math.floor(localConv.last_message_at / 1000) : 0);
       return {
         id: e.chat_id,
+        // source = platform that owns this chat (sidekick / telegram /
+        // slack / …). Empty/missing means sidekick by convention (the
+        // legacy single-platform default). Drawer uses this to render
+        // a source badge on non-sidekick rows + go composer-read-only.
+        source: e.source || 'sidekick',
         title: e.title || localConv?.title || 'New chat',
         lastMessageAt: lastActive,
         messageCount: e.message_count || 0,
@@ -681,6 +688,7 @@ export const hermesGatewayAdapter = {
       if (!serverIds.has(conv.chat_id)) {
         merged.push({
           id: conv.chat_id,
+          source: 'sidekick',  // local-only chats are always sidekick-minted
           title: conv.title || 'New chat',
           lastMessageAt: Math.floor(conv.last_message_at / 1000),
           messageCount: 0,
@@ -696,6 +704,7 @@ export const hermesGatewayAdapter = {
     if (unconfigured && merged.length === 0) {
       merged.unshift({
         id: '__sidekick:hint:unconfigured',
+        source: 'sidekick',
         title: 'Sidekick proxy missing SIDEKICK_PLATFORM_TOKEN — sends will 503',
         lastMessageAt: Math.floor(Date.now() / 1000),
         messageCount: 0,

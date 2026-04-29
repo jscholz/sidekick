@@ -274,6 +274,49 @@ describe('proxy: hermes-gateway HTTP+SSE contract', () => {
     const ids = (list.sessions || []).map((s: any) => s.chat_id);
     assert.deepEqual(ids, [], `unmapped state.db row should not surface, got ${JSON.stringify(ids)}`);
   });
+
+  // T9: cross-platform sessions appear in the list with source field.
+  // The drawer uses source to render badges + go read-only on non-
+  // sidekick chats (whose sends would route through a foreign adapter).
+  it('T9: sessions list returns chats from all platforms with source field', async () => {
+    rig = await freshRig(rig);
+
+    // Sidekick session.
+    await rig.seedSession({ id: 'SK1', source: 'sidekick', title: 'sidekick chat', message_count: 4 });
+    // Telegram session.
+    await rig.seedSession({ id: 'TG1', source: 'telegram', title: 'telegram chat', message_count: 7 });
+
+    await rig.writeSessionsIndex({
+      'agent:main:sidekick:dm:chatSK': {
+        session_key: 'agent:main:sidekick:dm:chatSK',
+        session_id: 'SK1',
+        platform: 'sidekick',
+        chat_id: 'chatSK',
+        updated_at: '2026-04-29T10:00:00',
+      },
+      'agent:main:telegram:dm:12345': {
+        session_key: 'agent:main:telegram:dm:12345',
+        session_id: 'TG1',
+        platform: 'telegram',
+        chat_id: '12345',
+        updated_at: '2026-04-29T11:00:00',
+      },
+    });
+
+    const list = await (await fetch(`${rig.proxyUrl}/api/sidekick/sessions`)).json() as any;
+    const sessions = list.sessions || [];
+    const bySource: Record<string, any> = {};
+    for (const s of sessions) bySource[s.source] = s;
+
+    assert.equal(sessions.length, 2, `expected 2 sessions, got ${sessions.length}`);
+    assert.ok(bySource.sidekick, 'sidekick session should be present');
+    assert.ok(bySource.telegram, 'telegram session should be present');
+    assert.equal(bySource.sidekick.title, 'sidekick chat');
+    assert.equal(bySource.telegram.title, 'telegram chat');
+    assert.equal(bySource.telegram.message_count, 7);
+    assert.equal(bySource.sidekick.chat_id, 'chatSK');
+    assert.equal(bySource.telegram.chat_id, '12345');
+  });
 });
 
 /** Tear down the rig and start a fresh one. Used between tests because

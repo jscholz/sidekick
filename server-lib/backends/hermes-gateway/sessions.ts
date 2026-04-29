@@ -18,11 +18,17 @@ import path from 'node:path';
 import { sqlQuery } from '../../generic/sql.ts';
 import { HERMES_STATE_DB } from '../hermes/config.ts';
 import { client } from './client.ts';
-import { listSidekickChats, resolveChatIdToSessionId, SIDEKICK_KEY_PREFIX } from './session-index.ts';
+import {
+  listAllChats,
+  resolveChatIdToSessionId,
+  SIDEKICK_KEY_PREFIX,
+  parseSessionKey,
+} from './session-index.ts';
 
 interface SidekickSessionRow {
   chat_id: string;
   session_id: string | null;
+  source: string;
   title: string | null;
   message_count: number;
   last_active_at: string | null;
@@ -54,9 +60,10 @@ export async function handleSidekickSessionsList(req, res) {
   const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '50', 10)));
   let rows: SidekickSessionRow[] = [];
   try {
-    // Walk sessions.json for every sidekick chat_id, then look up
-    // title + counts + timestamps in state.db.
-    const chats = await listSidekickChats(limit);
+    // Walk sessions.json across ALL platforms (sidekick + telegram +
+    // slack + whatsapp + …). Drawer renders source badges for non-
+    // sidekick rows; composer goes read-only when viewing them.
+    const chats = await listAllChats(limit);
     if (chats.length === 0) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ sessions: [] }));
@@ -83,12 +90,13 @@ export async function handleSidekickSessionsList(req, res) {
     // never surfaces ghosts.
     const dbRows = await sqlQuery(HERMES_STATE_DB, `
       SELECT id AS session_id,
+             COALESCE(source, '') AS source,
              COALESCE(title, '') AS title,
              COALESCE(message_count, 0) AS message_count,
              started_at,
              ended_at
       FROM sessions
-      WHERE id IN (${idList}) AND source='sidekick'
+      WHERE id IN (${idList})
     `);
     const dbBySessionId = new Map<string, any>();
     for (const r of dbRows) dbBySessionId.set(r.session_id, r);
@@ -100,6 +108,7 @@ export async function handleSidekickSessionsList(req, res) {
       rows.push({
         chat_id: c.chat_id,
         session_id: c.session_id,
+        source: meta.source || c.source,
         title: meta.title || '',
         message_count: meta.message_count || 0,
         last_active_at: c.updated_at,

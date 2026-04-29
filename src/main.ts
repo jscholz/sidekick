@@ -82,12 +82,38 @@ function updateSendButtonState() {
   const send = document.getElementById('composer-send') as HTMLButtonElement | null;
   const input = document.getElementById('composer-input') as HTMLTextAreaElement | null;
   if (!send) return;
-  const sendable = memoActive
-    || (input?.value?.trim().length ?? 0) > 0
-    || draft.hasContent()
-    || attachments.hasPending();
+  const sendable = !readOnlyComposer
+    && (memoActive
+      || (input?.value?.trim().length ?? 0) > 0
+      || draft.hasContent()
+      || attachments.hasPending());
   send.classList.toggle('active', sendable);
   send.disabled = !sendable;
+}
+
+/** Whether the composer is currently in read-only mode — set true
+ *  when the user is viewing a non-sidekick chat (telegram/slack/etc).
+ *  Cross-platform send isn't supported (the gateway's sidekick adapter
+ *  always builds SessionSource(platform=SIDEKICK), so a send to a
+ *  telegram chat_id would create a duplicate sidekick session rather
+ *  than reaching telegram). Disabling input + send button is the
+ *  honest affordance. */
+let readOnlyComposer = false;
+
+function setComposerReadOnly(readOnly: boolean, source: string = 'sidekick') {
+  readOnlyComposer = readOnly;
+  const input = document.getElementById('composer-input') as HTMLTextAreaElement | null;
+  if (input) {
+    input.disabled = readOnly;
+    if (readOnly) {
+      input.placeholder = `View only — sent via ${source}`;
+      input.classList.add('readonly');
+    } else {
+      input.placeholder = 'Ask anything';
+      input.classList.remove('readonly');
+    }
+  }
+  updateSendButtonState();
 }
 
 // ─── Mic device picker ─────────────────────────────────────────────────────
@@ -1160,6 +1186,9 @@ async function boot() {
       // getViewed() mirrors the session on screen so handleReplyDelta /
       // handleReplyFinal don't drop incoming envelopes for it.
       sessionDrawer.setViewed(backend.getCurrentSessionId?.() || null);
+      // New chat is always sidekick-source; ensure composer is enabled
+      // (in case user just rotated away from a non-sidekick chat).
+      setComposerReadOnly(false);
       // Re-render the session list so the old session row loses its
       // active highlight (new one isn't in response_store.db yet —
       // the optimistic placeholder row covers it).
@@ -2286,6 +2315,10 @@ function replaySessionMessages(
   // cases where the adapter's conversationName diverges from what the
   // user is reading (superseded tokens, failed resumes, boot paths).
   sessionDrawer.setViewed(id);
+  // Composer read-only when viewing a non-sidekick chat (cross-platform
+  // send isn't supported — would route through the wrong adapter).
+  const source = sessionDrawer.getSourceForChat(id);
+  setComposerReadOnly(source !== 'sidekick', source);
   // Refresh server-side session list — handleReplyFinal also refreshes
   // when a turn completes, but if the user switches sessions mid-flight
   // (which aborts the SSE stream client-side), response.completed never

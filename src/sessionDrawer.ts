@@ -197,6 +197,18 @@ export function getCachedSessions(): any[] {
   return cachedSessions.slice();
 }
 
+/** Look up the platform source for a chat_id from the cached session
+ *  list. Returns 'sidekick' if not found (sane default — sidekick is
+ *  the primary platform; non-sidekick rows must come from server data
+ *  that's already been fetched). Used by the composer-read-only path
+ *  in main.ts: when source !== 'sidekick', composer is disabled
+ *  because cross-platform send isn't supported. */
+export function getSourceForChat(id: string | null | undefined): string {
+  if (!id) return 'sidekick';
+  const row = cachedSessions.find(s => s.id === id);
+  return row?.source || 'sidekick';
+}
+
 /** Server-authoritative reconcile of the cached list against the current
  *  filter. The instant client-side re-render (applyFilter on cachedSessions)
  *  is the snappy first paint; this is the catch-up that surfaces matches
@@ -325,13 +337,16 @@ function renderRow(s: any, activeId: string): HTMLLIElement {
 
   const meta = document.createElement('div');
   meta.className = 'sess-meta';
-  // Source badge — shown only for non-webchat sessions so telegram/cli rows
-  // are visually distinguished from the user's primary sidekick transcripts.
-  // api_server rows are the default; we don't clutter them with a label.
+  // Source badge — shown only for non-sidekick sessions so telegram/
+  // slack/whatsapp/etc rows are visually distinguished from the user's
+  // primary sidekick transcripts. Sidekick is the default; we don't
+  // clutter every row with a redundant "SIDEKICK" label. (api_server
+  // is the legacy hermes-backend default name; preserved here for
+  // back-compat with any older entries that still report that source.)
   // No "· current" text — the border highlight from li.active communicates
   // the same thing without adding a 4th meta item that would overflow +
   // wrap the row (changing bubble height when selected).
-  const sourceBadge = s.source && s.source !== 'api_server'
+  const sourceBadge = s.source && s.source !== 'sidekick' && s.source !== 'api_server'
     ? `<span style="text-transform:uppercase;font-size:10px;letter-spacing:0.05em;opacity:0.7">${s.source}</span>`
     : '';
   meta.innerHTML =

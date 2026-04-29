@@ -13,6 +13,27 @@ import path from 'node:path';
 import { HERMES_STATE_DB } from '../hermes/config.ts';
 
 export const SIDEKICK_KEY_PREFIX = 'agent:main:sidekick:dm:';
+const HERMES_KEY_PREFIX = 'agent:main:';
+
+/** Parse a hermes session_key into platform / chat_type / chat_id.
+ *  Returns null for keys that don't match the `agent:main:<platform>:
+ *  <chat_type>:<chat_id>` shape. chat_id may contain colons (some
+ *  platforms have JIDs like `123@s.whatsapp.net` or composite ids). */
+export function parseSessionKey(key: string): {
+  platform: string;
+  chatType: string;
+  chatId: string;
+} | null {
+  if (!key.startsWith(HERMES_KEY_PREFIX)) return null;
+  const rest = key.slice(HERMES_KEY_PREFIX.length);
+  const parts = rest.split(':');
+  if (parts.length < 3) return null;
+  const [platform, chatType, ...idParts] = parts;
+  if (!platform || !chatType) return null;
+  const chatId = idParts.join(':');
+  if (!chatId) return null;
+  return { platform, chatType, chatId };
+}
 
 export interface SessionsIndexEntry {
   session_key: string;
@@ -70,13 +91,22 @@ export async function loadSessionsIndex(): Promise<Record<string, SessionsIndexE
   }
 }
 
-/** Resolve `chat_id` → `session_id` via the sidekick session-key shape.
- *  Returns null if the chat_id isn't in the index (no message has been
- *  sent yet, or the index file is missing). */
+/** Resolve `chat_id` → `session_id`. Tries the sidekick-prefixed key
+ *  first (fast path; most callers), then walks all platforms looking
+ *  for a matching `:<chat_id>` suffix. Cross-platform lookup supports
+ *  the cross-platform drawer view (telegram/slack/etc chats appear in
+ *  the same drawer; clicking them resumes their transcript).
+ *
+ *  Returns null if no entry matches. */
 export async function resolveChatIdToSessionId(chatId: string): Promise<string | null> {
   const idx = await loadSessionsIndex();
-  const entry = idx[`${SIDEKICK_KEY_PREFIX}${chatId}`];
-  return entry?.session_id || null;
+  const sidekick = idx[`${SIDEKICK_KEY_PREFIX}${chatId}`];
+  if (sidekick?.session_id) return sidekick.session_id;
+  for (const [key, entry] of Object.entries(idx)) {
+    const parsed = parseSessionKey(key);
+    if (parsed?.chatId === chatId && entry?.session_id) return entry.session_id;
+  }
+  return null;
 }
 
 /** Enumerate every sidekick chat_id we've ever seen. Returns
@@ -97,6 +127,46 @@ export async function listSidekickChats(limit = 200): Promise<{
     rows.push({
       chat_id,
       session_id: entry.session_id,
+      updated_at: entry.updated_at || null,
+    });
+  }
+  rows.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+  return rows.slice(0, limit);
+}
+
+/** Enumerate ALL platforms' chats from sessions.json. Used by the
+ *  cross-platform drawer view so telegram/slack/whatsapp/etc sessions
+ *  appear alongside sidekick. The drawer renders a source badge per
+ *  row; the composer goes read-only when viewing a non-sidekick chat
+ *  (cross-platform send isn't supported — would require gateway-side
+ *  adapter routing).
+ *
+ *  Returns `(chat_id, session_id, source, chat_type, updated_at)`
+ *  ordered by updated_at desc. */
+export async function listAllChats(limit = 200): Promise<{
+  chat_id: string;
+  session_id: string;
+  source: string;
+  chat_type: string;
+  updated_at: string | null;
+}[]> {
+  const idx = await loadSessionsIndex();
+  const rows: {
+    chat_id: string;
+    session_id: string;
+    source: string;
+    chat_type: string;
+    updated_at: string | null;
+  }[] = [];
+  for (const [key, entry] of Object.entries(idx)) {
+    const parsed = parseSessionKey(key);
+    if (!parsed) continue;
+    if (!entry?.session_id) continue;
+    rows.push({
+      chat_id: parsed.chatId,
+      session_id: entry.session_id,
+      source: parsed.platform,
+      chat_type: parsed.chatType,
       updated_at: entry.updated_at || null,
     });
   }

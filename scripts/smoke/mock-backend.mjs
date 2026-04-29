@@ -53,6 +53,7 @@ export async function installMockBackend(page) {
     const sessions = Array.from(chats.values()).map(c => ({
       chat_id: c.chatId,
       session_id: `mock-${c.chatId}`,
+      source: c.source || 'sidekick',
       title: c.title,
       last_active_at: new Date(c.lastActiveAt).toISOString(),
       message_count: c.messages.length,
@@ -212,6 +213,7 @@ export async function installMockBackend(page) {
     addChat(chatId, opts = {}) {
       chats.set(chatId, {
         chatId,
+        source: opts.source || 'sidekick',
         title: opts.title || 'Mock chat',
         messages: opts.messages || [],
         lastActiveAt: opts.lastActiveAt || Date.now(),
