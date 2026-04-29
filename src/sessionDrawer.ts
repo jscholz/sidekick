@@ -511,6 +511,7 @@ async function resume(id: string) {
   const promise = (async () => {
     // 1. Paint from cached transcript if we have one — instant feel.
     const cached = await sessionCache.getMessagesCache(id);
+    let cacheRendered = false;
     if (cached?.messages?.length) {
       // Stale-callback guard: same logic as the server cb path. If a
       // newer click has set optimisticActiveId to a different id while
@@ -522,6 +523,7 @@ async function resume(id: string) {
         log(`sessionDrawer: resumed ${id} from cache (${cached.messages.length} messages)`);
         onResumeCb?.(id, cached.messages);
         refresh();
+        cacheRendered = true;
       }
     }
     // 2. Always hit the server to reconcile. If cache was stale (server
@@ -540,15 +542,16 @@ async function resume(id: string) {
       // completion order, last-callback-wins (Jonathan's "click A
       // sometimes goes A→B→A→B" repro 2026-04-28).
       if (optimisticActiveId !== id) return;
-      // Cache-matched optimization: if the cache cb already rendered
-      // the same N messages and the server returned the same N, the
-      // server cb would just chat.clear() + re-render the IDENTICAL
-      // content — visible as a 500ms-later blank-flicker for every
-      // cached chat click. Skip the re-render entirely. (Pagination
-      // state (firstId/hasMore) IS new info from the server, but for
-      // a cache-matched count it's almost certainly the same too;
-      // not worth a redundant render.)
-      if (cached && cached.messages.length === messages.length) return;
+      // Cache-matched optimization: if the cache cb ALREADY rendered
+      // the same N messages and the server returned the same N, skip
+      // the re-render to avoid a 500ms-later blank-flicker. Critical:
+      // gate on cacheRendered, not just `cached`. For a chat with 0
+      // cached messages, the cache cb's render path was skipped (it
+      // requires length > 0), so the server cb is the FIRST render
+      // — must run, otherwise chat.clear() never fires when the user
+      // clicks an empty chat for the SECOND time and the previous
+      // chat's transcript leaks through (2026-04-29 Jonathan repro).
+      if (cacheRendered && cached && cached.messages.length === messages.length) return;
       onResumeCb?.(id, messages, pagination);
       refresh();
     } catch (e: any) {
