@@ -20,7 +20,11 @@
 
 import { diag } from './util/log.ts';
 import { getAudioCtx } from './ios/audio-unlock.ts';
-import { autoScroll } from './chat.ts';
+
+// autoScroll is wired via init(opts.onScroll) so draft doesn't depend
+// on the chat module directly. Keeping the boundary clean lets tests
+// stub scroll behavior without faking the entire chat module.
+let autoScroll: () => void = () => {};
 
 let transcriptEl = null;
 let onFlush = (_text) => {};
@@ -63,6 +67,7 @@ export function init(opts) {
   onFlush = opts.onFlush || onFlush;
   onChange = opts.onChange || onChange;
   onFocus = opts.onFocus || onFocus;
+  if (opts.onScroll) autoScroll = opts.onScroll;
 }
 
 export function hasContent() { return hasText; }

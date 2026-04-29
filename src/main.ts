@@ -461,6 +461,7 @@ async function boot() {
   draft.init({
     transcriptEl,
     onChange: updateSendButtonState,
+    onScroll: chat.autoScroll,
     onFlush: (text) => {
       // User bubble FIRST, then send. Send fires backend.onSend → the
       // "thinking…" agent bubble, which appends at the end of the
