@@ -294,10 +294,14 @@ export function addLine(speaker: string, text: string, cls = '', opts: {
   /** Skip autoScroll + persist. Caller runs them once after the batch.
    *  Used by prependHistory to preserve scroll position and avoid N IDB writes. */
   batch?: boolean;
+  /** Mark the bubble `.pending` — visual signal that the send is in flight.
+   *  Caller is responsible for calling `markBubbleFinalized` / `markBubbleFailed`
+   *  via the returned div. Used by the atomic-send path (Q1). */
+  pending?: boolean;
 } = {}) {
   if (!transcriptEl) return null;
   const div = document.createElement('div');
-  div.className = `line ${cls}`;
+  div.className = `line ${cls}${opts.pending ? ' pending' : ''}`;
   if (opts.replyId) div.dataset.replyId = opts.replyId;
   if (cls.includes('agent')) div.dataset.text = text;  // replyPlayer uses this for replay
 
@@ -491,4 +495,54 @@ export function clear() {
   viewedSessionIdRef = null;
   restoredViewedSessionId = null;
   clearSnapshot().catch(() => {});
+}
+
+/** Atomic-bubble (Q1): drop the `.pending` class once the send has
+ *  been ack'd by the agent (first reply_delta / typing arrived). */
+export function markBubbleFinalized(div: HTMLElement | null): void {
+  if (!div) return;
+  div.classList.remove('pending');
+  persist();
+}
+
+/** Atomic-bubble (Q1): mark the bubble `.failed` with a retry/dismiss
+ *  affordance. `onRetry` re-attempts the send (caller restores
+ *  composer text + removes the bubble inside the handler).
+ *  `onDismiss` removes the bubble without retry. */
+export function markBubbleFailed(
+  div: HTMLElement | null,
+  opts: { onRetry?: () => void; onDismiss?: () => void } = {},
+): void {
+  if (!div) return;
+  div.classList.remove('pending');
+  div.classList.add('failed');
+  // Don't double-add the row if marked failed twice.
+  if (div.querySelector('.send-failed-row')) return;
+  const row = document.createElement('div');
+  row.className = 'send-failed-row';
+  const label = document.createElement('span');
+  label.textContent = 'Send failed.';
+  row.appendChild(label);
+  if (opts.onRetry) {
+    const retry = document.createElement('button');
+    retry.textContent = 'Retry';
+    retry.onclick = (e) => {
+      e.preventDefault();
+      div.remove();
+      opts.onRetry?.();
+    };
+    row.appendChild(retry);
+  }
+  if (opts.onDismiss) {
+    const dismiss = document.createElement('button');
+    dismiss.textContent = 'Dismiss';
+    dismiss.onclick = (e) => {
+      e.preventDefault();
+      div.remove();
+      opts.onDismiss?.();
+    };
+    row.appendChild(dismiss);
+  }
+  div.appendChild(row);
+  persist();
 }

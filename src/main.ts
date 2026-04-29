@@ -1064,23 +1064,75 @@ async function boot() {
         draft.dismiss();
         voiceMemos.clearAll().catch(() => {});
         historyLoaded = false;
-      } else {
-        chat.addLine('You', text || '', 's0', {
-          source: 'text',
-          attachments: hasAttachments ? attachments.toChatEcho() : undefined,
-        });
+        const optsCmd = hasAttachments ? { attachments: attachments.toSendPayload() } : {};
+        try { backend.sendMessage(text, optsCmd); }
+        catch (e: any) {
+          const msg = e?.message || String(e);
+          diag(`sendMessage failed: ${msg}`);
+          status.setStatus(`Send failed: ${msg}`, 'err');
+          releaseCaptureIfActive();
+          return;
+        }
+        attachments.clear();
+        playFeedback('send');
+        composerInput.value = '';
+        autoResize();
+        updateSendButtonState();
+        return;
       }
-      const opts = hasAttachments ? { attachments: attachments.toSendPayload() } : {};
-      try {
-        backend.sendMessage(text, opts);
-      } catch (e) {
-        // Adapter rejected the send (e.g. WS not yet in OPEN state). Surface
-        // it and release the mic, otherwise we'd leave the composer cleared
-        // but the user still dictating into an empty box.
-        const msg = (e as Error)?.message || String(e);
+      // Atomic-bubble path (Q1): bubble starts `.pending`. On agent's
+      // first reply_delta / typing the bubble flips to a normal user
+      // line. On send-failure it flips to `.failed` with a Retry button
+      // that restores the composer text and re-fires sendTypedMessage.
+      const bubble = chat.addLine('You', text || '', 's0', {
+        source: 'text',
+        attachments: hasAttachments ? attachments.toChatEcho() : undefined,
+        pending: true,
+      });
+      const sendChatId = backend.getCurrentSessionId?.() ?? null;
+      if (bubble && sendChatId) {
+        const list = pendingBubblesByChat.get(sendChatId) || [];
+        list.push(bubble);
+        pendingBubblesByChat.set(sendChatId, list);
+      }
+      const sendOpts = hasAttachments ? { attachments: attachments.toSendPayload() } : {};
+      // sendMessage is async (POST + await !res.ok rejection), so a
+      // sync try/catch only catches the !connected synchronous throw.
+      // Capture both via the promise's .catch — flips bubble → failed
+      // and offers Retry, which restores `text` to the composer.
+      const failBubble = (msg: string) => {
         diag(`sendMessage failed: ${msg}`);
         status.setStatus(`Send failed: ${msg}`, 'err');
+        if (bubble) {
+          chat.markBubbleFailed(bubble, {
+            onRetry: () => {
+              composerInput.value = text;
+              autoResize();
+              updateSendButtonState();
+              composerInput.focus();
+            },
+          });
+          if (sendChatId) {
+            const list = pendingBubblesByChat.get(sendChatId);
+            if (list) {
+              const idx = list.indexOf(bubble);
+              if (idx >= 0) list.splice(idx, 1);
+            }
+          }
+        }
+      };
+      try {
+        const sendPromise = backend.sendMessage(text, sendOpts);
+        if (sendPromise && typeof (sendPromise as any).catch === 'function') {
+          (sendPromise as Promise<unknown>).catch((e) => {
+            const msg = (e as Error)?.message || String(e);
+            failBubble(msg);
+          });
+        }
+      } catch (e) {
+        const msg = (e as Error)?.message || String(e);
         releaseCaptureIfActive();
+        failBubble(msg);
         return;
       }
       attachments.clear();
@@ -2550,6 +2602,9 @@ function handleActivity({ working, detail, conversation }: any) {
   // through (covers fresh-chat / first-message / boot races).
   const viewed = sessionDrawer.getViewed();
   if (viewed && conversation && conversation !== viewed) return;
+  // Q1: typing/working envelope is the agent's first ack — finalize
+  // the oldest pending user bubble for this chat.
+  if (working) finalizeOldestPending(conversation);
   if (!streamingEl) return;
   streamingEl.classList.remove('pending');
   const dots = streamingEl.querySelector('.thinking-dots');
@@ -2668,6 +2723,21 @@ function attachCardToLatestAgentBubble(card) {
  *  defensively filter them here. With per-turn replay machinery gutted,
  *  the bubble is purely a text surface: TTS is owned by the WebRTC
  *  talk-mode track on the server side and arrives as audio independently. */
+/** Q1 atomic-bubble: outstanding pending user bubbles per chat_id, in
+ *  send order. Drained oldest-first when an agent envelope (typing /
+ *  reply_delta) arrives for that chat — that envelope is the proof
+ *  the agent received our message. Cleared on chat.clear(). */
+const pendingBubblesByChat = new Map<string, HTMLElement[]>();
+
+function finalizeOldestPending(conversation: string | null | undefined): void {
+  if (!conversation) return;
+  const list = pendingBubblesByChat.get(conversation);
+  if (!list || list.length === 0) return;
+  const bubble = list.shift()!;
+  if (list.length === 0) pendingBubblesByChat.delete(conversation);
+  chat.markBubbleFinalized(bubble);
+}
+
 function handleReplyDelta({ replyId, cumulativeText, conversation }: any) {
   if (!cumulativeText) return;
   // Drop deltas only for explicitly off-screen conversations: getViewed()
@@ -2679,6 +2749,8 @@ function handleReplyDelta({ replyId, cumulativeText, conversation }: any) {
   // user has no idea they're racing against.
   const viewed = sessionDrawer.getViewed();
   if (viewed && conversation && conversation !== viewed) return;
+  // Q1: agent ack for our optimistic bubble — flip pending → finalized.
+  finalizeOldestPending(conversation);
   showStreamingIndicator(cumulativeText, replyId);
 }
 
