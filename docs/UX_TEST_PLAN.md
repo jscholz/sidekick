@@ -29,6 +29,27 @@ which Tier-1 tests get implemented; this doc is the menu.
 
 ---
 
+## Test layout convention
+
+**Hermes-specific tests live with hermes code.** Proxy contract tests
+are at `server-lib/backends/hermes-gateway/__tests__/`, NOT in `test/`.
+Same for `server-lib/backends/hermes-gateway/CONTRACT.md`. Rationale:
+sidekick is meant to be modular — a fork swapping hermes for another
+backend should be able to delete `server-lib/backends/hermes-gateway/`
++ `hermes-plugin/` and not lose anything elsewhere.
+
+Generic / backend-agnostic tests (markdown, voice state machines,
+card validation, session filter) stay in `test/`.
+
+UX tests (the Tier-1 set below) belong in `test/` because they test
+the PWA shell, not a backend. UX tests that need a backend MUST use
+the mock — see T6 — and never depend on a specific backend's
+behavior. (If a UX test fails one way against hermes-gateway and a
+different way against another backend, the test is wrong, not the
+backend.)
+
+---
+
 ## Existing coverage
 
 ### Unit tests (`test/*.test.ts`, `node --test`, ~137 tests)
@@ -73,10 +94,23 @@ mechanisms that make sidekick usable.
   next utterance to capture from there.
 - **Type**: Playwright (mock backend; voice doesn't need real LLM)
 - **Files**: `src/pipelines/webrtc/dictate.ts`, `src/composer.ts`
-- **Complexity**: Medium (need to inject synthetic Deepgram-shaped
-  transcript events; the state machine accepts them)
+- **Complexity**: Medium-High — **blocked on STT pluggability**
 - **Addresses**: ✓ "cursor should always be visible" ✓ "live
   dictation should inject at the cursor"
+- **⚠️ Pre-req — STT modularity gap (audit 2026-04-29)**:
+  - No `STTProvider` interface exists; `dictate.ts` is bound directly
+    to the WebRTC data channel via `connection.ts`.
+  - "Deepgram" is named in shell-code comments (`connection.ts:73`,
+    `main.ts:838`), suggesting an implicit assumption.
+  - To mock at the right layer, extract `STTProvider` ({`start`,
+    `stop`, `onTranscript`}) and pass it to `dictate.start()`. Then
+    `MockSTTProvider` fires synthetic events; tests don't need WebRTC.
+  - **Estimated refactor cost: 2–3 hours** (touches `connection.ts`,
+    `dictate.ts`, `main.ts`, new `src/audio/stt-provider.ts`).
+  - Without this refactor, T1 collapses into either an integration
+    test (real audio bridge + real Deepgram, slow + flaky) or a
+    mock-at-the-wrong-layer (stubs `connection.ts` internals,
+    fragile). **Do the STT refactor before T1.**
 
 ### T2: composer send-button state
 - **Asserts**: send button enabled iff (typed text > 0 ||
@@ -124,14 +158,21 @@ mechanisms that make sidekick usable.
   state; restoration must be reliable.
 
 ### T6: session_changed updates drawer title in place
-- **Asserts**: send first message → wait for reply_final → within
-  30s drawer entry title changes from "New chat" to actual title
+- **Asserts**: send first message → mock backend emits a
+  `session_changed` envelope with title "Mocked Title" → within
+  500ms drawer entry title changes from "New chat" to "Mocked Title"
   (not just on reload).
-- **Type**: Playwright (real backend — needs hermes title generation)
+- **Type**: Playwright (mock backend — fires `session_changed`
+  envelope synthetically; default mocked, real-backend run is
+  manual / on-demand when touching adjacent code).
 - **Files**: `src/sessionDrawer.ts:refresh()`,
   `src/backends/hermes-gateway.ts` session_changed handler
 - **Complexity**: Low (this is the existing stub; just implement)
 - **Addresses**: user-reported bug; stub already named.
+- **Note**: this is a UX test, not a hermes integration test. Mocked
+  output catches every bug except timing-of-replies (since mock is
+  instant). For real-backend coverage, run on-demand when changing
+  the title-generation path or `session_changed` envelope handling.
 
 ### T7: dictation append-and-send end-to-end
 - **Asserts**: start voice capture → say "hello world over" →

@@ -14,7 +14,7 @@
  */
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { sqlQuery } from '../server-lib/generic/sql.ts';
+import { sqlQuery } from '../../../generic/sql.ts';
 import { setupProxyTest, SseClient, waitFor, type ProxyRig } from './proxy-harness.ts';
 
 const SIDEKICK_KEY_PREFIX = 'agent:main:sidekick:dm:';

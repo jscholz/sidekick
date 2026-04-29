@@ -24,7 +24,7 @@ import { WebSocketServer, WebSocket as WS } from 'ws';
 
 import {
   client,
-} from '../server-lib/backends/hermes-gateway/client.ts';
+} from '../client.ts';
 import {
   handleSidekickMessage,
   handleSidekickSessionsList,
@@ -32,8 +32,8 @@ import {
   handleSidekickSessionMessages,
   handleSidekickStream,
   init as initHermesGateway,
-} from '../server-lib/backends/hermes-gateway/index.ts';
-import { initHermesConfig } from '../server-lib/backends/hermes/config.ts';
+} from '../index.ts';
+import { initHermesConfig } from '../../hermes/config.ts';
 
 const execFileP = promisify(execFile);
 
@@ -242,7 +242,7 @@ export async function setupProxyTest(): Promise<ProxyRig> {
   // initHermesGateway() is no-op-on-second-call, but the wildcard listener
   // we registered on the OLD client is now orphaned, which is fine because
   // we cleared the listeners array above.
-  const streamMod = await import('../server-lib/backends/hermes-gateway/stream.ts');
+  const streamMod = await import('../stream.ts');
   (streamMod as any).__resetForTest?.();
   // Drop previously-registered subscriber state so cross-test bleed doesn't
   // happen. We can't reach the subscribers Set directly from here — it's
@@ -353,7 +353,7 @@ export async function setupProxyTest(): Promise<ProxyRig> {
     // Tear down stream module state first — this clears any open SSE
     // subscribers, which would otherwise keep proxyServer.close() blocked
     // on draining keep-alive responses.
-    const streamModForCleanup = await import('../server-lib/backends/hermes-gateway/stream.ts');
+    const streamModForCleanup = await import('../stream.ts');
     streamModForCleanup.__resetForTest?.();
     client.shutdownClient();
     // Belt-and-suspenders for any non-SSE keep-alive sockets.
