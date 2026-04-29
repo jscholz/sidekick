@@ -16,15 +16,100 @@ Open `http://localhost:3001`. If you don't have an agent backend running, most o
 
 ## Tests
 
-Keep `npm test` green:
+Keep `npm test` green before every commit:
 ```
-npm test           # node:test suite — commit-word, fallback parser, markdown,
-                   # card pipeline, card validators, voice interim-promotion, tts cleanup
+npm test           # all *.test.ts under test/, src/, server-lib/
 npm run typecheck  # tsc --noEmit over TypeScript sources
 ```
 
 Source is TypeScript compiled to `.mjs` via esbuild (`scripts/build.mjs`) — the
 browser loads the compiled output, no runtime bundler.
+
+### Test layout convention
+
+Generic / backend-agnostic tests live in `test/`:
+- `markdown.test.ts`, `validate.test.ts`, `pipeline.test.ts` (card pipeline)
+- `commit-word.test.ts`, `voice-interim-promote.test.ts` (voice state machines)
+- `tts-clean.test.ts`, `fallback.test.ts`, `sessionFilter.test.ts`
+
+Backend-specific tests are co-located with the backend under
+`server-lib/backends/<name>/__tests__/`. Today this is just hermes-gateway
+(`server-lib/backends/hermes-gateway/__tests__/proxy.test.ts` + harness),
+but the convention scales: a fork swapping hermes for another backend
+deletes `server-lib/backends/hermes-gateway/` + `hermes-plugin/` and
+loses no tests elsewhere.
+
+UX tests (browser-DOM scenarios) belong in `test/` because they test the
+PWA shell, not a backend. See `docs/UX_TEST_PLAN.md` for the proposed
+Tier 1/2/3 test plan and which seams are worth pinning.
+
+### Test-writing principles
+
+- **Test the seam, not the symptom.** When a bug reproduces, write the
+  test at the lowest layer where the misbehavior is observable. The
+  proxy contract suite was written this way: 8 tests pin contract
+  invariants (orphan-list filtering, chat_id-tagged SSE, atomic
+  delete) so any future regression has a name.
+- **Hermetic by default.** Tests for the proxy or any backend
+  abstraction MUST run without a live hermes / network / LLM. The
+  `server-lib/backends/hermes-gateway/__tests__/proxy-harness.ts`
+  pattern (FakePlugin WS + scratch state.db) is the template — copy
+  it for new backends.
+- **UX tests should never depend on a specific backend.** If a UX test
+  fails one way against hermes-gateway and another way against
+  another backend, the test is wrong. Use the mock backend
+  (`scripts/smoke/mock-backend.mjs`) by default; real-backend runs are
+  on-demand when touching adjacent code.
+
+### When extending the proxy contract
+
+The proxy contract is documented at
+`server-lib/backends/hermes-gateway/CONTRACT.md`. If you change any of
+the `/api/sidekick/*` HTTP+SSE surface or the WS envelope schema:
+1. Update CONTRACT.md.
+2. Add a contract test under `__tests__/proxy.test.ts` that pins the
+   new behavior.
+3. Run the suite (`npm test -- server-lib/backends/hermes-gateway/__tests__/proxy.test.ts`)
+   before committing.
+
+### Diagnostic recipes (when a UX bug repros)
+
+Triage at the right layer FIRST. If `curl` reproduces the bug, it's
+the proxy or downstream; if only the PWA repros, it's the PWA.
+
+```bash
+# Watch one chat's live envelope stream
+curl -N "http://127.0.0.1:3001/api/sidekick/stream?chat_id=$CHAT"
+
+# Drawer source-of-truth (should match state.db)
+curl http://127.0.0.1:3001/api/sidekick/sessions | jq
+
+# state.db ground truth
+sqlite3 ~/.hermes/state.db \
+  "SELECT id, title, message_count FROM sessions WHERE source='sidekick' ORDER BY started_at DESC LIMIT 20"
+
+# Drive a turn from CLI (no PWA needed)
+curl -X POST http://127.0.0.1:3001/api/sidekick/messages \
+  -H 'content-type: application/json' \
+  -d '{"chat_id":"test-cli","text":"hi"}'
+
+# Run the proxy contract suite
+npm test -- server-lib/backends/hermes-gateway/__tests__/proxy.test.ts
+```
+
+### Smoke tests (Playwright)
+
+`npm run smoke` runs Playwright scenarios under `scripts/smoke/`.
+Scenarios opt into mock or real backend via `BACKEND` export:
+- `BACKEND='mocked'` — uses `scripts/smoke/mock-backend.mjs` route
+  interception. Fast, hermetic, no chat pollution. **Default for new
+  scenarios.**
+- `BACKEND='real'` — hits a running hermes. Slower, flakier; reserve
+  for cases that genuinely depend on live LLM behavior.
+- `BACKEND='either'` — runs against whichever is available.
+
+Override per-run with `--real-backend` to force every scenario through
+hermes (used when validating that mock matches reality).
 
 ## Code style
 
