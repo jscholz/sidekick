@@ -33,6 +33,11 @@
 
 import { log, diag } from '../../util/log.ts';
 import { playFeedback } from '../../audio/feedback.ts';
+import type {
+  STTProvider,
+  TranscriptEvent as STTTranscriptEvent,
+  Unsubscribe,
+} from '../../audio/stt-provider.ts';
 
 export type CallMode = 'stream' | 'talk';
 
@@ -70,9 +75,10 @@ interface CallSession {
  *   - `barge`      — server-side VAD detected user voice during TTS;
  *                    client should cancel local playback.
  *   - `listening`  — STT pipe is hot; bridge is now accepting mic
- *                    frames into Deepgram. Fires at call-start AND
- *                    after every TTS-end transition. PWA chimes
- *                    "your turn." See docs/SIDEKICK_AUDIO_PROTOCOL.md.
+ *                    frames into the speech-to-text service. Fires at
+ *                    call-start AND after every TTS-end transition.
+ *                    PWA chimes "your turn." See
+ *                    docs/SIDEKICK_AUDIO_PROTOCOL.md.
  */
 interface TranscriptEvent {
   type: 'transcript';
@@ -327,8 +333,8 @@ export async function open(
       setState('connected');
       // No chime here. The 'listening' chime is now driven by the
       // bridge sending {type: 'listening'} over the data channel
-      // whenever it actually accepts mic frames into Deepgram —
-      // call-start AND every TTS-end transition. Bridge is the source
+      // whenever it actually accepts mic frames into the STT
+      // provider — call-start AND every TTS-end transition. Bridge is the source
       // of truth for "STT is hot"; chiming on connectionstatechange
       // would be a half-second early (data channel + STT pipe init
       // happens after peer is "connected") AND would double up at
@@ -498,3 +504,100 @@ export async function close(): Promise<void> {
   }
   notify('idle', null);
 }
+
+// ─── STTProvider implementation ────────────────────────────────────────
+//
+// The WebRTC stack above predates the STTProvider abstraction. Rather
+// than rewrite the module, we wrap it: WebRTCSTTProvider is a thin
+// shim around `open` / `close` / `getDataChannelListener` that
+// satisfies the vendor-neutral interface in `src/audio/stt-provider.ts`.
+// Tests that need a synthetic transcript stream can ship a
+// MockSTTProvider against the same interface without touching WebRTC.
+//
+// Caveat: the data-channel listener registry is single-slot (see
+// `setDataChannelListener` above) — the provider preserves the
+// long-standing save-and-restore pattern that `dictate.ts` already
+// used, so existing wiring (main.ts's call-mode listener) survives a
+// dictate session unchanged.
+
+/** WebRTC-backed STT provider. Wraps the existing peer-connection +
+ *  data-channel pipeline. Concrete implementation behind the
+ *  vendor-neutral STTProvider interface. */
+export class WebRTCSTTProvider implements STTProvider {
+  private listener: ((ev: STTTranscriptEvent) => void) | null = null;
+  private savedListener: ((ev: any) => void) | null = null;
+  private started = false;
+
+  async start(opts?: { sessionId?: string | null; chatId?: string | null }): Promise<void> {
+    if (this.started) return;
+    // Save whatever data-channel listener was wired (e.g. main.ts's
+    // call-mode listener) so we can restore it on stop. The registry
+    // is single-slot; the wrapper has to remember what it replaced.
+    this.savedListener = getDataChannelListener();
+    setDataChannelListener((ev) => this.dispatch(ev));
+    try {
+      await open('stream', {
+        sessionId: opts?.sessionId ?? null,
+        chatId: opts?.chatId ?? null,
+      });
+      this.started = true;
+    } catch (e) {
+      // Restore listener on failure so the host page isn't left with a
+      // dangling provider listener that won't see any future events.
+      if (this.savedListener) setDataChannelListener(this.savedListener);
+      this.savedListener = null;
+      throw e;
+    }
+  }
+
+  async stop(): Promise<void> {
+    if (!this.started) {
+      // Even if we never finished start(), any in-flight save needs
+      // unwinding. Idempotent.
+      if (this.savedListener) {
+        setDataChannelListener(this.savedListener);
+        this.savedListener = null;
+      }
+      return;
+    }
+    this.started = false;
+    try { await close(); } catch (e: any) { diag('[webrtc-stt] close err', e?.message); }
+    if (this.savedListener) {
+      setDataChannelListener(this.savedListener);
+      this.savedListener = null;
+    }
+  }
+
+  onTranscript(cb: (ev: STTTranscriptEvent) => void): Unsubscribe {
+    this.listener = cb;
+    return () => {
+      if (this.listener === cb) this.listener = null;
+    };
+  }
+
+  /** Filter raw data-channel events down to transcript events for the
+   *  registered STTProvider listener. Non-transcript envelopes (barge,
+   *  listening, etc.) are dropped — they're transport concerns of the
+   *  WebRTC impl, not part of the STT contract. */
+  private dispatch(ev: any): void {
+    if (!this.listener) return;
+    if (!ev || ev.type !== 'transcript' || typeof ev.text !== 'string') return;
+    if (ev.role !== 'user' && ev.role !== 'assistant') return;
+    try {
+      this.listener({
+        type: 'transcript',
+        text: ev.text,
+        is_final: !!ev.is_final,
+        role: ev.role,
+      });
+    } catch (e: any) {
+      diag('[webrtc-stt] listener threw:', e?.message);
+    }
+  }
+}
+
+/** Default WebRTC STT provider instance — sufficient for the single-
+ *  active-session reality of the PWA. Tests can construct a fresh
+ *  `WebRTCSTTProvider` or substitute a mock implementing the same
+ *  interface. */
+export const defaultWebRTCSTTProvider = new WebRTCSTTProvider();

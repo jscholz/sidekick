@@ -4,16 +4,21 @@ Hermes platform adapter that turns sidekick (PWA + Node proxy) into a
 peer of telegram / slack / signal — a gateway-managed chat surface where
 hermes owns the `chat_id → session_id` mapping natively.
 
+The adapter exposes the abstract agent contract over HTTP+SSE
+(`/v1/responses`, `/v1/conversations*`, `/v1/events`, plus the
+sidekick gateway extension `/v1/gateway/conversations`). See the
+sidekick repo's `docs/ABSTRACT_AGENT_PROTOCOL.md` for the canonical
+reference.
+
 This directory contains the **plugin source**. Installing it is opt-in.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `__init__.py` | The adapter — `BasePlatformAdapter` subclass + WebSocket server. The plugin loader walks `<plugin-dir>/__init__.py`. |
+| `__init__.py` | The adapter — `BasePlatformAdapter` subclass + aiohttp HTTP server speaking the agent contract. The plugin loader walks `<plugin-dir>/__init__.py`. |
 | `plugin.yaml` | Hermes plugin manifest. |
 | `0001-add-sidekick-platform.patch` | Required `hermes-agent` patch (see below). |
-| `wscat-test.py` | Standalone smoke test that connects as a fake proxy. |
 
 ## Install
 

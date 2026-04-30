@@ -20,10 +20,210 @@ import * as backend from './backend.ts';
 import * as sessionCache from './sessionCache.ts';
 import { log, diag } from './util/log.ts';
 import { parseQuery, applyFilter } from './sessionFilter.ts';
-import { searchSessions } from './sessionSearch.ts';
 import { getFilter as getStoredFilter, putFilter as putStoredFilter, clearFilter as clearStoredFilter } from './util/filterStore.ts';
 
 let onResumeCb: ((id: string, messages: any[], pagination?: { firstId: number | null; hasMore: boolean }) => void) | null = null;
+
+/** Sidebar multi-selection — chat_ids the user has selected via
+ *  shift-click (range) or ctrl/cmd-click (toggle). When `size >= 2`
+ *  the shell hides the chat surface and shows a stats + bulk-delete
+ *  panel (`src/multiSelect.ts`). Plain row clicks clear this set and
+ *  resume normally. Esc on document also clears.
+ *
+ *  Selection cursor (`anchor`) tracks the most recent click so
+ *  shift+arrow can extend up/down from there and chained shift+clicks
+ *  walk a range. Cleared along with the selection itself. */
+const multiSelect = new Set<string>();
+let multiSelectAnchor: string | null = null;
+let onMultiSelectChangeCb: ((selectedIds: string[]) => void) | null = null;
+
+/** Visible-row order, refreshed on every `renderList` so the keyboard
+ *  + range handlers walk the same list the user sees. Set to the
+ *  filtered + sorted ids in display order. */
+let visibleRowIds: string[] = [];
+
+function emitMultiSelectChange(): void {
+  syncMultiSelectClasses();
+  syncMultiSelectBodyClass();
+  onMultiSelectChangeCb?.(Array.from(multiSelect));
+}
+
+/** Ctrl/Cmd-click — toggle a single id in the selection. The active
+ *  row is added to the set on the FIRST toggle so the user sees
+ *  ">=2 selected" after one modifier-click rather than "1 selected,
+ *  going nowhere." Subsequent toggles add/remove individual rows. */
+function toggleSelection(id: string): void {
+  // First toggle in an empty selection seeds with the currently-
+  // active row so the user lands at ">=2 selected" rather than
+  // "1 selected, going nowhere." Active row ≠ viewedSessionId in
+  // some race windows (just-clicked, replay still pending), so
+  // mirror the rangeSelect / extendSelectionByKey anchor priority.
+  const active = optimisticActiveId || viewedSessionId;
+  if (multiSelect.size === 0 && active && id !== active) {
+    multiSelect.add(active);
+  }
+  if (multiSelect.has(id)) multiSelect.delete(id);
+  else multiSelect.add(id);
+  multiSelectAnchor = id;
+  emitMultiSelectChange();
+}
+
+/** Shift-click — select the inclusive range from the anchor (or the
+ *  active row, if no anchor yet) to `id` in display order. Replaces
+ *  the existing selection rather than merging — matches the standard
+ *  range-select behavior across file managers / mail clients.
+ *  Shift+click again from the new endpoint to grow/shrink the range. */
+function rangeSelect(id: string): void {
+  // Same anchor priority as the keyboard handler — optimistic
+  // (just-clicked) wins over viewed (still-rendered) so a shift-click
+  // fired immediately after a plain click anchors against the row
+  // the user actually picked.
+  const anchor = multiSelectAnchor || optimisticActiveId || viewedSessionId;
+  if (!anchor || anchor === id) {
+    // Degenerate case (no prior anchor and shift-clicking the active
+    // row); fall through to a single-toggle so the click still does
+    // SOMETHING. Anchor lands at id for the next shift-click.
+    toggleSelection(id);
+    return;
+  }
+  const idx = (x: string) => visibleRowIds.indexOf(x);
+  const a = idx(anchor); const b = idx(id);
+  if (a < 0 || b < 0) {
+    toggleSelection(id);
+    return;
+  }
+  const [lo, hi] = a < b ? [a, b] : [b, a];
+  multiSelect.clear();
+  for (let i = lo; i <= hi; i++) multiSelect.add(visibleRowIds[i]);
+  multiSelectAnchor = id;
+  emitMultiSelectChange();
+}
+
+/** Shift+ArrowUp / Shift+ArrowDown — extend the selection one row in
+ *  the given direction, advancing the anchor so chained presses keep
+ *  growing. `direction` is -1 for up (earlier in display order) or +1
+ *  for down. Returns true if the selection changed (so the caller
+ *  can preventDefault on the keyboard event). */
+function extendSelectionByKey(direction: -1 | 1): boolean {
+  if (visibleRowIds.length === 0) return false;
+  // Anchor priority: explicit selection cursor > the row the user
+  // just clicked (optimistic, set synchronously) > the row currently
+  // rendered. optimistic comes BEFORE viewed so a Shift+Arrow fired
+  // immediately after a click works against the JUST-clicked row,
+  // not the still-rendered prior one.
+  const anchor = multiSelectAnchor || optimisticActiveId || viewedSessionId;
+  // First key press with no selection — seed with the active row +
+  // its neighbor in `direction`.
+  if (multiSelect.size === 0) {
+    if (!anchor) return false;
+    const i = visibleRowIds.indexOf(anchor);
+    if (i < 0) return false;
+    const j = i + direction;
+    if (j < 0 || j >= visibleRowIds.length) return false;
+    multiSelect.add(visibleRowIds[i]);
+    multiSelect.add(visibleRowIds[j]);
+    multiSelectAnchor = visibleRowIds[j];
+    emitMultiSelectChange();
+    return true;
+  }
+  // Selection exists — extend from the current anchor.
+  const i = anchor ? visibleRowIds.indexOf(anchor) : -1;
+  if (i < 0) return false;
+  const j = i + direction;
+  if (j < 0 || j >= visibleRowIds.length) return false;
+  const next = visibleRowIds[j];
+  // If `next` is already selected, shrink the range (un-select the
+  // old anchor); otherwise grow.
+  if (multiSelect.has(next)) {
+    multiSelect.delete(anchor!);
+  } else {
+    multiSelect.add(next);
+  }
+  multiSelectAnchor = next;
+  emitMultiSelectChange();
+  return true;
+}
+
+export function clearMultiSelect(): void {
+  if (multiSelect.size === 0 && multiSelectAnchor === null) return;
+  multiSelect.clear();
+  multiSelectAnchor = null;
+  emitMultiSelectChange();
+}
+
+export function getMultiSelect(): string[] {
+  return Array.from(multiSelect);
+}
+
+function syncMultiSelectClasses(): void {
+  const listEl = document.getElementById('sessions-list');
+  if (!listEl) return;
+  listEl.querySelectorAll('li[data-chat-id]').forEach((li) => {
+    const id = (li as HTMLElement).dataset.chatId;
+    if (id && multiSelect.has(id)) li.classList.add('multiselected');
+    else li.classList.remove('multiselected');
+  });
+}
+
+/** Toggle a body-level class so the rest of the page can disable
+ *  native text selection while the user is in multi-select mode.
+ *  Without this the drawer ends up in the awkward "I have a session
+ *  selected AND a text range selected" state Jonathan flagged in
+ *  the screenshot. */
+function syncMultiSelectBodyClass(): void {
+  const cls = 'session-multiselect-active';
+  if (multiSelect.size > 0) document.body.classList.add(cls);
+  else document.body.classList.remove(cls);
+}
+
+/** Document-level keyboard handler — Esc clears the selection, and
+ *  Shift+ArrowUp/Down extends. Bound once at init() so it doesn't
+ *  stack across re-renders. We listen at the document level rather
+ *  than per-row because the user may have focus on the composer or
+ *  any other element when they hit a hotkey, and the selection is a
+ *  page-wide affordance.
+ *
+ *  Shift+arrow only fires when there's an active session OR a
+ *  selection — otherwise the keypress falls through to whatever the
+ *  composer or another control wants to do with it. Esc fires
+ *  ONLY when there's a selection, for the same reason (otherwise we
+ *  might steal Esc from a future modal). */
+let keyboardInstalled = false;
+function installSelectionKeyboardListener(): void {
+  if (keyboardInstalled) return;
+  keyboardInstalled = true;
+  document.addEventListener('keydown', (e: KeyboardEvent) => {
+    // Esc — clear selection if one exists; otherwise let the event
+    // bubble (composer-blur, modal-close, etc. all have their own
+    // Esc handlers).
+    if (e.key === 'Escape') {
+      if (multiSelect.size > 0) {
+        clearMultiSelect();
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      return;
+    }
+    // Shift+ArrowUp / Shift+ArrowDown — extend selection. Skip when
+    // the user is typing in an input (don't steal arrow keys from
+    // the composer / filter input).
+    if (e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toUpperCase() || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable) return;
+      const direction: -1 | 1 = e.key === 'ArrowUp' ? -1 : 1;
+      if (extendSelectionByKey(direction)) {
+        e.preventDefault();
+      }
+    }
+  });
+}
+
+/** Fired with the leaving chat id at the moment a row click triggers a
+ *  chat switch, BEFORE the optimistic active flip. main.ts uses it to
+ *  drop empty/abandoned chats from IDB so they don't show up as
+ *  orphan "New chat / 0 msgs" rows mid-list. */
+let onBeforeSwitchCb: ((leavingId: string | null) => void) | null = null;
 
 /** Fired when the foregrounded session disappears from the server list
  *  (deleted by menu, by a bulk wipe, or by a concurrent process). main.ts
@@ -72,8 +272,10 @@ let currentFilter: string = '';
 
 /** Debounce handles for the filter input. Render: 100ms (instant client-side
  *  re-render over the cached list). Persist: 500ms (IDB). Server: 250ms
- *  (round-trip to /api/hermes/search?kind=sessions for authoritative results
- *  when the cached list might not contain a match). */
+ *  (round-trip to backend.search('sessions', ...) for authoritative results
+ *  when the cached list might not contain a match — adapters without an
+ *  index implementation simply return [] and the cached filter is the
+ *  only result). */
 let filterRenderTimer: number | null = null;
 let filterPersistTimer: number | null = null;
 let filterServerTimer: number | null = null;
@@ -125,6 +327,38 @@ function fmtRelativeTime(epochSec: number): string {
  *  databases and was taking 5-10s on the first tap — unacceptable for a
  *  drawer that's meant to feel instant. With the cache, the first tap
  *  paints in <100ms and the server fetch reconciles afterwards. */
+
+/** Trailing-edge coalesce window for refresh(). Multiple call sites
+ *  (resume cache-cb, resume server-cb, replaySessionMessages, sendMessage,
+ *  newSession) can fire refresh() within a few ms; without coalescing
+ *  the drawer rebuilds its <ul> N times per click and visibly flickers.
+ *  50ms balances "user perceives instant" vs "swallows the triple-fire
+ *  per click."
+ *
+ *  Use scheduleRefresh() from internal call sites that just want
+ *  eventually-consistent state. Use refresh() directly for
+ *  user-initiated paths (delete, rename, filter clear, boot) where
+ *  the user expects an immediate repaint. */
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let refreshInFlight = false;
+
+export function scheduleRefresh(): void {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    if (refreshInFlight) {
+      // A refresh is already running; queue another tick. Without this
+      // re-arm, a server fetch slower than the coalesce window means
+      // updates that land mid-refresh would otherwise be dropped on the
+      // floor.
+      scheduleRefresh();
+      return;
+    }
+    refreshInFlight = true;
+    refresh().finally(() => { refreshInFlight = false; });
+  }, 50);
+}
+
 export async function refresh() {
   const listEl = document.getElementById('sessions-list');
   if (!listEl) return;
@@ -225,10 +459,18 @@ async function runServerFilterReconcile(q: string) {
     filterServerAbort = null;
     return;
   }
+  // Fast path: backend doesn't implement search → the cached client-side
+  // filter is the only result; skip the round trip + leave the in-flight
+  // controller cleared. Cheap synchronous capability check, no module load.
+  if (!backend.hasSearch()) {
+    filterServerAbort = null;
+    return;
+  }
   const ctl = new AbortController();
   filterServerAbort = ctl;
   try {
-    const sessions = await searchSessions(q, 200, ctl.signal);
+    const result = await backend.search(q, 'sessions', { limit: 200, signal: ctl.signal });
+    const sessions = result?.sessions || [];
     if (ctl.signal.aborted) return;
     // Race guard: by the time we land, the user may have cleared the
     // filter or typed something different. Drop stale results — the
@@ -273,6 +515,27 @@ function renderListFiltered(listEl: HTMLElement, activeId: string) {
   renderList(listEl, filtered, activeId, isFresh);
 }
 
+/** Fingerprint of the last successful renderList. Compared on every
+ *  call; if the (sessions × activeId × placeholder) tuple is unchanged,
+ *  we skip the innerHTML='' + N appendChild rebuild — the visible DOM
+ *  is already correct. This kills the cache-then-server double-render
+ *  in refresh(): if the server returned the same list we just painted
+ *  from cache, the second renderList is a no-op. Same for repeated
+ *  refresh() calls where nothing meaningfully changed. */
+let lastRenderFingerprint: string | null = null;
+
+/** Cheap fingerprint of the visible state. Includes the fields renderRow
+ *  reads (id, title, snippet, messageCount, lastMessageAt, source) plus
+ *  activeId and the placeholder flag. Anything not in here can change
+ *  without us noticing — keep it broad enough that legitimate updates
+ *  still trigger a rebuild. */
+function renderListFingerprint(sessions: any[], activeId: string, showPlaceholder: boolean): string {
+  const rows = sessions.map(s =>
+    `${s.id}|${s.title || ''}|${s.snippet || ''}|${s.messageCount || 0}|${s.lastMessageAt || ''}|${s.source || ''}`,
+  ).join('\n');
+  return `${activeId}::${showPlaceholder ? 'p' : ''}::${rows}`;
+}
+
 function renderList(listEl: HTMLElement, sessions: any[], activeId: string, isFresh = false) {
   // Optimistic placeholder: if the adapter's current session isn't in the
   // cached list yet (brand-new conversation, no turn persisted), show a
@@ -281,8 +544,17 @@ function renderList(listEl: HTMLElement, sessions: any[], activeId: string, isFr
   // row on the next refresh after a reply lands.
   const showPlaceholder = isFresh;
 
+  // Diff-bypass: if nothing the user can see has changed, skip the DOM
+  // rebuild entirely. refresh() naturally renders twice (cache + server);
+  // most pairs reconcile to the same list and the second rebuild is pure
+  // flicker. This one check eliminates ~half the drawer mutations under
+  // normal use.
+  const fingerprint = renderListFingerprint(sessions, activeId, showPlaceholder);
+  if (fingerprint === lastRenderFingerprint) return;
+
   if (sessions.length === 0 && !showPlaceholder) {
     listEl.innerHTML = '<li class="sess-empty">No past sessions yet.</li>';
+    lastRenderFingerprint = fingerprint;
     return;
   }
   listEl.innerHTML = '';
@@ -290,6 +562,14 @@ function renderList(listEl: HTMLElement, sessions: any[], activeId: string, isFr
   for (const s of sessions) {
     listEl.appendChild(renderRow(s, activeId));
   }
+  // Refresh the visible-row order cache so range/keyboard handlers
+  // walk the same list the user sees.
+  visibleRowIds = sessions.map((s: any) => String(s.id));
+  // Re-paint multi-select highlights after the rebuild — renderRow
+  // doesn't carry over the .multiselected class because each LI is
+  // freshly created.
+  syncMultiSelectClasses();
+  lastRenderFingerprint = fingerprint;
 }
 
 function renderPlaceholderRow(id: string): HTMLLIElement {
@@ -356,7 +636,33 @@ function renderRow(s: any, activeId: string): HTMLLIElement {
 
   body.appendChild(snippet);
   body.appendChild(meta);
-  body.onclick = () => {
+  body.onclick = (ev: MouseEvent) => {
+    // Modifier matrix:
+    //   shift           → range select from anchor to this id
+    //                     (replaces current selection)
+    //   ctrl OR meta    → toggle this id in the selection
+    //                     (additive; preserves the rest)
+    //   plain           → clear any selection and resume normally
+    //
+    // Shift-click and ctrl/cmd-click both preventDefault so the
+    // browser's native shift+click text-selection doesn't fire on
+    // top of the session selection. Esc clears (see init()'s
+    // document keydown listener).
+    if (ev.shiftKey) {
+      ev.preventDefault();
+      rangeSelect(s.id);
+      return;
+    }
+    if (ev.ctrlKey || ev.metaKey) {
+      ev.preventDefault();
+      toggleSelection(s.id);
+      return;
+    }
+    if (multiSelect.size > 0) clearMultiSelect();
+    // (Mac: ctrl+click fires contextmenu BEFORE click and suppresses
+    // the click entirely. The contextmenu listener below routes that
+    // case back into toggleSelection so ctrl+click works the same as
+    // on Linux/Windows.)
     // Optimistic highlight: flip the active class synchronously at click
     // time. resume() is async (cache read + server fetch) and on a cache
     // miss can take 5-10s, which was leaving the highlight stale long
@@ -370,6 +676,18 @@ function renderRow(s: any, activeId: string): HTMLLIElement {
     }
     resume(s.id);
   };
+  // macOS Chrome / Safari fire `contextmenu` on ctrl+click instead
+  // of `click`, so the onclick handler above never sees that
+  // gesture. Intercept the contextmenu event when ctrlKey is set,
+  // suppress the OS context menu, and route to the same toggle path
+  // so Mac users get the same behavior Linux/Windows users get.
+  // Plain right-click (no ctrlKey) is left alone — the browser
+  // context menu still appears as expected.
+  body.addEventListener('contextmenu', (ev: MouseEvent) => {
+    if (!ev.ctrlKey) return;
+    ev.preventDefault();
+    toggleSelection(s.id);
+  });
 
   // ⋮ menu — rename + delete. Tap opens a small popover; tap outside closes.
   const menuBtn = document.createElement('button');
@@ -509,15 +827,46 @@ async function promptDelete(s: any) {
   }
 }
 
-/** In-flight resume promise + id. A rapid double-tap on the same row
- *  used to fire the resume pipeline N times and append duplicate chat
- *  bubbles (one per fire). Coalesce: if the same id is already resuming,
- *  await that promise instead of starting another. */
-let resumeInFlight: { id: string; promise: Promise<void> } | null = null;
+/** Monotonically increasing per-click generation counter. Each call
+ *  to resume() captures the new value; the cache and server callbacks
+ *  bail when they fire under a stale generation (i.e. a newer click
+ *  has happened). The previous `optimisticActiveId === id` check was
+ *  correct ONLY when no two pending resumes shared an id — the click
+ *  sequence A → B → A is precisely the scenario where it fails (A's
+ *  first promise sees opt=A again because A2 reset it, mistakes itself
+ *  for the live call, and renders stale data over the fresh state).
+ *
+ *  Generations are id-independent so this hazard is closed. */
+let resumeGen = 0;
+
+/** In-flight resume promise + id + generation. A rapid double-tap on
+ *  the same row used to fire the resume pipeline N times and append
+ *  duplicate chat bubbles. Same-id dedup still applies, but the gen
+ *  field guards against returning a superseded promise (which would
+ *  silently drop the user's click). */
+let resumeInFlight: { id: string; gen: number; promise: Promise<void> } | null = null;
 
 async function resume(id: string) {
-  if (resumeInFlight?.id === id) {
+  if (resumeInFlight?.id === id && resumeInFlight.gen === resumeGen) {
     return resumeInFlight.promise;
+  }
+  const myGen = ++resumeGen;
+  // Capture the prior viewed id BEFORE we update optimisticActiveId so
+  // the shell's onBeforeSwitch hook can clean up empty/abandoned chats
+  // (the "New chat / 0 msgs" pollution case Jonathan reported). Skip
+  // when we're "navigating" to the same chat — that's a refresh, not
+  // a switch.
+  //
+  // Use `viewedSessionId` (which persists across resume() lifecycles)
+  // rather than `optimisticActiveId` (which gets reset to null in our
+  // finally block when our gen is still live). Without that
+  // distinction, navigate-away cleanup misses the leaving id when the
+  // user waits between clicks long enough for the prior resume to
+  // fully settle.
+  const leaving = viewedSessionId || optimisticActiveId;
+  if (leaving && leaving !== id) {
+    try { onBeforeSwitchCb?.(leaving); }
+    catch (e: any) { diag(`onBeforeSwitch threw: ${e?.message || e}`); }
   }
   // Claim the optimistic active id immediately so refresh() paints the
   // clicked row as active even before the server fetch completes (and
@@ -528,16 +877,14 @@ async function resume(id: string) {
     const cached = await sessionCache.getMessagesCache(id);
     let cacheRendered = false;
     if (cached?.messages?.length) {
-      // Stale-callback guard: same logic as the server cb path. If a
-      // newer click has set optimisticActiveId to a different id while
-      // we awaited the IDB read, our cache replay would render the
-      // SUPERSEDED chat over the user's just-clicked one. Without this
-      // the user sees A→B→A flicker on rapid clicks even when each
-      // click's id is correctly captured at click time.
-      if (optimisticActiveId === id) {
+      // Stale-generation guard: a newer click has incremented resumeGen.
+      // Render the SUPERSEDED chat would clobber the user's just-
+      // clicked one. The previous id-equality check was insufficient
+      // when two clicks shared an id (A → B → A); generation is.
+      if (myGen === resumeGen) {
         log(`sessionDrawer: resumed ${id} from cache (${cached.messages.length} messages)`);
         onResumeCb?.(id, cached.messages);
-        refresh();
+        scheduleRefresh();
         cacheRendered = true;
       }
     }
@@ -548,15 +895,10 @@ async function resume(id: string) {
       const result: any = await backend.resumeSession(id);
       const messages = result.messages || [];
       const pagination = { firstId: result.firstId ?? null, hasMore: !!result.hasMore };
-      log(`sessionDrawer: resumed ${id} (${messages.length} messages, hasMore=${pagination.hasMore})`);
       await sessionCache.putMessagesCache(id, messages);
-      // Stale-callback guard: a newer click has set optimisticActiveId
-      // to a different id. Server fetches can take 100-300ms which is
-      // longer than typical click intervals; without this guard the
-      // user sees the chat flicker through every clicked id in
-      // completion order, last-callback-wins (Jonathan's "click A
-      // sometimes goes A→B→A→B" repro 2026-04-28).
-      if (optimisticActiveId !== id) return;
+      // Stale-generation guard — see above. Bail BEFORE logging so the
+      // log line accurately reflects which fetches actually rendered.
+      if (myGen !== resumeGen) return;
       // Cache-matched optimization: if the cache cb ALREADY rendered
       // the same N messages and the server returned the same N, skip
       // the re-render to avoid a 500ms-later blank-flicker. Critical:
@@ -567,26 +909,30 @@ async function resume(id: string) {
       // clicks an empty chat for the SECOND time and the previous
       // chat's transcript leaks through (2026-04-29 Jonathan repro).
       if (cacheRendered && cached && cached.messages.length === messages.length) return;
+      log(`sessionDrawer: resumed ${id} (${messages.length} messages, hasMore=${pagination.hasMore})`);
       onResumeCb?.(id, messages, pagination);
-      refresh();
+      scheduleRefresh();
     } catch (e: any) {
       diag(`sessionDrawer: resume ${id} failed: ${e.message}`);
-      // On server failure, drop the optimistic override only if it's
-      // still our id — otherwise we'd clobber a newer click's
-      // optimistic state, leaving the user in a phantom-selected limbo.
-      if (optimisticActiveId === id) {
+      // On server failure, drop the optimistic override only if our
+      // generation is still live — otherwise we'd clobber a newer
+      // click's optimistic state, leaving the user in a phantom-
+      // selected limbo.
+      if (myGen === resumeGen) {
         optimisticActiveId = null;
-        refresh();
+        scheduleRefresh();
       }
     }
   })();
-  resumeInFlight = { id, promise };
+  resumeInFlight = { id, gen: myGen, promise };
   try { await promise; } finally {
-    if (resumeInFlight?.id === id) resumeInFlight = null;
-    // Clear optimistic only if it's still OUR id (not another click that
-    // supersedes us). Backend.getCurrentSessionId() should now match id
-    // on success, so the fallback reads the same value.
-    if (optimisticActiveId === id) optimisticActiveId = null;
+    // Only clear the in-flight slot if it still belongs to OUR
+    // generation. A newer click already replaced it; touching it
+    // would corrupt that newer call's state.
+    if (resumeInFlight?.gen === myGen) resumeInFlight = null;
+    // Clear optimistic only if our generation is still live (no newer
+    // click superseded us).
+    if (myGen === resumeGen && optimisticActiveId === id) optimisticActiveId = null;
   }
 }
 
@@ -679,10 +1025,23 @@ export function focusFilter() {
 
 export function init(opts: {
   onResume: (id: string, messages: any[]) => void;
+  /** Called once at the moment a row click triggers a chat switch,
+   *  with the ID of the chat being navigated AWAY from (null on
+   *  first activation). Lets the shell drop empty/abandoned chats
+   *  before the new one paints. */
+  onBeforeSwitch?: (leavingId: string | null) => void;
+  /** Called whenever the multi-select set changes (shift-click toggle
+   *  or programmatic clear). Receives the current set of selected
+   *  chat ids. main.ts uses it to mount/unmount the bulk-delete
+   *  stats panel. */
+  onMultiSelectChange?: (selectedIds: string[]) => void;
   onSessionGone?: () => void;
 }) {
   onResumeCb = opts.onResume;
+  onBeforeSwitchCb = opts.onBeforeSwitch || null;
+  onMultiSelectChangeCb = opts.onMultiSelectChange || null;
   onSessionGoneCb = opts.onSessionGone || null;
+  installSelectionKeyboardListener();
   // Restore persisted filter (don't await — boot order shouldn't block
   // on IDB; refresh() will pick it up on the next render once resolved).
   getStoredFilter().then((saved) => {
@@ -696,39 +1055,17 @@ export function init(opts: {
       renderListFiltered(listEl, active);
     }
   });
-  attachDrawerEvents();
 }
 
-/** SSE subscription for `session-started` (and future drawer events).
- *  Browser auto-reconnects via the `retry:` hint set by the server, so we
- *  attach once and let EventSource handle network blips. Idempotent. */
-let drawerEventsSrc: EventSource | null = null;
-function attachDrawerEvents() {
-  if (drawerEventsSrc) return;
-  if (typeof EventSource === 'undefined') return;  // older non-browser contexts
-  try {
-    const src = new EventSource('/api/hermes/drawer-events');
-    src.addEventListener('session-started', (ev: MessageEvent) => {
-      try {
-        const data = JSON.parse(ev.data);
-        handleSessionStarted(data);
-      } catch (e: any) { diag(`drawer-events: parse failed: ${e?.message}`); }
-    });
-    src.onerror = () => {
-      // EventSource auto-reconnects on its own. Log once when it transitions
-      // to closed so we know if it gave up entirely.
-      if (src.readyState === EventSource.CLOSED) {
-        diag('drawer-events: SSE closed (will not auto-reconnect)');
-      }
-    };
-    drawerEventsSrc = src;
-    log('drawer-events: subscribed');
-  } catch (e: any) {
-    diag(`drawer-events: subscribe failed: ${e?.message}`);
-  }
-}
-
-function handleSessionStarted(ev: { id?: string; snippet?: string; source?: string; started_at?: string }) {
+/** Adapter-driven new-session announcement entry point. Wired in main.ts
+ *  via the BackendAdapter `onSessionStarted` callback — the active
+ *  adapter normalizes its wire-protocol-specific signal (e.g. hermes'
+ *  /api/hermes/drawer-events SSE) into a uniform shape and we paint a
+ *  pending row so the just-created chat appears in the drawer before
+ *  the next listSessions poll. Adapters without this signal leave the
+ *  callback unset; their drawers simply don't get the pre-emptive row
+ *  (the next refresh tick covers the gap). */
+export function handleSessionAnnounced(ev: { id?: string; snippet?: string; source?: string; started_at?: string }) {
   if (!ev?.id) return;
   // Race guards: skip if the persisted row already exists OR we've already
   // got a pending entry. Both ways the same row is already in the merged

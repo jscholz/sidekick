@@ -14,15 +14,16 @@ import * as chat from './chat.ts';
 import * as backend from './backend.ts';
 import * as sessionDrawer from './sessionDrawer.ts';
 import * as cmdkPalette from './cmdkPalette.ts';
-import * as gateway from './gateway.ts';
+import * as sidebarResize from './sidebarResize.ts';
+import * as multiSelect from './multiSelect.ts';
 import { unlock, getAudioCtx } from './ios/audio-unlock.ts';
 import * as audioSession from './audio/session.ts';
 import * as capture from './audio/capture.ts';
 import * as fakeLock from './ios/fakeLock.ts';
 import { setMicPeakListener } from './audio/micMeter.ts';
-import { attachCard } from './canvas/attach.ts';
-import { registerCard } from './canvas/registry.ts';
-import { parseCardsFromText, extractImageBlocks } from './canvas/fallback.ts';
+import { attachCard } from './cards/attach.ts';
+import { registerCard } from './cards/registry.ts';
+import { parseCardsFromText, extractImageBlocks } from './cards/fallback.ts';
 import { miniMarkdown } from './util/markdown.ts';
 import * as ambient from './ambient.ts';
 import { playFeedback } from './audio/feedback.ts';
@@ -42,12 +43,12 @@ import * as bgTrace from './bgTrace.ts';
 import * as activityRow from './activityRow.ts';
 
 // Card kind modules
-import imageCard from './canvas/cards/image.ts';
-import youtubeCard from './canvas/cards/youtube.ts';
-import spotifyCard from './canvas/cards/spotify.ts';
-import linksCard from './canvas/cards/links.ts';
-import markdownCard from './canvas/cards/markdown.ts';
-import loadingCard from './canvas/cards/loading.ts';
+import imageCard from './cards/kinds/image.ts';
+import youtubeCard from './cards/kinds/youtube.ts';
+import spotifyCard from './cards/kinds/spotify.ts';
+import linksCard from './cards/kinds/links.ts';
+import markdownCard from './cards/kinds/markdown.ts';
+import loadingCard from './cards/kinds/loading.ts';
 
 // ─── State ──────────────────────────────────────────────────────────────────
 
@@ -313,9 +314,47 @@ async function boot() {
     }, true);
   }
 
+  // Drop a chat we're navigating AWAY from if it's an empty placeholder
+  // — 0 messages on the backend AND no unsent draft text AND no
+  // pending attachments. Mirrors the new-chat rotation cleanup below
+  // (search "Background cleanup: drop any OTHER stale 0-msg") but
+  // triggered on navigation rather than rotation. Fire-and-forget so
+  // the chat-switch UX doesn't wait on the IDB write or the proxy
+  // round-trip; refresh paints the drawer once the deletes settle.
+  // Drafts + attachments are intentional user investment — those rows
+  // survive even with 0 backend messages.
+  function cleanupAbandonedChat(leavingId: string | null): void {
+    if (!leavingId) return;
+    const cached = sessionDrawer.getCachedSessions().find(s => s.id === leavingId);
+    const isEmpty = !cached || cached.messageCount === 0;
+    if (!isEmpty) return;
+    if (draft.hasContent() || attachments.hasPending()) return;
+    diag(`navigate-away: dropping empty chat ${leavingId}`);
+    (backend as any).deleteSession?.(leavingId)
+      ?.catch?.((e: any) => diag(`navigate-away cleanup failed: ${e?.message}`))
+      ?.then?.(() => sessionDrawer.scheduleRefresh());
+  }
+
+  // Drag handle on the sidebar's right edge. Restores the persisted
+  // width on boot + wires the pointer drag → CSS `--sidebar-width`
+  // pipeline. No-op on mobile (overlay sidebar) and on the rail.
+  sidebarResize.init();
+
+  // Bulk-select panel — appears when the user shift-clicks 2+ drawer
+  // rows. Reads stats from the cached session list (no extra fetch);
+  // delete fires the same `backend.deleteSession` cascade individual
+  // row deletes do.
+  multiSelect.init({
+    getSessions: () => sessionDrawer.getCachedSessions() as any,
+    deleteOne: (id: string) => (backend as any).deleteSession?.(id),
+    onClear: () => sessionDrawer.clearMultiSelect(),
+  });
+
   // Session list inside the sidebar — renders when backend supports browsing.
   sessionDrawer.init({
     onResume: replaySessionMessages,
+    onBeforeSwitch: cleanupAbandonedChat,
+    onMultiSelectChange: (ids: string[]) => multiSelect.update(ids),
     // Stale-foreground recovery: if the session the user is currently
     // viewing gets deleted out from under them (menu delete, bulk wipe,
     // backend nuke), drop the ghost transcript and rotate to a fresh
@@ -334,7 +373,10 @@ async function boot() {
   // Cmd+K palette — instant session filter + debounced messages_fts
   // search. Resume hits funnel through replaySessionMessages so behavior
   // matches a normal drawer tap.
-  cmdkPalette.init({ onResume: replaySessionMessages });
+  cmdkPalette.init({
+    onResume: replaySessionMessages,
+    onBeforeSwitch: cleanupAbandonedChat,
+  });
   // Sidebar-top search button → opens the cmd+K palette. Lives next to
   // the hamburger as the rightmost icon in .sidebar-top-row (Gemini-style
   // header). Replaces the old inline magnifier that used to sit beside
@@ -477,10 +519,12 @@ async function boot() {
       return;
     }
 
-    // Alt+T: toggle Talk-mode WebRTC call (full-duplex with TTS).
+    // Alt+T: toggle TTS-replies preference (talk vs stream mode). Routes
+    // through flipMicSetting so the menu UI + connection-cycling logic
+    // stays the single source of truth (see flipMicSetting in this file).
     if (e.altKey && e.code === 'KeyT') {
       e.preventDefault();
-      document.getElementById('btn-speak')?.click();
+      flipMicSetting('tts');
       return;
     }
   });
@@ -713,7 +757,9 @@ async function boot() {
       // Adapter has already updated its local state (IDB title etc).
       // Re-render the drawer so the new title surfaces immediately
       // — without this the user only sees it on next list poll.
-      sessionDrawer.refresh();
+      // Coalesced: a turn can fire multiple session_changed envelopes
+      // and each individually-rendered drawer is wasted work + flicker.
+      sessionDrawer.scheduleRefresh();
     },
     // Phase 3 — surface tool calls / results as inline activity rows.
     // Renderer reads settings.agentActivity per call, so toggling at
@@ -736,6 +782,13 @@ async function boot() {
       };
       replaySessionMessages(e.conversation, messages, pagination);
     },
+    // Adapter-relayed new-session announcement. The legacy hermes adapter
+    // surfaces these from the proxy's drawer-events SSE; other adapters
+    // leave the callback unfired and the drawer waits for the next list
+    // poll to pick up new sessions. The drawer paints a synthetic
+    // "pending" row so the just-created chat is visible in the list
+    // before listSessions catches up.
+    onSessionStarted: (e: any) => sessionDrawer.handleSessionAnnounced(e),
   });
   // Show/hide the sessions section inside the sidebar based on the
   // active backend's capabilities (sidebar itself is always visible).
@@ -773,17 +826,12 @@ async function boot() {
     if (rowModel) rowModel.style.display = 'none';
   }
 
-  // ── Speak button (WebRTC TTS preference) ──────────────────────────────
-  //   btn-speak = TTS-reply preference (settings.tts). Drives whether
-  //               an open call ships TTS audio (talk mode) or just
-  //               STT-only (stream mode).
-  //
-  // The unified composer mic owns the call open/close lifecycle —
-  // see the composer-mic dispatch wiring further down. controls.ts
+  // ── WebRTC controls ───────────────────────────────────────────────────
+  // The TTS-reply preference (settings.tts) lives as a toggle in the
+  // mic-mode menu — see flipMicSetting('tts') below. The unified
+  // composer mic owns the call open/close lifecycle; controls.ts
   // exports toggleCall / openCall / closeIfOpen for the dispatcher
   // to invoke.
-  const btnSpeak = document.getElementById('btn-speak');
-
   webrtcControls.init({
     getSessionId: () => sessionDrawer.getViewed() || backend.getCurrentSessionId?.() || null,
     onStatus: (msg, kind) => status.setStatus(msg, kind ?? null),
@@ -894,10 +942,10 @@ async function boot() {
     if (ev.type !== 'transcript' || typeof ev.text !== 'string') return;
     if (ev.role === 'user') {
       // Half-duplex: while the agent is speaking, the iOS speakerphone
-      // re-captures TTS output as mic input and Deepgram transcribes
-      // it. We can't tell the difference between that and real user
-      // speech from the transcript alone, so drop user transcripts
-      // entirely while suppressing. The bridge-side VAD fires
+      // re-captures TTS output as mic input and the STT provider
+      // transcribes it. We can't tell the difference between that and
+      // real user speech from the transcript alone, so drop user
+      // transcripts entirely while suppressing. The bridge-side VAD fires
       // {type:'barge'} when the user actually wants to interrupt; the
       // handler above clears suppression in that case.
       if (webrtcSuppress.isSuppressing()) return;
@@ -1002,16 +1050,6 @@ async function boot() {
     }
     if (capture.hasActive()) capture.release();
   };
-
-  // Speak button visual state — reflects whether talk-mode is currently
-  // active. Driven off webrtcControls; controls.ts already toggles
-  // .active / .connecting on the button itself, so we only adjust the
-  // .muted class for the icon-x overlay.
-  function syncSpeakingButton() {
-    const isTalk = webrtcControls.currentMode() === 'talk' && webrtcControls.isOpen();
-    btnSpeak?.classList.toggle('muted', !isTalk);
-  }
-  syncSpeakingButton();
 
   // ── Composer ────────────────────────────────────────────────────────────
   const composerInput = document.getElementById('composer-input') as HTMLTextAreaElement;
@@ -1288,7 +1326,7 @@ async function boot() {
           empties.map(s => (backend as any).deleteSession?.(s.id).catch((e: any) =>
             diag(`new-chat cleanup: deleteSession(${s.id}) failed: ${e.message}`),
           )),
-        ).then(() => sessionDrawer.refresh());
+        ).then(() => sessionDrawer.scheduleRefresh());
       }
       // On mobile, collapse the sidebar so the user sees the fresh chat —
       // otherwise the expanded drawer hides the transition and the action
@@ -1473,14 +1511,25 @@ async function boot() {
     try {
       const gwConnected = backend.isConnected();
       const summary = await queue.summary();
-      const msIdle = gateway.msSinceLastMessage();
-
+      // Idle cursor — wall-clock ms since /api/sidekick/stream last
+      // delivered ANY envelope. EventSource can stay "connected" while
+      // the underlying TCP connection is dead (cellular handoff,
+      // suspended radio). Combined with queued outbound, a long idle
+      // window is the signal that we're stalled. msSinceLastEnvelope()
+      // returns 0 on fresh connect → treated as "no signal yet."
+      //
+      // The pre-refactor openclaw path also surfaced a `weakSignal`
+      // state (idle stream, no queue, ambiguously-iffy network). We
+      // intentionally don't recreate that here: the SSE channel is
+      // sparse by design — an idle drawer browse can go minutes
+      // without an envelope and that's normal — so a `weakSignal`
+      // fire on idle would be a constant false positive. Stalled
+      // (idle + queued outbound) IS unambiguous and stays.
+      const msIdle = backend.msSinceLastEnvelope();
       if (!gwConnected) {
         status.setState('reconnecting', { queuedCount: summary.count, queuedAudioMs: summary.totalAudioMs });
       } else if (msIdle > WEAK_SIGNAL_MS && summary.count > 0) {
         status.setState('stalled', { queuedCount: summary.count, queuedAudioMs: summary.totalAudioMs });
-      } else if (msIdle > WEAK_SIGNAL_MS) {
-        status.setState('weakSignal');
       } else {
         status.setState('connected', {
           queuedCount: summary.count,
@@ -1721,7 +1770,7 @@ async function boot() {
     if (memoActive) return;
     if (dictateActive) await webrtcDictate.stop();
     if (webrtcControls.isOpen()) return;
-    // openCall picks the mode per the user's #btn-speak preference at
+    // openCall picks the mode per the user's settings.tts preference at
     // open time — same behavior as the old toolbar mic, just invoked
     // from the composer.
     const mode: 'stream' | 'talk' = settings.get().tts ? 'talk' : 'stream';
@@ -2121,7 +2170,7 @@ async function boot() {
     const s = settings.get();
     if (micModeMenu) {
       micModeMenu.querySelectorAll<HTMLButtonElement>('button.mic-toggle-row').forEach(b => {
-        const key = b.dataset.toggle as 'micCall' | 'micAutoSend' | undefined;
+        const key = b.dataset.toggle as 'micCall' | 'micAutoSend' | 'tts' | undefined;
         if (!key) return;
         const on = !!(s as any)[key];
         b.setAttribute('aria-checked', on ? 'true' : 'false');
@@ -2129,14 +2178,20 @@ async function boot() {
         // Tooltip — pulls the hotkey live from settings so a rebind in
         // the settings panel reflects here on next menu open. Mac/iOS
         // get the ⌘ glyph for native feel; everywhere else the literal.
-        const hk = key === 'micCall' ? s.hotkeyCallMode : s.hotkeyAutoSend;
+        const hk = key === 'micCall'
+          ? s.hotkeyCallMode
+          : key === 'micAutoSend'
+            ? s.hotkeyAutoSend
+            : 'Alt+T';
         const isMac = /(Mac|iPhone|iPad)/i.test(navigator.platform);
         const prettyHk = isMac
           ? hk.replace(/Cmd/gi, '⌘').replace(/Shift/gi, '⇧').replace(/Alt/gi, '⌥').replace(/Ctrl/gi, '⌃').replace(/\+/g, '')
           : hk;
         const desc = key === 'micCall'
           ? 'Call mode — full-duplex WebRTC voice (vs. push-to-record memo)'
-          : 'Auto-send — dispatch on end-of-utterance (vs. drafting into composer)';
+          : key === 'micAutoSend'
+            ? 'Auto-send — dispatch on end-of-utterance (vs. drafting into composer)'
+            : 'Speak replies — TTS audio output during a call (talk mode vs. stream mode)';
         b.title = `${desc} · ${prettyHk}`;
       });
     }
@@ -2166,12 +2221,12 @@ async function boot() {
   // Reading the post-flip value via settings.get() after set() removes
   // the anticorrelation entirely. Side-effects (end-call-on-call-off)
   // also live here so menu + hotkey behave identically.
-  function flipMicSetting(key: 'micCall' | 'micAutoSend'): void {
+  function flipMicSetting(key: 'micCall' | 'micAutoSend' | 'tts'): void {
     const cur = !!(settings.get() as any)[key];
     const next = !cur;
     settings.set(key, next);
     applyMicModeUi();
-    const label = key === 'micCall' ? 'Call mode' : 'Auto-send';
+    const label = key === 'micCall' ? 'Call mode' : key === 'micAutoSend' ? 'Auto-send' : 'Speak replies';
     // Read POST-flip value off settings, not the captured snapshot —
     // keeps the pill text honest if anything else mutated state in
     // between (or if a future caller passes its own pre-flip value).
@@ -2182,6 +2237,21 @@ async function boot() {
     // click the mic to actually stop. Same intent for menu + hotkey.
     if (key === 'micCall' && !next && voiceActive()) {
       void stopVoice();
+    }
+    // Speak-replies flip during an OPEN call cycles the WebRTC connection
+    // into the new mode (talk = TTS audio; stream = STT only) so the user
+    // sees the change immediately rather than "next call only". Brief
+    // gap is acceptable — if it becomes annoying we can wait-for-flush.
+    if (key === 'tts' && webrtcControls.isOpen()) {
+      const newMode: 'talk' | 'stream' = next ? 'talk' : 'stream';
+      void (async () => {
+        try {
+          await webrtcControls.closeIfOpen();
+          await webrtcControls.openCall(newMode);
+        } catch (e: any) {
+          diag('tts-flip mode swap failed', e?.message);
+        }
+      })();
     }
   }
 
@@ -2207,7 +2277,7 @@ async function boot() {
     micModeMenu.querySelectorAll<HTMLButtonElement>('button.mic-toggle-row').forEach(b => {
       b.onclick = (e) => {
         e.stopPropagation();
-        const key = b.dataset.toggle as 'micCall' | 'micAutoSend' | undefined;
+        const key = b.dataset.toggle as 'micCall' | 'micAutoSend' | 'tts' | undefined;
         if (!key) return;
         // Single canonical path — same as the hotkey. flipMicSetting
         // updates the setting, refreshes menu visuals, sets the status
@@ -2381,11 +2451,39 @@ async function boot() {
 /** Replay a transcript into the chat UI after the adapter resumes a session.
  *  Clears current chat, re-renders the messages, and marks history as
  *  loaded so backfillHistory doesn't double-append. */
+/** Fingerprint of the last successful replay. Compared on every call;
+ *  if (id × message-count × first/last message ids) is unchanged AND
+ *  the same id is already on screen, the transcript already shows this
+ *  exact state — skip the chat.clear() + N renderHistoryMessage rebuild
+ *  to avoid the flicker that drove drawer-no-flicker phase 2 over
+ *  budget. resume() can fire onResumeCb multiple times for the same id
+ *  (cache-cb + server-cb when results match; same-id click after a
+ *  prior dedup window expires); without this short-circuit the user
+ *  sees the transcript blank-and-repaint on every redundant call. */
+let lastReplayFingerprint: string | null = null;
+
+function replayFingerprint(id: string, messages: any[]): string {
+  if (messages.length === 0) return `${id}::0`;
+  const first = messages[0];
+  const last = messages[messages.length - 1];
+  return `${id}::${messages.length}::${first?.id ?? ''}::${last?.id ?? ''}::${last?.content?.length ?? 0}`;
+}
+
 function replaySessionMessages(
   id: string,
   messages: any[],
   pagination?: { firstId: number | null; hasMore: boolean }
 ) {
+  // Fast path: if the same id is already on-screen with the same
+  // message tuple, skip the rebuild. Catches "click same chat 5x"
+  // and "cache-cb followed by matching server-cb" without dropping
+  // any legitimate update (any change to id, count, or boundary
+  // message ids invalidates the fingerprint).
+  const fingerprint = replayFingerprint(id, messages);
+  if (sessionDrawer.getViewed() === id && fingerprint === lastReplayFingerprint) {
+    return;
+  }
+  lastReplayFingerprint = fingerprint;
   chat.clear();
   // Tool activity rows are turn-scoped + chat-scoped; resuming a session
   // wipes the on-screen turn surface, so wipe activity state too.
@@ -2405,7 +2503,10 @@ function replaySessionMessages(
   // arrives here even though the server keeps computing + persisting.
   // Refreshing on switch catches that case so a now-persisted-but-not-
   // yet-shown session appears in the drawer without a page reload.
-  sessionDrawer.refresh();
+  // Coalesced: replaySessionMessages may be invoked multiple times in
+  // rapid succession (cache-cb + server-cb in resume()), and each
+  // independently-rendered drawer is wasted work + visible flicker.
+  sessionDrawer.scheduleRefresh();
   // Persist the session id into the chat snapshot so a page reload can
   // re-seed the drawer highlight to this session even though adapter
   // state (conversationName) resets to default on reload.
@@ -2765,7 +2866,9 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
   // ALWAYS refresh the drawer, even when the reply belongs to an
   // off-screen conversation — that's the whole point of letting the
   // stream complete in the background: the user needs the row to find.
-  sessionDrawer.refresh();
+  // Coalesced: handleReplyFinal can fire multiple times in a burst
+  // (multi-bubble turns); a single eventual refresh is enough.
+  sessionDrawer.scheduleRefresh();
 
   // Same null-tolerant gate as handleReplyDelta: drop only for an
   // explicitly DIFFERENT viewed session. getViewed()=null = no

@@ -3,67 +3,36 @@
  * install-time config (SIDEKICK_BACKEND env var → /config → this module)
  * and re-exports its methods as the shell's single entry point.
  *
- * The shell (main.ts) never imports a specific adapter. Swap backends
- * by setting SIDEKICK_BACKEND at install time + restart.
- *
- * Defaults to 'openclaw' for backward compat with existing deployments.
+ * Post-refactor, sidekick has a single backend: the proxy's hermes-
+ * gateway (the agent contract over /api/sidekick/*). The legacy
+ * openclaw / openai-compat / zeroclaw direct-PWA-to-LLM adapters were
+ * removed in step 7 of the sidekick backend refactor; new
+ * deployments wire any agent — hermes, stub, openclaw plugin,
+ * a third-party `/v1/responses`-speaker — through the proxy by
+ * setting SIDEKICK_PLATFORM_URL + SIDEKICK_PLATFORM_TOKEN.
  *
  * @typedef {import('./backends/types.ts').BackendAdapter} BackendAdapter
  */
 
-import { getConfig } from './config.ts';
 import { log } from './util/log.ts';
 
 /** @type {BackendAdapter | null} */
 let adapter = null;
 /** @type {Promise<BackendAdapter> | null}
  *  In-flight loader promise — serves concurrent callers during the
- *  dynamic-import window so we don't print `backend: loading 'openclaw'`
- *  twice or start two import graphs. ES modules do dedupe internally,
- *  but the race produces confusing logs and redundant work. */
+ *  dynamic-import window so we don't print `backend: loading 'X'`
+ *  twice or start two import graphs. */
 let loadingPromise = null;
 
-/** Load the adapter once, based on config. Subsequent calls return the
- *  cached instance — there's only one backend per page load. */
+/** Load the adapter once. Subsequent calls return the cached instance —
+ *  there's only one backend per page load. */
 export async function loadAdapter() {
   if (adapter) return adapter;
   if (loadingPromise) return loadingPromise;
-  const cfg = getConfig();
-  const name = cfg.backend || 'openclaw';
-  log(`backend: loading '${name}'`);
+  log("backend: loading 'proxy-client'");
   loadingPromise = (async () => {
-    switch (name) {
-      case 'openclaw': {
-        const m = await import('./backends/openclaw.ts');
-        adapter = m.openclawAdapter;
-        break;
-      }
-      case 'openai-compat': {
-        const m = await import('./backends/openai-compat.ts');
-        adapter = m.openaiCompatAdapter;
-        break;
-      }
-      case 'zeroclaw': {
-        const m = await import('./backends/zeroclaw.ts');
-        adapter = m.zeroclawAdapter;
-        break;
-      }
-      case 'hermes': {
-        const m = await import('./backends/hermes.ts');
-        adapter = m.hermesAdapter;
-        break;
-      }
-      case 'hermes-gateway': {
-        // Platform-adapter backend; talks to the proxy's
-        // /api/sidekick/* surface. Coexists with 'hermes' (legacy
-        // /v1/responses path).
-        const m = await import('./backends/hermes-gateway.ts');
-        adapter = m.hermesGatewayAdapter;
-        break;
-      }
-      default:
-        throw new Error(`unknown backend: ${name}`);
-    }
+    const m = await import('./backends/proxy-client.ts');
+    adapter = m.proxyClientAdapter;
     return adapter;
   })();
   return loadingPromise;
@@ -81,11 +50,18 @@ export async function connect(opts) {
 export function disconnect() { return adapter?.disconnect(); }
 export function reconnect() { return adapter?.reconnect?.(); }
 export function isConnected() { return adapter?.isConnected() ?? false; }
+/** Wall-clock ms since the SSE channel last delivered an envelope.
+ *  Returns 0 when no envelope has arrived yet (fresh connect, post-
+ *  reset). Adapters without this method return 0 too. Used by
+ *  main.ts's status-state poll to flag weak/stalled connections. */
+export function msSinceLastEnvelope(): number {
+  return adapter?.msSinceLastEnvelope?.() ?? 0;
+}
 
 /** Fire-on-send listeners — shell subscribes once (e.g. to show a "thinking"
  *  indicator the moment the user submits, independent of when the backend
  *  decides to start emitting deltas). Called before the adapter's actual
- *  sendMessage so UI updates aren't blocked by WS latency. */
+ *  sendMessage so UI updates aren't blocked by network latency. */
 const sendListeners = new Set<(text: string, opts?: any) => void>();
 export function onSend(fn: (text: string, opts?: any) => void) { sendListeners.add(fn); }
 export function offSend(fn: (text: string, opts?: any) => void) { sendListeners.delete(fn); }
@@ -101,8 +77,6 @@ export async function fetchHistory(limit) {
   return adapter?.fetchHistory?.(limit) ?? [];
 }
 
-/** Start a new agent session via the adapter. Openclaw sends /new over
- *  chat; openai-compat and other minimal backends may no-op. */
 export function newSession() { return adapter?.newSession?.(); }
 
 // ─── Model catalog (optional per backend) ──────────────────────────────────
@@ -163,4 +137,21 @@ export async function deleteSession(id) {
   const a = await loadAdapter();
   if (!a.deleteSession) throw new Error(`backend ${a.name} does not support session delete`);
   return a.deleteSession(id);
+}
+
+/** Server-authoritative search forwarder. Returns `{sessions:[], hits:[]}`
+ *  when the active adapter doesn't implement `search` so callers can
+ *  fall back to the cached client-side filter without special-casing. */
+export async function search(q, kind, opts) {
+  const a = await loadAdapter();
+  if (!a.search) return { sessions: [], hits: [] };
+  return a.search(q, kind, opts);
+}
+
+/** Whether the active backend implements server-authoritative search.
+ *  Lets call sites short-circuit to the cached client-side filter when
+ *  there's no server index (avoids spinning up debounce timers and
+ *  abort controllers for a no-op call). */
+export function hasSearch() {
+  return !!adapter?.search;
 }

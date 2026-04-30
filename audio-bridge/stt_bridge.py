@@ -530,103 +530,118 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
     current_event: Optional[str] = None
     prev_cumulative: str = ""
 
+    # Inline SSE parser: consumes one frame at a time from `content_iter`,
+    # feeds delta tokens into the TTS queue + on_transcript hook + data
+    # channel envelope. Returns True when a terminal event arrives
+    # (response.completed / reply_final), so the caller breaks out.
+    async def _process_sse_frame(line_bytes) -> bool:
+        nonlocal current_event, prev_cumulative
+        line = line_bytes.rstrip(b"\r\n")
+        if not line:
+            current_event = None
+            return False
+        if line.startswith(b":"):
+            return False
+        if line.startswith(b"event:"):
+            current_event = line[len(b"event:"):].strip().decode(
+                "utf-8", errors="replace",
+            )
+            return False
+        if not line.startswith(b"data:"):
+            return False
+        data = line[len(b"data:"):].strip()
+        if not data:
+            return False
+        try:
+            import json as _json
+            chunk = _json.loads(data)
+        except (ValueError, TypeError):
+            return False
+        event_name = current_event or chunk.get("type")
+        if event_name == "response.output_text.delta":
+            delta = chunk.get("delta") or ""
+            if delta:
+                if text_queue is not None:
+                    try: text_queue.put_nowait(delta)
+                    except asyncio.QueueFull: pass
+                if peer.on_transcript is not None:
+                    try: await peer.on_transcript(delta, False)
+                    except Exception: pass
+                _send_data_channel(peer, {
+                    "type": "transcript", "text": delta,
+                    "is_final": False, "role": "assistant",
+                })
+            return False
+        if event_name == "response.completed":
+            return True
+        if event_name == "reply_delta":
+            cumulative = chunk.get("text") or ""
+            if not cumulative:
+                return False
+            if cumulative.startswith(prev_cumulative):
+                delta = cumulative[len(prev_cumulative):]
+            else:
+                delta = cumulative
+            prev_cumulative = cumulative
+            if not delta:
+                return False
+            if text_queue is not None:
+                try: text_queue.put_nowait(delta)
+                except asyncio.QueueFull: pass
+            if peer.on_transcript is not None:
+                try: await peer.on_transcript(delta, False)
+                except Exception: pass
+            _send_data_channel(peer, {
+                "type": "transcript", "text": delta,
+                "is_final": False, "role": "assistant",
+            })
+            return False
+        if event_name == "reply_final":
+            return True
+        return False
+
     async with aiohttp.ClientSession() as sess:
         try:
-            async with sess.post(url, json=body, headers=headers) as resp:
-                if resp.status != 200:
-                    err = (await resp.text())[:200]
-                    logger.warning(
-                        "[stt-bridge] peer %s agent dispatch %d: %s",
-                        peer.peer_id, resp.status, err,
-                    )
-                    return
-                async for raw in resp.content:
-                    line = raw.rstrip(b"\r\n")
-                    if not line:
-                        # Blank line marks end of an SSE frame; reset event.
-                        current_event = None
-                        continue
-                    if line.startswith(b":"):
-                        continue  # comment
-                    if line.startswith(b"event:"):
-                        current_event = line[len(b"event:"):].strip().decode(
-                            "utf-8", errors="replace",
+            if route == "sidekick-platform":
+                # Platform-adapter path: POST is fire-and-forget (202).
+                # Reply envelopes arrive on the SEPARATE persistent stream
+                # `/api/sidekick/stream?chat_id=<id>`. Open the stream
+                # FIRST so we don't race the agent's first reply_delta,
+                # then dispatch the message, then drain the stream until
+                # reply_final.
+                stream_url = f"{proxy_url}/api/sidekick/stream?chat_id={chat_id}"
+                async with sess.get(stream_url, timeout=aiohttp.ClientTimeout(total=None)) as stream_resp:
+                    if stream_resp.status != 200:
+                        err = (await stream_resp.text())[:200]
+                        logger.warning(
+                            "[stt-bridge] peer %s sidekick stream open %d: %s",
+                            peer.peer_id, stream_resp.status, err,
                         )
-                        continue
-                    if not line.startswith(b"data:"):
-                        continue
-                    data = line[len(b"data:"):].strip()
-                    if not data:
-                        continue
-                    try:
-                        import json as _json
-                        chunk = _json.loads(data)
-                    except (ValueError, TypeError):
-                        continue
-                    # Honor an explicit type field on the payload when
-                    # the event header was missing (some SSE writers omit
-                    # the `event:` line and rely on payload.type).
-                    event_name = current_event or chunk.get("type")
-                    # ── responses path (legacy) ──────────────────────
-                    if event_name == "response.output_text.delta":
-                        delta = chunk.get("delta") or ""
-                        if not delta:
-                            continue
-                        if text_queue is not None:
-                            try:
-                                text_queue.put_nowait(delta)
-                            except asyncio.QueueFull:
-                                pass
-                        if peer.on_transcript is not None:
-                            try:
-                                await peer.on_transcript(delta, False)
-                            except Exception:  # pragma: no cover
-                                pass
-                        _send_data_channel(peer, {
-                            "type": "transcript",
-                            "text": delta,
-                            "is_final": False,
-                            "role": "assistant",
-                        })
-                    elif event_name == "response.completed":
-                        # Terminal event; loop will exit on next iter.
-                        break
-                    # ── sidekick-platform path ───────────────────────
-                    elif event_name == "reply_delta":
-                        cumulative = chunk.get("text") or ""
-                        if not cumulative:
-                            continue
-                        # Diff against last seen so the per-token sinks
-                        # (TTS queue, on_transcript hook, data channel)
-                        # behave the same way they do on the responses
-                        # path. Defensively handle a non-monotonic
-                        # cumulative (shouldn't happen but adapter bugs
-                        # do — fall back to treating it as a fresh delta).
-                        if cumulative.startswith(prev_cumulative):
-                            delta = cumulative[len(prev_cumulative):]
-                        else:
-                            delta = cumulative
-                        prev_cumulative = cumulative
-                        if not delta:
-                            continue
-                        if text_queue is not None:
-                            try:
-                                text_queue.put_nowait(delta)
-                            except asyncio.QueueFull:
-                                pass
-                        if peer.on_transcript is not None:
-                            try:
-                                await peer.on_transcript(delta, False)
-                            except Exception:  # pragma: no cover
-                                pass
-                        _send_data_channel(peer, {
-                            "type": "transcript",
-                            "text": delta,
-                            "is_final": False,
-                            "role": "assistant",
-                        })
-                    elif event_name == "reply_final":
-                        break
+                        return
+                    async with sess.post(url, json=body, headers=headers) as post_resp:
+                        if post_resp.status not in (200, 202):
+                            err = (await post_resp.text())[:200]
+                            logger.warning(
+                                "[stt-bridge] peer %s agent dispatch %d: %s",
+                                peer.peer_id, post_resp.status, err,
+                            )
+                            return
+                    # Now consume the stream until reply_final.
+                    async for raw in stream_resp.content:
+                        if await _process_sse_frame(raw):
+                            break
+            else:
+                async with sess.post(url, json=body, headers=headers) as resp:
+                    if resp.status != 200:
+                        err = (await resp.text())[:200]
+                        logger.warning(
+                            "[stt-bridge] peer %s agent dispatch %d: %s",
+                            peer.peer_id, resp.status, err,
+                        )
+                        return
+                    async for raw in resp.content:
+                        if await _process_sse_frame(raw):
+                            break
         except asyncio.CancelledError:
             raise
         except Exception as e:

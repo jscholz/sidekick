@@ -31,12 +31,14 @@ which Tier-1 tests get implemented; this doc is the menu.
 
 ## Test layout convention
 
-**Hermes-specific tests live with hermes code.** Proxy contract tests
-are at `server-lib/backends/hermes-gateway/__tests__/`, NOT in `test/`.
-Same for `server-lib/backends/hermes-gateway/CONTRACT.md`. Rationale:
-sidekick is meant to be modular — a fork swapping hermes for another
-backend should be able to delete `server-lib/backends/hermes-gateway/`
-+ `hermes-plugin/` and not lose anything elsewhere.
+**Sidekick proxy contract tests live with the proxy code.** They
+belong at `server-lib/sidekick/__tests__/` (or a new harness — the
+WS-shaped fixture was removed during the agent-contract refactor;
+HTTP-shaped follow-up is queued). The PWA-side `hermes-plugin/`
+package is independently extractable. Rationale: sidekick is meant
+to be modular — a fork pointing at a different agent should be able
+to delete `hermes-plugin/` (or replace it with their own plugin) and
+not lose anything elsewhere.
 
 Generic / backend-agnostic tests (markdown, voice state machines,
 card validation, session filter) stay in `test/`.

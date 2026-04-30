@@ -132,6 +132,15 @@
  *   may have rolled over. The shell handles this the same way as a
  *   drawer-click resume (clear + re-render); other adapters can leave
  *   it unset.
+ * @property {(e: {id: string; snippet?: string; source?: string; started_at?: string}) => void} [onSessionStarted]
+ *   Pre-emptive new-session announcement. Fires when the adapter's
+ *   wire protocol surfaces a freshly-created session BEFORE the next
+ *   listSessions poll would pick it up — lets the drawer paint a
+ *   "pending" row immediately so the user sees their just-sent
+ *   message in the list without waiting on a refresh. Currently only
+ *   the legacy hermes adapter emits these (sourced from the proxy's
+ *   /api/hermes/drawer-events SSE channel); other adapters leave it
+ *   unset and their drawers just don't get the pre-emptive row.
  */
 
 // ─── Tool-event surfacing (Phase 3) ─────────────────────────────────────────
@@ -173,6 +182,45 @@ export interface ToolResultEvent {
   truncated: boolean;
   durationMs: number;
   conversation: string;
+}
+
+// ─── Search (cmd+K + drawer server filter) ──────────────────────────────────
+
+/** One session row returned by `BackendAdapter.search('sessions'|'both')`.
+ *  Matches the shape `listSessions` returns so renderers can share code. */
+export interface SearchSessionRow {
+  id: string;
+  source?: string | null;
+  title?: string | null;
+  snippet?: string | null;
+  messageCount?: number | null;
+  lastMessageAt?: number | null;
+  [k: string]: any;
+}
+
+/** One message hit returned by `BackendAdapter.search('messages'|'both')`. */
+export interface SearchMessageHit {
+  session_id: string;
+  message_id: number;
+  role: string;
+  snippet: string;
+  timestamp: number;
+  session_title?: string;
+  session_source?: string;
+}
+
+export interface SearchResult {
+  sessions: SearchSessionRow[];
+  hits: SearchMessageHit[];
+  /** Index/FTS error (sessions still populated). Only set on the messages path. */
+  error?: string;
+}
+
+export interface SearchOpts {
+  /** Result cap (sessions + hits each). Adapter may apply its own ceiling. */
+  limit?: number;
+  /** Cancellation token for typing-debounced calls. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -260,6 +308,13 @@ export interface ToolResultEvent {
  * @property {(id: string, beforeId: number) => Promise<{ messages: SessionMessage[], firstId?: number|null, hasMore?: boolean }>} [loadEarlier]
  *   Fetch the next older page of a session's transcript. Called by the
  *   chat pane when the user scrolls near the top and `hasMore` was true.
+ * @property {(q: string, kind: 'sessions'|'messages'|'both', opts?: SearchOpts) => Promise<SearchResult>} [search]
+ *   Server-authoritative search across the backend's session + message
+ *   index. Powers the drawer's debounced server-filter reconcile and
+ *   the cmd+K palette. Backends without an index implementation leave
+ *   it unset; callers fall back to the cached client-side filter
+ *   (`src/sessionFilter.ts`). Currently implemented only by the legacy
+ *   hermes adapter (against /api/hermes/search).
  */
 
 // JSDoc-only.

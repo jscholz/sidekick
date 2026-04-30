@@ -30,7 +30,7 @@ import { readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  launchBrowser, attachConsoleCapture, dumpLines, DEFAULT_URL,
+  launchBrowser, launchSharedBrowser, attachConsoleCapture, dumpLines, DEFAULT_URL,
 } from './smoke/lib.mjs';
 import { installMockBackend } from './smoke/mock-backend.mjs';
 
@@ -69,9 +69,9 @@ async function loadScenarios() {
   return scenarios;
 }
 
-async function runOne(scenario) {
+async function runOne(scenario, browser) {
   const start = Date.now();
-  const { ctx, page, cleanup } = await launchBrowser({ headed: HEADED });
+  const { ctx, page, cleanup } = await launchBrowser(browser, { headed: HEADED });
   const getConsole = attachConsoleCapture(page);
   const log = (msg) => console.log(`  [${scenario.name}] ${msg}`);
   let failMessage = null;
@@ -107,6 +107,7 @@ async function runOne(scenario) {
     };
   } finally {
     await cleanup();
+    if (mock) { try { await mock.close(); } catch {} }
   }
 }
 
@@ -126,19 +127,28 @@ async function main() {
   logRunner(`running ${runnable.length} scenario(s) against ${DEFAULT_URL}${HEADED ? ' (headed)' : ''}`);
   console.log('');
 
+  // One Chromium process for the whole run; each scenario gets its own
+  // BrowserContext (isolated storage, IDB, SW). Skips ~2-3s of per-
+  // scenario Chromium boot.
+  const { browser, closeShared } = await launchSharedBrowser({ headed: HEADED });
+
   const results = [];
-  for (const s of runnable) {
-    process.stdout.write(`▸ ${s.name.padEnd(28)} `);
-    const r = await runOne(s);
-    if (r.status === 'pass') {
-      console.log(`PASS  (${r.durationMs} ms)`);
-    } else {
-      console.log(`FAIL  (${r.durationMs} ms)`);
-      console.log(`    ${r.error}`);
-      if (r.lineDump) console.log(`    -- DOM .line dump --\n${r.lineDump}`);
-      if (r.consoleTail) console.log(`    -- last 30 console lines --\n${r.consoleTail}`);
+  try {
+    for (const s of runnable) {
+      process.stdout.write(`▸ ${s.name.padEnd(28)} `);
+      const r = await runOne(s, browser);
+      if (r.status === 'pass') {
+        console.log(`PASS  (${r.durationMs} ms)`);
+      } else {
+        console.log(`FAIL  (${r.durationMs} ms)`);
+        console.log(`    ${r.error}`);
+        if (r.lineDump) console.log(`    -- DOM .line dump --\n${r.lineDump}`);
+        if (r.consoleTail) console.log(`    -- last 30 console lines --\n${r.consoleTail}`);
+      }
+      results.push({ scenario: s, ...r });
     }
-    results.push({ scenario: s, ...r });
+  } finally {
+    await closeShared();
   }
 
   console.log('');

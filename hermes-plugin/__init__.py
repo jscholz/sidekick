@@ -1,60 +1,64 @@
 """Sidekick platform adapter for hermes-agent.
 
-Runs an aiohttp WebSocket server bound to localhost. The sidekick proxy
-(Node.js) connects as a single persistent client and multiplexes
-per-conversation traffic over the WS using ``chat_id``-tagged JSON envelopes.
+Runs an aiohttp HTTP server bound to localhost that speaks the abstract
+agent contract (OpenAI-Responses-shaped). The sidekick proxy (Node.js)
+talks to it via /v1/* endpoints; the agent contract is documented at
+``docs/ABSTRACT_AGENT_PROTOCOL.md`` in the sidekick repo.
 
-Sidekick is a peer of telegram / slack / signal — the gateway owns the
-chat_id → session_id mapping natively.
+Sidekick is a peer of telegram / slack / signal — the hermes gateway
+owns the chat_id → session_id mapping natively.
 
-Wire protocol
--------------
-Single persistent WS connection at ``ws://127.0.0.1:<port>/ws``.
-Auth: shared secret bearer token in the ``Authorization`` header on the
-WS upgrade request, value ``Bearer <token>`` where ``<token>`` is read
-from env var ``SIDEKICK_PLATFORM_TOKEN`` at adapter startup.
+HTTP surface
+------------
+All routes auth-gate on ``Authorization: Bearer <token>`` where
+``<token>`` is read from env var ``SIDEKICK_PLATFORM_TOKEN`` at adapter
+startup.
 
-Inbound (proxy → adapter), all JSON text frames::
+Channel contract (the OAI-compat surface)::
 
-    {"type": "message",  "chat_id": "<opaque>", "text": "hello", "attachments": []}
-    {"type": "command",  "chat_id": "<opaque>", "command": "new", "args": ""}
-    {"type": "voice_dispatch", "chat_id": "<opaque>", "text": "..."}  # from audio bridge
+    GET    /health
+    GET    /v1/conversations              # drawer list (sidekick rows)
+    GET    /v1/conversations/{id}/items   # transcript replay
+    DELETE /v1/conversations/{id}         # cascade delete
+    POST   /v1/responses                  # turn dispatch (SSE on stream:true)
+    GET    /v1/events                     # out-of-turn SSE
 
-The adapter calls ``self.handle_message(MessageEvent(...))`` which the
-gateway resolves to a session via the standard
+Gateway extension (sidekick-defined, optional)::
+
+    GET    /v1/gateway/conversations      # cross-platform drawer list
+
+The proxy probes ``/v1/gateway/conversations`` first; on 404 it falls
+back to the channel surface and stamps source='sidekick'. Hermes
+implements the gateway endpoint because hermes IS a gateway —
+telegram, slack, whatsapp etc. live behind the same state.db.
+
+Inbound dispatch goes through ``/v1/responses`` which calls
+``self.handle_message(MessageEvent(...))``. The gateway resolves the
+session via the standard
 ``build_session_key(SessionSource(platform=Platform.SIDEKICK, chat_id=...))``
-DM path — i.e. ``agent:main:sidekick:dm:<chat_id>``.
+DM path — ``agent:main:sidekick:dm:<chat_id>``.
 
-Outbound (adapter → proxy)::
+Outbound envelope shapes (see SidekickEnvelope in
+``server-lib/backends/hermes-gateway/upstream.ts``)::
 
-    # Streaming token deltas during a single agent turn (from edit_message):
-    {"type": "reply_delta",     "chat_id": "...", "text": "<full content so far>",
-     "message_id": "<adapter-message-id>"}
-    # Marks turn end (emitted on the finalize=True edit, or on plain send):
+    {"type": "reply_delta",     "chat_id": "...", "text": "<accumulated>",
+     "message_id": "..."}
     {"type": "reply_final",     "chat_id": "...", "message_id": "..."}
-    # Image emit:
     {"type": "image",           "chat_id": "...", "url": "...", "caption": "..."}
-    # Typing indicator (best-effort cosmetic):
     {"type": "typing",          "chat_id": "..."}
-    # Push notification (cron output, /background result, scheduled reminder):
     {"type": "notification",    "chat_id": "...", "kind": "cron", "content": "..."}
-    # Emitted when state.db's sessions row for a known chat_id changes its
-    # (session_id, title) — happens on compression-driven rotation. The
-    # adapter polls state.db every ~1.5s while a proxy client is connected
-    # and detects transitions; see ``_session_poll_loop`` below.
-    {"type": "session_changed", "chat_id": "...", "session_id": "...", "title": "..."}
+    {"type": "session_changed", "chat_id": "...", "session_id": "...",
+     "title": "..."}
+    {"type": "tool_call" / "tool_result" / "error", ...}
 
-The proxy fans these out to the right PWA WebSocket(s) by chat_id.
+In-turn envelopes ride the ``/v1/responses`` SSE stream as OAI events
+(translated by the proxy back to the sidekick envelope shape). All
+others ride ``/v1/events`` with a Last-Event-ID replay ring.
 
-Limitations
------------
-* Single connected proxy client. A second connection cleanly drops the
-  first (same-host single-user assumption).
-* No reply_to threading, no media beyond URL-encoded images.
-* ``session_changed`` is detected via state.db polling
-  (``_session_poll_loop``) — no hermes core patches required for it.
-  Trade-off: ~1.5s lag between compression and the PWA seeing the new
-  title.
+``session_changed`` is detected via state.db polling
+(``_session_poll_loop``) — no hermes core patches required for it.
+Trade-off: ~1.5s lag between compression and the PWA seeing the new
+title.
 
 Install
 -------
@@ -79,20 +83,20 @@ import contextlib
 import json
 import logging
 import os
+import secrets
 import socket as _socket
 import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
-    from aiohttp import web, WSMsgType
+    from aiohttp import web
     AIOHTTP_AVAILABLE = True
 except ImportError:
     AIOHTTP_AVAILABLE = False
     web = None  # type: ignore[assignment]
-    WSMsgType = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -124,6 +128,12 @@ _active_adapter: Optional["SidekickAdapter"] = None
 # does its own per-tool truncation for display, but we cap here too
 # so a runaway result can't blow up the WS frame budget.
 TOOL_RESULT_MAX_BYTES = 50 * 1024
+
+# /v1/responses streaming + /v1/events out-of-turn channel sizing.
+# These bound worst-case memory if a consumer hangs.
+TURN_QUEUE_MAX = 1000          # per-chat envelope queue depth
+TURN_TIMEOUT_S = 120           # hold a /v1/responses turn open this long
+EVENT_REPLAY_CAP = 256         # bounded ring for /v1/events replay
 
 
 def _iso_from_epoch(t: float) -> str:
@@ -215,13 +225,6 @@ class SidekickAdapter(BasePlatformAdapter):
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
 
-        # Single connected proxy client. We hold a reference so send() /
-        # edit_message() can push outbound envelopes. Replacement-on-reconnect
-        # semantics: a new connection closes the old one (same-host, same-user
-        # deployment assumption — no multi-tenant sidekicks today).
-        self._client_ws: Optional[web.WebSocketResponse] = None
-        self._client_lock = asyncio.Lock()
-
         # chat_ids we've seen at least one inbound message for in this process
         # lifetime. Used by send() to emit a synthetic ``session_changed`` on
         # the *first* outbound for a fresh chat_id; a future on-compression
@@ -260,6 +263,31 @@ class SidekickAdapter(BasePlatformAdapter):
         # below if it ever grows unreasonably.
         self._inflight_tool_calls: Dict[str, Tuple[float, str]] = {}
 
+        # ── /v1/responses + /v1/events plumbing (refactor step 2) ─────
+        # Per-chat-id queue: a /v1/responses request registers its queue
+        # here on entry, drains it as the agent emits replies, and
+        # removes it on exit. Outbound `_safe_send_envelope` routes
+        # in-turn envelopes (reply_delta, reply_final, tool_call,
+        # tool_result, typing) to the matching queue if registered.
+        self._turn_queues: Dict[str, "asyncio.Queue[Dict[str, Any]]"] = {}
+        # /v1/events subscribers: each connected proxy SSE stream owns a
+        # queue here; out-of-turn envelopes (notification,
+        # session_changed, image, error, plus any in-turn envelope with
+        # no active turn queue) get fanned out to all subscribers.
+        self._event_subscribers: Set["asyncio.Queue[Tuple[int, Dict[str, Any]]]"] = set()
+        # Monotonic id for /v1/events SSE Last-Event-ID replay.
+        self._event_id_counter: int = 0
+        # Bounded replay ring so a transient /v1/events disconnect can
+        # resume without losing recent envelopes.
+        self._event_replay_ring: List[Tuple[int, Dict[str, Any]]] = []
+        # Per-chat-id attachment tempfiles awaiting cleanup. Populated
+        # by `_dispatch_message` when it materializes data:URLs to
+        # /tmp; the /v1/responses handler's finally block pops + unlinks
+        # once the turn ends (reply_final or timeout). At that point
+        # the agent has produced its reply and the vision tool has
+        # already read the file.
+        self._pending_attachment_paths: Dict[str, List[str]] = {}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -294,7 +322,34 @@ class SidekickAdapter(BasePlatformAdapter):
 
         self._app = web.Application()
         self._app.router.add_get("/health", self._handle_health)
-        self._app.router.add_get("/ws", self._handle_ws)
+        # ── Agent contract HTTP routes ────────────────────────────────
+        # OAI-Responses-shape surface the proxy talks to. See
+        # docs/ABSTRACT_AGENT_PROTOCOL.md for the canonical reference.
+        self._app.router.add_get(
+            "/v1/conversations", self._handle_list_conversations
+        )
+        self._app.router.add_get(
+            "/v1/conversations/{id}/items", self._handle_get_conversation_items
+        )
+        self._app.router.add_delete(
+            "/v1/conversations/{id}", self._handle_delete_conversation
+        )
+        # Gateway extension: cross-platform enumeration. Optional second
+        # contract (`/v1/gateway/*`) the proxy probes-and-falls-back on.
+        # Implemented here because hermes IS a gateway — telegram, slack,
+        # whatsapp etc. live behind the same state.db. Stub agents and
+        # single-channel agents simply don't expose this prefix; the
+        # proxy 404s gracefully back to `/v1/conversations`.
+        self._app.router.add_get(
+            "/v1/gateway/conversations", self._handle_list_gateway_conversations
+        )
+        # Turn dispatch + out-of-turn event channel.
+        self._app.router.add_post(
+            "/v1/responses", self._handle_responses
+        )
+        self._app.router.add_get(
+            "/v1/events", self._handle_events
+        )
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -355,12 +410,6 @@ class SidekickAdapter(BasePlatformAdapter):
                 await self._session_poll_task
             self._session_poll_task = None
 
-        async with self._client_lock:
-            if self._client_ws is not None and not self._client_ws.closed:
-                with contextlib.suppress(Exception):
-                    await self._client_ws.close(code=1001, message=b"shutdown")
-            self._client_ws = None
-
         if self._site is not None:
             with contextlib.suppress(Exception):
                 await self._site.stop()
@@ -383,123 +432,8 @@ class SidekickAdapter(BasePlatformAdapter):
                 "status": "ok",
                 "platform": "sidekick",
                 "protocol_version": PROTOCOL_VERSION,
-                "client_connected": self._client_ws is not None
-                and not self._client_ws.closed,
             }
         )
-
-    def _check_ws_auth(self, request: "web.Request") -> bool:
-        """Validate ``Authorization: Bearer <token>`` on the WS upgrade.
-
-        Returns True iff the request carries the configured shared secret.
-        Constant-time comparison.
-        """
-        import hmac
-
-        header = request.headers.get("Authorization", "")
-        if not header.startswith("Bearer "):
-            return False
-        provided = header[len("Bearer ") :].strip()
-        return hmac.compare_digest(provided, self._token)
-
-    async def _handle_ws(self, request: "web.Request") -> "web.WebSocketResponse":
-        """Accept the proxy WS connection and pump frames until close."""
-        if not self._check_ws_auth(request):
-            logger.warning(
-                "[sidekick] WS upgrade rejected (bad/missing token) from %s",
-                request.remote,
-            )
-            return web.Response(status=401, text="invalid token")
-
-        ws = web.WebSocketResponse(heartbeat=30.0)
-        await ws.prepare(request)
-
-        # Replace any previous client. The sidekick proxy is single-process,
-        # single-instance — a re-connect means the old socket is dead.
-        async with self._client_lock:
-            previous = self._client_ws
-            self._client_ws = ws
-
-        if previous is not None and not previous.closed:
-            with contextlib.suppress(Exception):
-                await previous.close(
-                    code=1000, message=b"replaced by new connection"
-                )
-
-        # Greet the proxy with the protocol version so it can reject mismatches.
-        with contextlib.suppress(Exception):
-            await ws.send_json(
-                {"type": "hello", "protocol_version": PROTOCOL_VERSION}
-            )
-
-        logger.info("[sidekick] proxy connected from %s", request.remote)
-
-        try:
-            async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    await self._handle_inbound_frame(msg.data)
-                elif msg.type == WSMsgType.ERROR:
-                    logger.warning(
-                        "[sidekick] WS error: %s", ws.exception()
-                    )
-                    break
-                # binary / ping / pong / close — ignore (heartbeat handles ping)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("[sidekick] WS handler crashed")
-        finally:
-            async with self._client_lock:
-                if self._client_ws is ws:
-                    self._client_ws = None
-            logger.info("[sidekick] proxy disconnected")
-
-        return ws
-
-    async def _handle_inbound_frame(self, raw: str) -> None:
-        """Parse one JSON frame from the proxy and dispatch."""
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("[sidekick] non-JSON frame ignored")
-            return
-        if not isinstance(data, dict):
-            logger.warning("[sidekick] non-object frame ignored")
-            return
-
-        env_type = data.get("type")
-        chat_id = data.get("chat_id")
-        if not chat_id or not isinstance(chat_id, str):
-            logger.warning("[sidekick] frame missing chat_id; type=%s", env_type)
-            return
-
-        if env_type == "message":
-            text = data.get("text") or ""
-            await self._dispatch_message(
-                chat_id=chat_id,
-                text=text,
-                attachments=data.get("attachments") or [],
-            )
-        elif env_type == "command":
-            command = (data.get("command") or "").lstrip("/")
-            args = data.get("args") or ""
-            text = f"/{command}" + (f" {args}" if args else "")
-            await self._dispatch_message(chat_id=chat_id, text=text)
-        elif env_type == "voice_dispatch":
-            # Audio bridge transcript — same as a regular text message but the
-            # frame type is preserved for future telemetry / TTS auto-toggle.
-            text = data.get("text") or ""
-            await self._dispatch_message(chat_id=chat_id, text=text)
-        elif env_type == "ping":
-            # Cosmetic application-level keepalive; ack so the proxy can
-            # measure RTT independently of WS-level heartbeats.
-            await self._safe_send_envelope({"type": "pong", "chat_id": chat_id})
-        else:
-            logger.warning(
-                "[sidekick] unknown envelope type=%r chat_id=%s",
-                env_type,
-                chat_id,
-            )
 
     async def _dispatch_message(
         self,
@@ -508,7 +442,16 @@ class SidekickAdapter(BasePlatformAdapter):
         text: str,
         attachments: Optional[list] = None,
     ) -> None:
-        """Build a MessageEvent and hand it to the gateway core."""
+        """Build a MessageEvent and hand it to the gateway core.
+
+        ``attachments`` is the array the PWA collects from the camera /
+        image picker — each entry ``{type, mimeType, fileName,
+        content}`` where ``content`` is a ``data:`` URL. We write each
+        payload to a tempfile and pass the paths via ``media_urls``,
+        matching how the telegram adapter populates downloaded photos
+        (``gateway/platforms/telegram.py``). Hermes' vision tools read
+        ``media_urls`` directly off the MessageEvent.
+        """
         self._known_chat_ids.add(chat_id)
         source = self.build_source(
             chat_id=chat_id,
@@ -517,13 +460,982 @@ class SidekickAdapter(BasePlatformAdapter):
             user_id=chat_id,        # one user-per-chat in single-tenant model
             user_name="sidekick-user",
         )
+
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        message_type = MessageType.TEXT
+        if attachments:
+            paths, mimes, dominant = self._materialize_attachments(attachments)
+            if paths:
+                media_urls = paths
+                media_types = mimes
+                message_type = dominant
+                # Hand the paths to the /v1/responses handler so it can
+                # unlink them in its finally block once the turn ends.
+                # Replace any existing list — overlapping turns for the
+                # same chat_id aren't supported by the proxy contract.
+                self._pending_attachment_paths[chat_id] = paths
+
         event = MessageEvent(
             text=text or "",
-            message_type=MessageType.TEXT,
+            message_type=message_type,
             source=source,
             message_id=str(uuid.uuid4()),
+            media_urls=media_urls,
+            media_types=media_types,
         )
         await self.handle_message(event)
+
+    def _cleanup_turn_attachments(self, chat_id: str) -> None:
+        """Unlink any attachment tempfiles registered for this chat's
+        in-flight turn. Called from `_handle_responses_*` finally blocks
+        once `reply_final` arrives (or the turn times out). Safe to call
+        when nothing is registered — common case for text-only turns."""
+        paths = self._pending_attachment_paths.pop(chat_id, None)
+        if not paths:
+            return
+        for p in paths:
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "[sidekick] attachment cleanup failed (%s): %s", p, exc,
+                )
+
+    def _materialize_attachments(
+        self, attachments: list,
+    ) -> Tuple[List[str], List[str], "MessageType"]:
+        """Decode base64 ``data:`` URL payloads to tempfiles. Returns
+        ``(paths, mime_types, dominant_message_type)``.
+
+        The PWA sends each attachment as
+        ``{type, mimeType, fileName, content}`` where ``content`` is a
+        full ``data:<mime>;base64,<payload>`` string. Hermes wants
+        on-disk paths in ``MessageEvent.media_urls`` (telegram adapter
+        models this — it downloads photos to a cache dir, then sets
+        media_urls to those paths). We mirror that contract for the
+        sidekick path: write to ``/tmp/sidekick-attach-<uuid>.<ext>``
+        and let the OS clean tmpdirs on its own schedule (sidekick is
+        single-user, single-host; a stray /tmp file is harmless).
+        """
+        import base64
+        import tempfile
+
+        paths: List[str] = []
+        mimes: List[str] = []
+        kinds: List[str] = []
+        for a in attachments:
+            if not isinstance(a, dict):
+                continue
+            content = a.get("content")
+            if not isinstance(content, str) or not content.startswith("data:"):
+                continue
+            try:
+                header, b64 = content.split(",", 1)
+            except ValueError:
+                continue
+            # header looks like 'data:image/png;base64' — pull mime.
+            mime = a.get("mimeType") or ""
+            if not mime and ";" in header:
+                mime = header.split(":", 1)[1].split(";", 1)[0]
+            try:
+                payload = base64.b64decode(b64, validate=False)
+            except Exception:
+                logger.warning("[sidekick] base64 decode failed for attachment")
+                continue
+            ext = self._ext_for_mime(mime, a.get("fileName"))
+            fd, path = tempfile.mkstemp(
+                prefix="sidekick-attach-", suffix=ext, dir="/tmp",
+            )
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(payload)
+            except Exception:
+                logger.exception("[sidekick] failed writing attachment to %s", path)
+                continue
+            paths.append(path)
+            mimes.append(mime)
+            kinds.append(self._kind_for_mime(mime))
+        if not paths:
+            return [], [], MessageType.TEXT
+        # Pick a dominant message_type. Sidekick almost always sends a
+        # single image; fall back to the first kind otherwise.
+        dominant = MessageType.PHOTO
+        first = kinds[0] if kinds else "image"
+        if first == "video":
+            dominant = MessageType.VIDEO
+        elif first == "audio":
+            dominant = MessageType.AUDIO
+        elif first == "document":
+            dominant = MessageType.DOCUMENT
+        return paths, mimes, dominant
+
+    @staticmethod
+    def _ext_for_mime(mime: str, file_name: Optional[str]) -> str:
+        # Prefer the original filename's extension if present (preserves
+        # JPEG vs PNG vs HEIC etc. for downstream tools that care).
+        if file_name and "." in file_name:
+            return "." + file_name.rsplit(".", 1)[-1].lower()
+        if not mime:
+            return ""
+        # Lightweight mime → ext map. Don't pull mimetypes module just
+        # for half a dozen entries.
+        m = mime.lower()
+        if m == "image/png": return ".png"
+        if m == "image/jpeg" or m == "image/jpg": return ".jpg"
+        if m == "image/webp": return ".webp"
+        if m == "image/gif": return ".gif"
+        if m == "image/heic": return ".heic"
+        if m == "video/mp4": return ".mp4"
+        if m == "video/quicktime": return ".mov"
+        if m == "audio/mpeg" or m == "audio/mp3": return ".mp3"
+        if m == "audio/wav": return ".wav"
+        return ""
+
+    @staticmethod
+    def _kind_for_mime(mime: str) -> str:
+        m = (mime or "").lower()
+        if m.startswith("image/"): return "image"
+        if m.startswith("video/"): return "video"
+        if m.startswith("audio/"): return "audio"
+        return "document"
+
+    # ------------------------------------------------------------------
+    # HTTP read endpoints (agent contract Phase 1)
+    # ------------------------------------------------------------------
+    #
+    # These mirror the abstract agent protocol's
+    # /v1/conversations* endpoints (see docs/ABSTRACT_AGENT_PROTOCOL.md).
+    # The same in-process state.db reads the session poller does back
+    # them; no separate direct-state access path needed.
+
+    def _check_http_auth(self, request: "web.Request") -> bool:
+        """Validate ``Authorization: Bearer <token>``. Constant-time."""
+        import hmac
+
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            return False
+        provided = header[len("Bearer ") :].strip()
+        return hmac.compare_digest(provided, self._token)
+
+    async def _handle_list_conversations(self, request: "web.Request") -> "web.Response":
+        """GET /v1/conversations — return the drawer list.
+
+        Mirrors `GET /api/sidekick/sessions` shape (which the proxy still
+        serves on top of hermes's state.db today). Once the proxy
+        switches to talk to this endpoint instead of reading state.db
+        directly, the leak is closed."""
+        if not self._check_http_auth(request):
+            return web.Response(status=401, text="invalid token")
+        try:
+            limit = max(1, min(int(request.query.get("limit", "50")), 200))
+        except ValueError:
+            return web.Response(status=400, text="invalid limit")
+
+        rows = await asyncio.to_thread(self._read_conversation_summaries, limit)
+        data = [
+            {
+                "id": chat_id,
+                "object": "conversation",
+                "created_at": int(created_at),
+                "metadata": {
+                    "title": title or "",
+                    "message_count": message_count,
+                    "last_active_at": int(last_active_at),
+                    "first_user_message": first_user_message,
+                },
+            }
+            for chat_id, _session_id, title, message_count, last_active_at, created_at, first_user_message in rows
+        ]
+        return web.json_response({"object": "list", "data": data})
+
+    async def _handle_get_conversation_items(self, request: "web.Request") -> "web.Response":
+        """GET /v1/conversations/{id}/items — transcript replay.
+
+        Walks the parent_session_id fork chain server-side so the proxy
+        sees a flat replayable list."""
+        if not self._check_http_auth(request):
+            return web.Response(status=401, text="invalid token")
+        chat_id = request.match_info["id"]
+        try:
+            limit = max(1, min(int(request.query.get("limit", "200")), 500))
+        except ValueError:
+            return web.Response(status=400, text="invalid limit")
+        before = request.query.get("before")
+        before_id: Optional[int]
+        if before is None:
+            before_id = None
+        else:
+            try:
+                before_id = int(before)
+            except ValueError:
+                return web.Response(status=400, text="invalid before cursor")
+
+        result = await asyncio.to_thread(
+            self._read_conversation_items, chat_id, limit, before_id
+        )
+        if result is None:
+            return web.Response(status=404, text="conversation not found")
+        items, first_id, has_more = result
+        return web.json_response({
+            "object": "list",
+            "data": items,
+            "first_id": first_id,
+            "has_more": has_more,
+        })
+
+    async def _handle_list_gateway_conversations(
+        self, request: "web.Request"
+    ) -> "web.Response":
+        """GET /v1/gateway/conversations — cross-platform drawer list.
+
+        Same OAI-compat row shape as `/v1/conversations` (`{id, object,
+        created_at, metadata}`), but enumerates every platform in
+        sessions.json (telegram / slack / whatsapp / sidekick / …) and
+        adds `source` + `chat_type` to `metadata` so the proxy can render
+        per-row badges. Sidekick's drawer relies on this for
+        cross-platform visibility; non-sidekick rows are read-only.
+
+        Implementing this endpoint is what makes a plugin a "gateway" in
+        sidekick's eyes. Single-channel agents (stub, openai-compat
+        third-parties) leave it unimplemented and the proxy falls back
+        to `/v1/conversations`."""
+        if not self._check_http_auth(request):
+            return web.Response(status=401, text="invalid token")
+        try:
+            limit = max(1, min(int(request.query.get("limit", "50")), 200))
+        except ValueError:
+            return web.Response(status=400, text="invalid limit")
+
+        rows = await asyncio.to_thread(
+            self._read_gateway_conversation_summaries, limit
+        )
+        data = [
+            {
+                "id": chat_id,
+                "object": "conversation",
+                "created_at": int(created_at),
+                "metadata": {
+                    "title": title or "",
+                    "message_count": message_count,
+                    "last_active_at": int(last_active_at),
+                    "first_user_message": first_user_message,
+                    "source": source,
+                    "chat_type": chat_type,
+                },
+            }
+            for (chat_id, _session_id, source, chat_type, title,
+                 message_count, last_active_at, created_at,
+                 first_user_message) in rows
+        ]
+        return web.json_response({"object": "list", "data": data})
+
+    async def _handle_delete_conversation(self, request: "web.Request") -> "web.Response":
+        """DELETE /v1/conversations/{id} — hard delete with full cascade.
+
+        Cascade ordering:
+          1. state.db (sessions + messages rows)
+          2. ~/.hermes/sessions/sessions.json (key removal)
+          3. ~/.hermes/sessions/<sid>.jsonl (transcript file)
+          4. Hindsight bank (memory units tagged with this session UUID)
+
+        Best-effort on each step — sql failure aborts (the cascade can't
+        proceed without knowing which session_id to scrub), filesystem
+        failures log + continue, hindsight failures log + continue
+        (privacy bug if hindsight scrub fails, but a stranded memory
+        row is less bad than a stranded session row that re-ghosts the
+        drawer)."""
+        if not self._check_http_auth(request):
+            return web.Response(status=401, text="invalid token")
+        chat_id = request.match_info["id"]
+        result = await asyncio.to_thread(self._delete_conversation_sync, chat_id)
+        if result == "not_found":
+            return web.Response(status=404, text="conversation not found")
+        if result == "error":
+            return web.Response(status=500, text="delete failed")
+        # Drop from in-process caches so the next list/poll doesn't
+        # resurrect the row from stale state.
+        self._session_state_cache.pop(chat_id, None)
+        for sid in [s for s, c in self._sid_to_chat_id_cache.items() if c == chat_id]:
+            self._sid_to_chat_id_cache.pop(sid, None)
+        return web.json_response({"ok": True})
+
+    # ── HTTP read helpers (run in worker thread via asyncio.to_thread) ──
+
+    def _read_conversation_summaries(self, limit: int) -> list:
+        """Return [(chat_id, session_id, title, message_count, last_active_at,
+        created_at, first_user_message), …] sorted most-recent-first.
+        Bounded by `limit`. Mirrors the join-y SQL the proxy's
+        sessions.ts:107-119 does today. Worker-thread safe."""
+        if self._state_db_path is None or not self._state_db_path.exists():
+            return []
+        chat_pairs = self._read_sidekick_chat_pairs()
+        if not chat_pairs:
+            return []
+        sids = [sid for _, sid in chat_pairs]
+        ids_csv = ",".join(["?"] * len(sids))
+        # Pull session metadata + message_count + boundary timestamps +
+        # first user message all in one pass.
+        sql = f"""
+            SELECT
+                s.id,
+                COALESCE(s.title, ''),
+                (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id),
+                COALESCE(s.started_at, 0),
+                (SELECT COALESCE(MAX(m.timestamp), s.started_at)
+                   FROM messages m WHERE m.session_id = s.id),
+                (SELECT m.content FROM messages m
+                   WHERE m.session_id = s.id AND m.role = 'user'
+                   ORDER BY m.timestamp ASC LIMIT 1)
+            FROM sessions s
+            WHERE s.id IN ({ids_csv})
+        """
+        uri = f"file:{self._state_db_path}?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as conn:
+            rows = {row[0]: row for row in conn.execute(sql, sids).fetchall()}
+        sid_to_chat = {sid: cid for cid, sid in chat_pairs}
+        out = []
+        for sid, row in rows.items():
+            chat_id = sid_to_chat.get(sid)
+            if not chat_id:
+                continue
+            _, title, mcount, started, last_active, first_user = row
+            first_user_truncated = (first_user or "")[:80] or None
+            out.append(
+                (chat_id, sid, title, int(mcount), float(last_active),
+                 float(started), first_user_truncated)
+            )
+        out.sort(key=lambda r: r[4], reverse=True)
+        return out[:limit]
+
+    def _read_gateway_conversation_summaries(self, limit: int) -> list:
+        """Cross-platform variant of `_read_conversation_summaries`.
+
+        Returns ``[(chat_id, session_id, source, chat_type, title,
+        message_count, last_active_at, created_at, first_user_message),
+        …]`` sorted most-recent-first, bounded by ``limit``. Walks every
+        ``agent:main:<platform>:<chat_type>:<chat_id>`` key in
+        sessions.json — same shape sidekick's proxy enumerates today
+        from disk (server-lib/backends/hermes-gateway/session-index.ts),
+        just exposed over HTTP so the proxy can stop reading hermes's
+        filesystem directly. Worker-thread safe."""
+        if self._state_db_path is None or not self._state_db_path.exists():
+            return []
+        chat_pairs = self._read_all_chat_pairs()
+        if not chat_pairs:
+            return []
+        sids = [p[1] for p in chat_pairs]
+        ids_csv = ",".join(["?"] * len(sids))
+        # Mirror _read_conversation_summaries' SQL exactly; the only
+        # difference is the chat-pair source set.
+        sql = f"""
+            SELECT
+                s.id,
+                COALESCE(s.title, ''),
+                (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id),
+                COALESCE(s.started_at, 0),
+                (SELECT COALESCE(MAX(m.timestamp), s.started_at)
+                   FROM messages m WHERE m.session_id = s.id),
+                (SELECT m.content FROM messages m
+                   WHERE m.session_id = s.id AND m.role = 'user'
+                   ORDER BY m.timestamp ASC LIMIT 1)
+            FROM sessions s
+            WHERE s.id IN ({ids_csv})
+        """
+        uri = f"file:{self._state_db_path}?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as conn:
+            rows = {row[0]: row for row in conn.execute(sql, sids).fetchall()}
+        # Drop orphans (sessions.json key with no state.db row) — same
+        # invariant as the sidekick path. Mirrors the proxy's own
+        # orphan-drop in sessions.ts:127.
+        out = []
+        for chat_id, sid, source, chat_type in chat_pairs:
+            row = rows.get(sid)
+            if row is None:
+                continue
+            _, title, mcount, started, last_active, first_user = row
+            first_user_truncated = (first_user or "")[:80] or None
+            out.append((
+                chat_id, sid, source, chat_type, title, int(mcount),
+                float(last_active), float(started), first_user_truncated,
+            ))
+        out.sort(key=lambda r: r[6], reverse=True)
+        return out[:limit]
+
+    def _read_conversation_items(
+        self, chat_id: str, limit: int, before_id: Optional[int]
+    ) -> Optional[Tuple[list, Optional[int], bool]]:
+        """Return (items, first_id, has_more) for a chat_id, or None if
+        the chat_id doesn't resolve. Walks parent_session_id chain so
+        compression-fork chats replay as a single flat transcript.
+
+        Resolves chat_id across ALL platforms (sidekick + telegram +
+        slack + whatsapp + …) so the cross-platform drawer can replay
+        a non-sidekick chat's transcript. The composer stays read-only
+        for non-sidekick rows; this is replay-only access."""
+        if self._state_db_path is None or not self._state_db_path.exists():
+            return None
+        # Prefer the sidekick prefix on a chat_id collision (extremely
+        # unlikely in practice — telegram chat_ids are short ints,
+        # whatsapp uses JIDs, sidekick uses UUIDs — but cheap to
+        # disambiguate deterministically).
+        sidekick_pairs = dict(self._read_sidekick_chat_pairs())
+        latest_sid = sidekick_pairs.get(chat_id)
+        if not latest_sid:
+            for cid, sid, _src, _ctype in self._read_all_chat_pairs():
+                if cid == chat_id:
+                    latest_sid = sid
+                    break
+        if not latest_sid:
+            return None
+        # Recursive CTE: collect [latest, parent, grandparent, ...] session
+        # ids by walking parent_session_id. Mirrors what the proxy's
+        # history.ts does today.
+        cte = """
+            WITH RECURSIVE chain(id) AS (
+                SELECT id FROM sessions WHERE id = ?
+                UNION ALL
+                SELECT s.parent_session_id FROM sessions s
+                JOIN chain c ON s.id = c.id
+                WHERE s.parent_session_id IS NOT NULL
+            )
+            SELECT m.id, m.role, m.content, m.tool_name, m.timestamp
+            FROM messages m
+            WHERE m.session_id IN (SELECT id FROM chain)
+        """
+        params: list = [latest_sid]
+        if before_id is not None:
+            cte += " AND m.id < ?"
+            params.append(before_id)
+        cte += " ORDER BY m.id ASC"
+        # Filter `[CONTEXT COMPACTION ...]` rows — internal, never shown.
+        # Then trim to `limit` (oldest-first slice).
+        uri = f"file:{self._state_db_path}?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as conn:
+            rows = list(conn.execute(cte, params).fetchall())
+        items = []
+        for row_id, role, content, tool_name, ts in rows:
+            text = (content or "")
+            if text.startswith("[CONTEXT COMPACTION"):
+                continue
+            item: Dict[str, Any] = {
+                "id": int(row_id),
+                "object": "message",
+                "role": role,
+                "content": text,
+                "created_at": int(ts) if ts else 0,
+            }
+            # Sidekick extension on the OAI item shape: `tool_name` for
+            # tool-role rows so the drawer's "agent activity" view can
+            # label which tool produced the row. OAI tolerates unknown
+            # fields; clients that don't care simply ignore it.
+            if tool_name:
+                item["tool_name"] = tool_name
+            items.append(item)
+        # Pagination: when before_id is set, the user is paging backward
+        # in time; has_more=True if there's anything older still.
+        # Without before_id, we return the most recent `limit` items
+        # and report has_more if we truncated.
+        first_id = items[0]["id"] if items else None
+        if before_id is None and len(items) > limit:
+            items = items[-limit:]
+            first_id = items[0]["id"] if items else None
+            has_more = True
+        elif before_id is not None and len(items) >= limit:
+            items = items[:limit]
+            has_more = True
+        else:
+            has_more = False
+        return (items, first_id, has_more)
+
+    def _delete_conversation_sync(self, chat_id: str) -> str:
+        """Synchronous cascade delete. Returns 'ok', 'not_found', or
+        'error'. Worker-thread safe."""
+        if self._state_db_path is None or not self._state_db_path.exists():
+            return "error"
+        chat_pairs = dict(self._read_sidekick_chat_pairs())
+        latest_sid = chat_pairs.get(chat_id)
+        if not latest_sid:
+            return "not_found"
+        # state.db: cascade delete via the recursive CTE so all forks
+        # (compression-rotated session ids) get scrubbed.
+        try:
+            with contextlib.closing(sqlite3.connect(self._state_db_path, timeout=5.0)) as conn:
+                conn.execute("PRAGMA foreign_keys = ON")
+                with conn:
+                    rows = conn.execute(
+                        """
+                        WITH RECURSIVE chain(id) AS (
+                            SELECT id FROM sessions WHERE id = ?
+                            UNION ALL
+                            SELECT s.parent_session_id FROM sessions s
+                            JOIN chain c ON s.id = c.id
+                            WHERE s.parent_session_id IS NOT NULL
+                        )
+                        SELECT id FROM chain
+                        """,
+                        (latest_sid,),
+                    ).fetchall()
+                    fork_sids = [r[0] for r in rows] or [latest_sid]
+                    placeholders = ",".join(["?"] * len(fork_sids))
+                    conn.execute(
+                        f"DELETE FROM messages WHERE session_id IN ({placeholders})",
+                        fork_sids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM sessions WHERE id IN ({placeholders})",
+                        fork_sids,
+                    )
+        except Exception as exc:
+            logger.warning("[sidekick] state.db delete failed for chat_id=%s: %s", chat_id, exc)
+            return "error"
+        # sessions.json: scrub the sidekick key.
+        sessions_index = self._state_db_path.parent / "sessions" / "sessions.json"
+        try:
+            import json as _json
+            if sessions_index.exists():
+                with open(sessions_index, encoding="utf-8") as f:
+                    idx = _json.load(f)
+                key = f"{SESSION_KEY_PREFIX}{chat_id}"
+                if isinstance(idx, dict) and key in idx:
+                    del idx[key]
+                    tmp = sessions_index.with_suffix(f".tmp.{os.getpid()}")
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        _json.dump(idx, f, indent=2)
+                    os.replace(tmp, sessions_index)
+        except Exception as exc:
+            logger.warning("[sidekick] sessions.json scrub failed: %s", exc)
+        # jsonl transcripts.
+        for sid in fork_sids:
+            jsonl = self._state_db_path.parent / "sessions" / f"{sid}.jsonl"
+            try:
+                if jsonl.exists():
+                    jsonl.unlink()
+            except Exception as exc:
+                logger.warning("[sidekick] jsonl unlink failed for sid=%s: %s", sid, exc)
+        # Hindsight cascade (privacy-critical — closes the regression
+        # introduced in the platform-adapter migration where the new
+        # delete path skipped the hindsight scrub the legacy path had).
+        try:
+            self._purge_hindsight_for_session_uuids(fork_sids)
+        except Exception as exc:
+            logger.warning("[sidekick] hindsight purge failed: %s", exc)
+        return "ok"
+
+    def _purge_hindsight_for_session_uuids(self, session_uuids: list) -> None:
+        """Delete hindsight memories tagged with any of these session
+        UUIDs. Reads hindsight URL + bank from env; no-op if hindsight
+        isn't configured (local-only deployments without a memory store).
+
+        Two storage shapes (both handled by the proxy's existing
+        purgeHindsightSession in TS — we mirror the logic here):
+          1. Live retains (document.id == session UUID): direct DELETE.
+          2. Backfilled docs (random doc.id, session UUID in metadata):
+             paginated metadata sweep.
+
+        Best-effort: hindsight unreachable is logged but not fatal."""
+        url = os.getenv("HINDSIGHT_URL", "").strip() or os.getenv("SIDEKICK_HINDSIGHT_URL", "").strip()
+        if not url:
+            return
+        bank = os.getenv("HINDSIGHT_BANK", "").strip() or os.getenv("SIDEKICK_HINDSIGHT_BANK", "jonathan").strip()
+        api_key = os.getenv("HINDSIGHT_API_KEY", "").strip() or os.getenv("SIDEKICK_HINDSIGHT_API_KEY", "").strip()
+        try:
+            import urllib.request
+            import urllib.parse
+            headers = {"content-type": "application/json"}
+            if api_key:
+                headers["authorization"] = f"Bearer {api_key}"
+            for sid in session_uuids:
+                target = f"{url}/v1/default/banks/{urllib.parse.quote(bank, safe='')}/documents/{urllib.parse.quote(sid, safe='')}"
+                req = urllib.request.Request(target, method="DELETE", headers=headers)
+                try:
+                    with urllib.request.urlopen(req, timeout=5.0) as resp:
+                        if resp.status not in (200, 204, 404):
+                            logger.warning("[sidekick] hindsight DELETE returned %s for sid=%s", resp.status, sid)
+                except urllib.error.HTTPError as e:
+                    if e.code != 404:
+                        logger.warning("[sidekick] hindsight DELETE returned %s for sid=%s", e.code, sid)
+                except Exception as exc:
+                    logger.warning("[sidekick] hindsight DELETE failed for sid=%s: %s", sid, exc)
+        except Exception as exc:
+            logger.warning("[sidekick] hindsight purge setup failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # /v1/responses — turn dispatch with streaming SSE reply
+    # ------------------------------------------------------------------
+    #
+    # OpenAI Responses API compatible. Body: {conversation, input,
+    # stream}. Stream defaults to True. The handler registers a per-
+    # chat-id queue, dispatches the message via handle_message (which
+    # eventually causes the agent to call back into self.send /
+    # self.edit_message — the modified _safe_send_envelope routes
+    # those replies into our queue), and writes them out as SSE
+    # frames per ABSTRACT_AGENT_PROTOCOL.md until reply_final or
+    # TURN_TIMEOUT_S.
+
+    @staticmethod
+    def _coerce_input(field: Any) -> Optional[str]:
+        """Accept a plain string or the array-of-{role, content} form.
+        Returns None for unrecognized shapes."""
+        if isinstance(field, str):
+            return field
+        if isinstance(field, list):
+            parts: List[str] = []
+            for m in field:
+                if not isinstance(m, dict):
+                    continue
+                role = m.get("role")
+                if role not in ("user", "system"):
+                    continue
+                content = m.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+                elif isinstance(content, list):
+                    for c in content:
+                        if isinstance(c, dict) and isinstance(c.get("text"), str):
+                            parts.append(c["text"])
+            if parts:
+                return "\n".join(parts)
+        return None
+
+    async def _handle_responses(self, request: "web.Request") -> "web.StreamResponse":
+        """POST /v1/responses — turn dispatch with optional streaming."""
+        if not self._check_http_auth(request):
+            return web.Response(status=401, text="invalid token")
+        try:
+            body = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            return web.json_response(
+                {"error": {"type": "invalid_request_error",
+                           "message": "body is not valid JSON"}},
+                status=400,
+            )
+
+        conversation = body.get("conversation")
+        input_field = body.get("input")
+        stream = bool(body.get("stream", True))
+        # Sidekick extension: optional `attachments` array — each entry
+        # is `{type, mimeType, fileName, content}` where `content` is a
+        # `data:<mime>;base64,<payload>` URL. NOT part of the OpenAI
+        # Responses API today; tolerated as an additive field so a
+        # raw OAI third-party speaking only the standard surface still
+        # interoperates.
+        raw_attachments = body.get("attachments")
+        attachments = raw_attachments if isinstance(raw_attachments, list) else None
+
+        if not isinstance(conversation, str) or not conversation:
+            return web.json_response(
+                {"error": {"type": "invalid_request_error",
+                           "message": "missing or invalid `conversation`"}},
+                status=400,
+            )
+        if input_field is None:
+            return web.json_response(
+                {"error": {"type": "invalid_request_error",
+                           "message": "missing `input`"}},
+                status=400,
+            )
+        text = self._coerce_input(input_field)
+        if text is None:
+            return web.json_response(
+                {"error": {"type": "invalid_request_error",
+                           "message": "`input` must be a string or array of {role, content}"}},
+                status=400,
+            )
+
+        chat_id = conversation
+        response_id = f"resp_{secrets.token_hex(12)}"
+        message_id = f"msg_{secrets.token_hex(10)}"
+        created_at = int(time.time())
+
+        # Register the turn queue. If a queue already exists for this
+        # chat_id, replace it — the proxy is expected to serialize per-
+        # chat (multiplexed via /api/sidekick/messages on the proxy
+        # side), so this branch is purely defensive.
+        queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=TURN_QUEUE_MAX)
+        self._turn_queues[chat_id] = queue
+
+        if not stream:
+            return await self._handle_responses_blocking(
+                chat_id, text, queue, response_id, message_id, created_at,
+                attachments=attachments,
+            )
+        return await self._handle_responses_streaming(
+            request, chat_id, text, queue, response_id, message_id, created_at,
+            attachments=attachments,
+        )
+
+    async def _handle_responses_blocking(
+        self, chat_id: str, text: str,
+        queue: "asyncio.Queue[Dict[str, Any]]",
+        response_id: str, message_id: str, created_at: int,
+        attachments: Optional[list] = None,
+    ) -> "web.Response":
+        """Non-streaming /v1/responses path. Dispatch, drain the queue
+        until reply_final, return single JSON envelope."""
+        try:
+            # _dispatch_message kicks off agent processing; replies
+            # arrive on `queue` via _safe_send_envelope's fan-out.
+            asyncio.create_task(self._dispatch_message(
+                chat_id=chat_id, text=text, attachments=attachments,
+            ))
+            assembled = ""
+            while True:
+                env = await asyncio.wait_for(queue.get(), timeout=TURN_TIMEOUT_S)
+                t = env.get("type")
+                if t == "reply_delta":
+                    # Hermes emits the accumulated text on each chunk.
+                    # Track the latest; OAI-shape compaction below.
+                    assembled = env.get("text", assembled) or assembled
+                elif t == "reply_final":
+                    break
+            return web.json_response(self._build_response_envelope(
+                response_id, message_id, created_at, assembled,
+            ))
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {"error": {"type": "server_error", "message": "turn timed out"}},
+                status=500,
+            )
+        finally:
+            self._turn_queues.pop(chat_id, None)
+            self._cleanup_turn_attachments(chat_id)
+
+    async def _handle_responses_streaming(
+        self, request: "web.Request",
+        chat_id: str, text: str,
+        queue: "asyncio.Queue[Dict[str, Any]]",
+        response_id: str, message_id: str, created_at: int,
+        attachments: Optional[list] = None,
+    ) -> "web.StreamResponse":
+        """Streaming /v1/responses. Emits OpenAI Responses-API SSE
+        events as the agent produces output."""
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "content-type": "text/event-stream",
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+            },
+        )
+        await resp.prepare(request)
+
+        async def write_sse(event: str, data: Dict[str, Any]) -> None:
+            await resp.write(
+                f"event: {event}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
+            )
+
+        output_index = 0
+        content_index = 0
+        assembled = ""
+        completed_emitted = False
+
+        # Dispatch the message; replies flow back through `queue` via
+        # _safe_send_envelope.
+        asyncio.create_task(self._dispatch_message(
+            chat_id=chat_id, text=text, attachments=attachments,
+        ))
+
+        try:
+            while True:
+                env = await asyncio.wait_for(queue.get(), timeout=TURN_TIMEOUT_S)
+                t = env.get("type")
+                if t == "reply_delta":
+                    # Hermes streams accumulated text. First chunk
+                    # (no edit flag) might be empty or full; subsequent
+                    # chunks (edit=True) carry the running total.
+                    full = env.get("text", "") or ""
+                    if env.get("edit") and full.startswith(assembled):
+                        delta_text = full[len(assembled):]
+                    elif env.get("edit"):
+                        # Non-additive edit (rare). Bump content_index
+                        # so the client knows to start fresh.
+                        delta_text = full
+                        content_index += 1
+                        assembled = ""
+                    else:
+                        # First (non-edit) delta — full content is the delta.
+                        delta_text = full
+                    if delta_text:
+                        await write_sse("response.output_text.delta", {
+                            "type": "response.output_text.delta",
+                            "item_id": message_id,
+                            "output_index": output_index,
+                            "content_index": content_index,
+                            "delta": delta_text,
+                        })
+                        assembled += delta_text
+                elif t == "reply_final":
+                    await write_sse("response.completed", {
+                        "type": "response.completed",
+                        "response": self._build_response_envelope(
+                            response_id, message_id, created_at, assembled,
+                        ),
+                    })
+                    completed_emitted = True
+                    break
+                elif t == "tool_call":
+                    output_index += 1
+                    args = env.get("args", {})
+                    args_str = (
+                        json.dumps(args) if isinstance(args, dict)
+                        else str(env.get("_args_repr") or args)
+                    )
+                    await write_sse("response.output_item.added", {
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {
+                            "type": "function_call",
+                            "id": env.get("call_id", ""),
+                            "name": env.get("tool_name", ""),
+                            "arguments": args_str,
+                        },
+                    })
+                elif t == "tool_result":
+                    result = env.get("result", "")
+                    if isinstance(result, str):
+                        result_out = result[:TOOL_RESULT_MAX_BYTES]
+                    else:
+                        try:
+                            result_out = json.dumps(result)[:TOOL_RESULT_MAX_BYTES]
+                        except Exception:
+                            result_out = str(result)[:TOOL_RESULT_MAX_BYTES]
+                    await write_sse("response.output_item.done", {
+                        "type": "response.output_item.done",
+                        "output_index": output_index,
+                        "item": {
+                            "type": "function_call_output",
+                            "call_id": env.get("call_id", ""),
+                            "output": result_out,
+                        },
+                    })
+                    # Bump for any subsequent output. Reset assembled
+                    # so a follow-up text item starts fresh.
+                    output_index += 1
+                    content_index = 0
+                    assembled = ""
+                elif t == "typing":
+                    await write_sse("response.in_progress", {
+                        "type": "response.in_progress",
+                    })
+                # Other envelope types are out-of-turn and shouldn't
+                # arrive here. If they do (defensive), skip silently
+                # rather than corrupt the response stream.
+        except asyncio.TimeoutError:
+            if not completed_emitted:
+                with contextlib.suppress(Exception):
+                    await write_sse("response.error", {
+                        "type": "response.error",
+                        "error": {"type": "server_error", "message": "turn timed out"},
+                    })
+        except (ConnectionResetError, asyncio.CancelledError):
+            # Client disconnected mid-stream. Cleanup in finally.
+            pass
+        except Exception as exc:
+            logger.warning("[sidekick] /v1/responses error for %s: %s", chat_id, exc)
+            with contextlib.suppress(Exception):
+                await write_sse("response.error", {
+                    "type": "response.error",
+                    "error": {"type": "server_error", "message": str(exc)},
+                })
+        finally:
+            self._turn_queues.pop(chat_id, None)
+            self._cleanup_turn_attachments(chat_id)
+            with contextlib.suppress(Exception):
+                await resp.write_eof()
+        return resp
+
+    @staticmethod
+    def _build_response_envelope(
+        response_id: str, message_id: str,
+        created_at: int, assembled: str,
+    ) -> Dict[str, Any]:
+        """Build the OpenAI Responses-API completed envelope."""
+        return {
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "created_at": created_at,
+            "model": "hermes",
+            "output": [{
+                "type": "message",
+                "id": message_id,
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": assembled}],
+            }],
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # /v1/events — out-of-turn SSE channel
+    # ------------------------------------------------------------------
+    #
+    # Persistent SSE for envelopes not tied to an active /v1/responses
+    # turn: notifications (cron-driven), session_changed (compression-
+    # rotation that didn't happen during a request), late tool events,
+    # etc. The proxy keeps one of these open at all times and fans the
+    # envelopes onto its persistent /api/sidekick/stream channel.
+
+    async def _handle_events(self, request: "web.Request") -> "web.StreamResponse":
+        """GET /v1/events — persistent SSE for out-of-turn envelopes."""
+        if not self._check_http_auth(request):
+            return web.Response(status=401, text="invalid token")
+
+        last_event_id = request.headers.get("Last-Event-ID", "")
+        cursor: Optional[int] = None
+        if last_event_id:
+            try:
+                cursor = int(last_event_id)
+            except ValueError:
+                cursor = None
+
+        queue: "asyncio.Queue[Tuple[int, Dict[str, Any]]]" = (
+            asyncio.Queue(maxsize=TURN_QUEUE_MAX)
+        )
+        self._event_subscribers.add(queue)
+
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "content-type": "text/event-stream",
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+            },
+        )
+        await resp.prepare(request)
+
+        async def write_evt(eid: int, event_name: str, data: Dict[str, Any]) -> None:
+            await resp.write(
+                f"id: {eid}\nevent: {event_name}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
+            )
+
+        try:
+            # Tight reconnect hint so a transient drop resumes sub-second.
+            await resp.write(b"retry: 1000\n\n")
+            # Replay anything from the ring strictly newer than cursor.
+            for eid, env in list(self._event_replay_ring):
+                if cursor is None or eid > cursor:
+                    await write_evt(eid, env.get("type", "event"), env)
+            # Live envelopes.
+            while True:
+                eid, env = await queue.get()
+                await write_evt(eid, env.get("type", "event"), env)
+        except (asyncio.CancelledError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            logger.warning("[sidekick] /v1/events error: %s", exc)
+        finally:
+            self._event_subscribers.discard(queue)
+            with contextlib.suppress(Exception):
+                await resp.write_eof()
+        return resp
 
     # ------------------------------------------------------------------
     # Outbound
@@ -534,17 +1446,68 @@ class SidekickAdapter(BasePlatformAdapter):
         return f"sk-{int(time.time())}-{self._message_seq}"
 
     async def _safe_send_envelope(self, env: Dict[str, Any]) -> bool:
-        """Send a JSON envelope to the proxy if connected. Returns success."""
-        ws = self._client_ws
-        if ws is None or ws.closed:
-            logger.debug("[sidekick] dropping envelope (no client): %s", env.get("type"))
-            return False
-        try:
-            await ws.send_json(env)
-            return True
-        except Exception as exc:
-            logger.warning("[sidekick] send failed (%s): %s", env.get("type"), exc)
-            return False
+        """Fan an outbound envelope to consumers.
+
+        Routing:
+          1. In-turn envelopes (reply_delta, reply_final, tool_call,
+             tool_result, typing) for a chat with an active /v1/responses
+             turn go to that turn's queue. Otherwise they fall through
+             to the out-of-turn channel.
+          2. All other envelope types (notification, session_changed,
+             image, error) and orphaned in-turn envelopes go to the
+             /v1/events out-of-turn channel + replay ring.
+
+        Returns True if at least one consumer accepted the envelope.
+        """
+        env_type = env.get("type", "")
+        chat_id = env.get("chat_id", "")
+        in_turn_types = {"reply_delta", "reply_final", "tool_call",
+                          "tool_result", "typing"}
+
+        if env_type in in_turn_types and chat_id:
+            queue = self._turn_queues.get(chat_id)
+            if queue is not None:
+                try:
+                    queue.put_nowait(env)
+                    return True
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "[sidekick] turn queue full for %s, dropping %s",
+                        chat_id, env_type,
+                    )
+
+        return self._publish_out_of_turn(env)
+
+    def _publish_out_of_turn(self, env: Dict[str, Any]) -> bool:
+        """Push an envelope to /v1/events subscribers + the replay ring.
+
+        Synchronous (asyncio.Queue.put_nowait is non-blocking). Drops
+        envelopes for subscribers whose queue is full — protects the
+        plugin from a hung consumer; the affected client gets gaps,
+        which it can detect via Last-Event-ID skips on reconnect.
+        """
+        self._event_id_counter += 1
+        eid = self._event_id_counter
+        self._event_replay_ring.append((eid, env))
+        if len(self._event_replay_ring) > EVENT_REPLAY_CAP:
+            self._event_replay_ring.pop(0)
+
+        delivered = False
+        dead: List["asyncio.Queue"] = []
+        for q in list(self._event_subscribers):
+            try:
+                q.put_nowait((eid, env))
+                delivered = True
+            except asyncio.QueueFull:
+                logger.warning(
+                    "[sidekick] /v1/events subscriber queue full, dropping %s",
+                    env.get("type"),
+                )
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            self._event_subscribers.discard(q)
+        return delivered
 
     async def send(
         self,
@@ -854,10 +1817,10 @@ class SidekickAdapter(BasePlatformAdapter):
         while True:
             try:
                 # Skip when nobody's listening — the moment a proxy
-                # reconnects, we resume from the cached state, so a
-                # transition that happened during the disconnect still
-                # fires once on reconnect.
-                if self._client_ws is None or self._client_ws.closed:
+                # subscribes to /v1/events we resume from the cached
+                # state, so a transition that happened during the
+                # disconnect still fires once on reconnect.
+                if not self._event_subscribers:
                     await asyncio.sleep(SESSION_POLL_INTERVAL_S)
                     continue
                 await self._poll_sessions_once()
@@ -926,6 +1889,48 @@ class SidekickAdapter(BasePlatformAdapter):
             sid = (entry or {}).get("session_id") if isinstance(entry, dict) else None
             if chat_id and sid:
                 pairs.append((chat_id, sid))
+        return pairs
+
+    def _read_all_chat_pairs(self) -> list:
+        """Walk sessions.json once and return every platform's chats as
+        ``[(chat_id, session_id, source, chat_type), …]``. Powers the
+        gateway-extension `/v1/gateway/conversations` endpoint.
+
+        Same parsing rules as the proxy's `parseSessionKey`
+        (server-lib/backends/hermes-gateway/session-index.ts:22): keys
+        match ``agent:main:<platform>:<chat_type>:<chat_id>`` with
+        chat_id allowed to contain colons (whatsapp JIDs etc.)."""
+        import json as _json
+
+        if self._state_db_path is None or not self._state_db_path.exists():
+            return []
+        sessions_index = self._state_db_path.parent / "sessions" / "sessions.json"
+        if not sessions_index.exists():
+            return []
+        try:
+            with open(sessions_index, encoding="utf-8") as f:
+                idx = _json.load(f)
+        except Exception:
+            return []
+        if not isinstance(idx, dict):
+            return []
+        prefix = "agent:main:"
+        pairs: list = []
+        for key, entry in idx.items():
+            if not isinstance(key, str) or not key.startswith(prefix):
+                continue
+            rest = key[len(prefix):]
+            parts = rest.split(":")
+            if len(parts) < 3:
+                continue
+            platform, chat_type, *id_parts = parts
+            chat_id = ":".join(id_parts)
+            if not platform or not chat_type or not chat_id:
+                continue
+            sid = (entry or {}).get("session_id") if isinstance(entry, dict) else None
+            if not sid:
+                continue
+            pairs.append((chat_id, sid, platform, chat_type))
         return pairs
 
     def _resolve_chat_id_from_session_id(self, session_id: str) -> Optional[str]:

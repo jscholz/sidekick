@@ -134,6 +134,7 @@
 
 import * as conn from './connection.ts';
 import { log, diag } from '../../util/log.ts';
+import type { STTProvider, TranscriptEvent, Unsubscribe } from '../../audio/stt-provider.ts';
 
 // ── Diagnostic flag ────────────────────────────────────────────────────
 
@@ -187,8 +188,11 @@ let lastFinalText = '';
 /** Re-entrancy guard for our own writes. */
 let updating = false;
 
-/** Saved data-channel listener so we can restore it on stop(). */
-let savedListener: ((ev: any) => void) | null = null;
+/** Active STTProvider for the in-flight session. Held so stop() can
+ *  unwind even if the caller didn't pass it back. */
+let activeProvider: STTProvider | null = null;
+/** Unsubscribe handle returned by provider.onTranscript. */
+let activeUnsubscribe: Unsubscribe | null = null;
 let onStateChangeCb: ((opening: boolean, error?: string) => void) | null = null;
 
 /** Cursor position captured at the GESTURE site (e.g. mic-button
@@ -227,8 +231,8 @@ export function init(input: HTMLTextAreaElement | null): void {
   if (dictateDebugOn) log('[dictate] debug logging enabled');
 }
 
-/** Open a stream-mode WebRTC connection and start routing user
- *  transcripts to the composer with cursor-aware injection.
+/** Open a stream-mode STT session and start routing user transcripts
+ *  to the composer with cursor-aware injection.
  *
  *  `initialCursor` should be the textarea selectionStart captured at the
  *  user's gesture site (mic-button pointerdown, hotkey handler) BEFORE
@@ -236,10 +240,16 @@ export function init(input: HTMLTextAreaElement | null): void {
  *  session uses this as the anchor. Pass null if the gesture site
  *  couldn't reasonably know the cursor position; we'll fall back to
  *  reading selectionStart at first-interim time (correct on browsers
- *  that preserve selection across blur, wrong on ones that don't). */
+ *  that preserve selection across blur, wrong on ones that don't).
+ *
+ *  `provider` is the STT backend. Defaults to the WebRTC implementation
+ *  (`conn.defaultWebRTCSTTProvider`) so existing callers don't change.
+ *  Tests inject a `MockSTTProvider` to fire synthetic transcript events
+ *  without touching WebRTC. */
 export async function start(opts: {
   sessionId?: string | null;
   initialCursor?: number | null;
+  provider?: STTProvider;
 } = {}): Promise<void> {
   if (active) {
     log('[dictate] start() while already active — no-op');
@@ -256,16 +266,19 @@ export async function start(opts: {
   initialCursor = (typeof opts.initialCursor === 'number') ? opts.initialCursor : null;
   if (dictateDebugOn) log('[dictate] start initialCursor=', initialCursor);
 
-  // Replace whatever data-channel listener was wired (call-mode routing
-  // in main.ts) for the duration of this session. Restored on stop().
-  savedListener = conn.getDataChannelListener();
-  conn.setDataChannelListener(dataChannelHandler);
+  const provider: STTProvider = opts.provider ?? conn.defaultWebRTCSTTProvider;
+  // Subscribe BEFORE start() so we don't miss any opening events.
+  activeUnsubscribe = provider.onTranscript(transcriptHandler);
+  activeProvider = provider;
 
   try {
-    await conn.open('stream', { sessionId: opts.sessionId ?? null });
+    await provider.start({ sessionId: opts.sessionId ?? null });
   } catch (e: any) {
-    if (savedListener) conn.setDataChannelListener(savedListener);
-    savedListener = null;
+    if (activeUnsubscribe) {
+      try { activeUnsubscribe(); } catch { /* ignore */ }
+    }
+    activeUnsubscribe = null;
+    activeProvider = null;
     notify(false, e?.message || String(e));
     throw e;
   }
@@ -273,25 +286,28 @@ export async function start(opts: {
   notify(true);
 }
 
-/** Close the stream and restore the prior data-channel listener.
- *  Idempotent and safe to call when not active. */
+/** Stop the STT session and unwind listener state. Idempotent and
+ *  safe to call when not active. */
 export async function stop(): Promise<void> {
   if (!active) {
-    if (savedListener) {
-      conn.setDataChannelListener(savedListener);
-      savedListener = null;
+    if (activeUnsubscribe) {
+      try { activeUnsubscribe(); } catch { /* ignore */ }
+      activeUnsubscribe = null;
     }
+    activeProvider = null;
     return;
   }
   active = false;
+  const provider = activeProvider;
+  activeProvider = null;
   try {
-    await conn.close();
+    if (provider) await provider.stop();
   } catch (e: any) {
-    diag('[dictate] close err', e?.message);
+    diag('[dictate] stop err', e?.message);
   }
-  if (savedListener) {
-    conn.setDataChannelListener(savedListener);
-    savedListener = null;
+  if (activeUnsubscribe) {
+    try { activeUnsubscribe(); } catch { /* ignore */ }
+    activeUnsubscribe = null;
   }
   // Clear per-session state so a re-start() captures fresh.
   resetUtterance('stop');
@@ -299,10 +315,9 @@ export async function stop(): Promise<void> {
   notify(false);
 }
 
-// ── Data-channel routing ───────────────────────────────────────────────
+// ── STT transcript routing ─────────────────────────────────────────────
 
-function dataChannelHandler(ev: any): void {
-  if (!ev || ev.type !== 'transcript' || typeof ev.text !== 'string') return;
+function transcriptHandler(ev: TranscriptEvent): void {
   if (ev.role !== 'user') return;
   const trimmed = ev.text.trim();
   if (ev.is_final) {
@@ -332,7 +347,7 @@ function handleContentFinal(text: string): void {
   if (!composerInput) return;
   dlog('final<-', { text: text.slice(0, 80) });
   // Stale / duplicate final — same text as the last segment we baked.
-  // Deepgram occasionally re-emits a Results frame; don't double-write.
+  // STT providers occasionally re-emit a finalized segment; don't double-write.
   if (text === lastFinalText) {
     dlog('final drop (duplicate)', { text });
     return;
