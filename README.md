@@ -27,41 +27,52 @@ Talks to any agent that speaks the abstract agent contract
 - Ambient clock + weather widget in the corner; tap to expand into a HUD
 - Attachments: camera + image picker, with model-capability gating
 
-## Run it
+## Install
+
+**One command, one URL.** Mac or Linux, Node 22+:
 
 ```bash
-cp .env.example .env       # fill in DEEPGRAM_API_KEY at minimum
+curl -fsSL https://raw.githubusercontent.com/jscholz/sidekick/master/install.sh | bash
+```
+
+Then open <http://localhost:3001>.
+
+That clones to `~/sidekick`, installs deps for the proxy + the in-tree stub agent, copies `.env.example` → `.env`, and starts everything. First-run uses an echo agent on port 4001 — no API keys, no Python, no hermes. To swap the LLM, edit `agent/src/llm/` (Gemini and Ollama adapters included). To point at a real agent (hermes-plugin or any `/v1/*`-speaking server), edit `~/sidekick/.env` → `SIDEKICK_PLATFORM_URL` + `SIDEKICK_PLATFORM_TOKEN` and restart.
+
+Install as a PWA from the browser menu for full lockscreen / background-audio support on mobile.
+
+### Manual install
+
+If you'd rather not pipe a remote script:
+
+```bash
+git clone https://github.com/jscholz/sidekick.git
+cd sidekick
 npm install
+(cd agent && npm install)
+cp .env.example .env
 npm start
 ```
 
-Then open `http://localhost:3001` (install as a PWA from the browser menu for full lockscreen / background-audio support).
-
-The default backend is Hermes. See [Backend setup](#backend-setup) below.
-
 ### Configuration
 
-Two layers:
+Two layers, both optional:
 
-- **`sidekick.config.yaml`** (optional, gitignored) — non-secret deployment tuning. Copy `config.example.yaml` → `sidekick.config.yaml` and edit to customize your instance (app name, theme, backend choice, preferred-model filter, etc.). Every key here can be overridden by an env var of the matching name — handy for Docker/CI.
-- **`.env`** (gitignored) — secrets only: API keys, bearer tokens. Precedence: env vars > config file > built-in default.
-
-See `.env.example` for the full annotated env var list and `config.example.yaml` for the YAML schema.
+- **`.env`** (gitignored) — secrets + per-deployment overrides. Copy from `.env.example`. Precedence: env vars > config file > built-in default.
+- **`sidekick.config.yaml`** (optional, gitignored) — non-secret deployment tuning. Copy `example.config.yaml` → `sidekick.config.yaml` to customize app name, theme, preferred-model filter, etc. Every key can be overridden by the matching env var — handy for Docker/CI.
 
 The essentials:
 
-| Variable | Required | What |
-|---|---|---|
-| `DEEPGRAM_API_KEY` | yes | Deepgram key — powers STT (audio-bridge: live + batch via `/transcribe`) and Aura TTS (`/tts`) |
-| `SIDEKICK_PLATFORM_URL` | yes | Upstream agent URL (default `http://127.0.0.1:8645`). Hermes-plugin's HTTP server, the stub agent, or any `/v1/responses`-speaking server. |
-| `SIDEKICK_PLATFORM_TOKEN` | yes | Bearer token shared with the upstream — matches `SIDEKICK_PLATFORM_TOKEN` in your `~/.hermes/.env` (hermes path) or your stub-agent invocation. |
-| `GOOGLE_API_KEY` | no | Enables `/gen-image` (Gemini image gen) |
-| `MAPS_EMBED_KEY` | no | Google Maps Embed API key for map cards |
-| `OPENROUTER_API_KEY` | no | Populates the model picker (hermes) |
-| `SIDEKICK_APP_NAME` | no | Display name (default `SideKick`) |
-| `SIDEKICK_AGENT_LABEL` | no | Speaker label for agent bubbles / lockscreen |
-| `SIDEKICK_THEME_PRIMARY` | no | Override the sage `--primary` CSS variable with any color |
-| `PORT` | no | Defaults to 3001 |
+| Variable | What |
+|---|---|
+| `SIDEKICK_PLATFORM_URL` | Upstream agent URL (default `http://127.0.0.1:4001` — the in-tree stub). Point at hermes-plugin's HTTP server or any `/v1/*`-speaking server to swap. |
+| `SIDEKICK_PLATFORM_TOKEN` | Bearer token shared with the upstream. Empty for the stub (open mode). For hermes: matches `SIDEKICK_PLATFORM_TOKEN` in your `~/.hermes/.env`. |
+| `DEEPGRAM_API_KEY` | Optional — enables voice (mic STT + Aura TTS). Without it, sidekick is text-only. |
+| `GOOGLE_API_KEY` | Optional — enables `/gen-image` (Gemini image gen). |
+| `MAPS_EMBED_KEY` | Optional — Google Maps Embed key for map cards. |
+| `OPENROUTER_API_KEY` | Optional — Settings → Model picker (currently dormant; queued). |
+| `SIDEKICK_APP_NAME` / `SIDEKICK_AGENT_LABEL` / `SIDEKICK_THEME_PRIMARY` | Branding overrides. |
+| `PORT` | Proxy port (default 3001). |
 
 ## Backend setup
 

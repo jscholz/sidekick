@@ -32,23 +32,22 @@ export { handleSidekickStream } from './stream.ts';
 let upstream: UpstreamAgent | null = null;
 
 /** Wire env-derived config and construct the upstream singleton.
- *  Called once from server.ts at startup. If the token is empty, the
- *  /api/sidekick/* endpoints fail-fast with 503 — there's no point
- *  silently proxying nothing. */
+ *  Called once from server.ts at startup. The upstream is always
+ *  constructed; an empty token is fine for stub-agent / open-mode
+ *  upstreams — the impl just doesn't add the Authorization header.
+ *  Hermes-plugin will 401 if the token doesn't match, which is the
+ *  right error mode for that case. */
 export function init(opts: { token: string; url: string }): void {
+  // Tolerate legacy SIDEKICK_PLATFORM_URL values that include the
+  // ws://…/ws form (the WS path is gone but old configs may still
+  // carry it). Normalize to the HTTP root.
+  const httpUrl = opts.url
+    .replace(/^ws:/, 'http:').replace(/^wss:/, 'https:')
+    .replace(/\/ws\/?$/, '');
+  upstream = new HTTPAgentUpstream({ url: httpUrl, token: opts.token });
   if (!opts.token) {
-    console.warn(
-      '[sidekick] SIDEKICK_PLATFORM_TOKEN unset — /api/sidekick/* '
-      + 'endpoints will return 503 until configured.',
-    );
+    console.log(`[sidekick] upstream ready (${httpUrl}) — open mode (no token)`);
   } else {
-    // Tolerate legacy SIDEKICK_PLATFORM_URL values that include the
-    // ws://…/ws form (the WS path is gone but old configs may still
-    // carry it). Normalize to the HTTP root.
-    const httpUrl = opts.url
-      .replace(/^ws:/, 'http:').replace(/^wss:/, 'https:')
-      .replace(/\/ws\/?$/, '');
-    upstream = new HTTPAgentUpstream({ url: httpUrl, token: opts.token });
     console.log(`[sidekick] upstream ready (${httpUrl})`);
   }
   // Wire the stream fan-out so the /v1/events subscription is in place
