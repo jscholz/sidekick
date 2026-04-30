@@ -60,12 +60,15 @@ export interface SettingDef {
   label: string;
   description?: string;
   category?: string;
-  type: 'enum' | 'slider' | 'toggle' | 'text';
-  value: string | number | boolean;
+  type: 'enum' | 'slider' | 'toggle' | 'text' | 'string-list';
+  /** Type matches `type`: string for enum/text, number for slider,
+   *  boolean for toggle, string[] for string-list. */
+  value: string | number | boolean | string[];
   options?: Array<{ value: string; label: string; description?: string }>;
   min?: number;
   max?: number;
   step?: number;
+  /** Hint text inside the input (text + string-list types). */
   placeholder?: string;
 }
 

@@ -272,6 +272,14 @@ export class FakeAgent {
         return;
       }
     }
+    if (def.type === 'string-list') {
+      if (!Array.isArray(v) || !v.every((e) => typeof e === 'string')) {
+        this.json(res, 400, {
+          error: { message: `value must be string[]; got ${JSON.stringify(v)}` },
+        });
+        return;
+      }
+    }
     def.value = v;
     this.json(res, 200, def);
   }

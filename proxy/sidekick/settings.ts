@@ -16,9 +16,6 @@
 
 import { getUpstream } from './index.ts';
 import { UpstreamHTTPError } from './upstream.ts';
-import {
-  PREFERRED_MODELS_GLOBS, isPreferredModel,
-} from '../preferred-models.ts';
 
 /** Setting ids appear in the URL path. Restrict to a conservative
  *  alphabet so an id can never escape its slot or carry surprising
@@ -50,29 +47,10 @@ export async function handleSidekickSettingsSchema(_req, res) {
     }));
     return;
   }
-  // Apply the sidekick-side preferred-models filter to any enum
-  // setting whose id is "model". Source of truth is models.preferred
-  // in sidekick.config.yaml (also editable from Settings → Preferred
-  // models chip input via /api/preferred-models). The filter is
-  // additive on top of whatever the agent already returned — agents
-  // can pre-filter; this gives sidekick deployments the final say
-  // without round-tripping through agent config.
-  if (PREFERRED_MODELS_GLOBS.length > 0) {
-    schema = schema.map((def: any) => {
-      if (def?.id !== 'model' || def.type !== 'enum') return def;
-      const opts = Array.isArray(def.options) ? def.options : [];
-      const filtered = opts.filter((o: any) => isPreferredModel(String(o?.value ?? '')));
-      // Always include the current value, even if the filter excluded
-      // it — otherwise the picker can't display "what's set now."
-      const cur = def.value;
-      if (cur && !filtered.some((o: any) => o.value === cur)) {
-        const passthrough = opts.find((o: any) => o.value === cur);
-        if (passthrough) filtered.unshift(passthrough);
-        else filtered.unshift({ value: cur, label: String(cur) });
-      }
-      return { ...def, options: filtered };
-    });
-  }
+  // No proxy-side filtering — the agent owns the catalog AND the
+  // filter (e.g. hermes-plugin reads its `sidekick.preferred_models`
+  // config and pre-filters before returning). Sidekick is a thin
+  // forward.
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ object: 'list', data: schema }));
 }

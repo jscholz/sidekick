@@ -319,8 +319,6 @@ export function hydrate(handlers: {
   const setAutoFallback = $inp('set-auto-fallback');
   const setSttKeyterms = document.getElementById('set-stt-keyterms') as HTMLInputElement | null;
   const keytermsChips = document.getElementById('keyterms-chips');
-  const setPreferredModels = document.getElementById('set-preferred-models') as HTMLInputElement | null;
-  const preferredModelsChips = document.getElementById('preferred-models-chips');
   const setHotkeyCall = $inp('set-hotkey-call');
   const setHotkeyAutoSend = $inp('set-hotkey-autosend');
   const setHotkeyMic = $inp('set-hotkey-mic');
@@ -460,74 +458,9 @@ export function hydrate(handlers: {
   // sidekick.config.yaml models.preferred list; POST invalidates the
   // server's openrouter-catalog cache so the model picker re-partitions
   // on the next refresh without a restart.
-  if (setPreferredModels && preferredModelsChips) {
-    let globs: string[] = [];
-    const renderChips = () => {
-      preferredModelsChips.innerHTML = '';
-      for (const g of globs) {
-        const chip = document.createElement('span');
-        chip.className = 'kt-chip';
-        chip.textContent = g;
-        const x = document.createElement('button');
-        x.type = 'button';
-        x.className = 'kt-chip-x';
-        x.setAttribute('aria-label', `remove ${g}`);
-        x.textContent = '×';
-        x.onclick = () => { globs = globs.filter(v => v !== g); renderChips(); savePreferredModels(); };
-        chip.appendChild(x);
-        preferredModelsChips.appendChild(chip);
-      }
-    };
-    async function loadPreferredModels() {
-      try {
-        const { fetchWithTimeout } = await import('./util/fetchWithTimeout.ts');
-        const r = await fetchWithTimeout('/api/preferred-models', { timeoutMs: 5_000 });
-        if (!r.ok) return;
-        const body = await r.text();
-        const seen = new Set<string>();
-        const out: string[] = [];
-        for (const line of body.split('\n')) {
-          for (const part of line.split(',')) {
-            const t = part.trim();
-            if (t && !seen.has(t)) { seen.add(t); out.push(t); }
-          }
-        }
-        globs = out;
-        renderChips();
-      } catch {}
-    }
-    async function savePreferredModels() {
-      try {
-        const { fetchWithTimeout } = await import('./util/fetchWithTimeout.ts');
-        await fetchWithTimeout('/api/preferred-models', {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain' },
-          body: globs.join('\n') + (globs.length ? '\n' : ''),
-          timeoutMs: 5_000,
-        });
-        // Nudge the model picker to re-partition with the new filter.
-        refreshModelState().catch(() => {});
-      } catch {}
-    }
-    const commit = () => {
-      const t = setPreferredModels.value.trim().replace(/,$/, '').trim();
-      if (!t) { setPreferredModels.value = ''; return; }
-      if (!globs.includes(t)) {
-        globs.push(t);
-        renderChips();
-        savePreferredModels();
-      }
-      setPreferredModels.value = '';
-    };
-    setPreferredModels.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(); }
-      else if (e.key === 'Backspace' && !setPreferredModels.value && globs.length) {
-        globs.pop(); renderChips(); savePreferredModels();
-      }
-    });
-    setPreferredModels.addEventListener('blur', () => { if (setPreferredModels.value.trim()) commit(); });
-    loadPreferredModels();
-  }
+  // (Legacy preferred-models chip wiring removed — agentSettings.ts
+  // renders preferred_models as a `string-list` SettingDef declared
+  // by the agent via /v1/settings/schema.)
 
   if (setTtsEngine) setTtsEngine.onchange = () => {
     set('ttsEngine', setTtsEngine.value);

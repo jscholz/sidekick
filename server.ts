@@ -25,10 +25,6 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import YAML from 'yaml';
 import { validators } from './src/cards/validators.ts';
-import {
-  rebuildPreferredModels,
-  PREFERRED_MODELS_RAW,
-} from './proxy/preferred-models.ts';
 import * as sidekick from './proxy/sidekick/index.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -90,14 +86,6 @@ function reloadConfigIfChanged(): boolean {
     lastConfigMtime = m;
     deployDoc = loadDeployConfigDoc();
     DEPLOY_CFG = cfgAsJS();
-    // Re-derive any runtime state that captured config values at startup.
-    const cfg = DEPLOY_CFG?.models?.preferred;
-    if (Array.isArray(cfg)) {
-      rebuildPreferredModels(cfg.map((s: any) => String(s).trim()).filter(Boolean));
-    } else {
-      rebuildPreferredModels([]);
-    }
-    console.log('[config] reloaded — preferred globs:', PREFERRED_MODELS_RAW);
     return true;
   } catch (e: any) {
     console.warn('[config] reload failed:', e.message);
@@ -702,49 +690,6 @@ async function handleKeytermsGet(_req, res) {
   res.end(body);
 }
 
-/** Serve the current preferred-model globs. Newline-separated for the
- *  chip-input UI. Sourced from models.preferred in the yaml, falling
- *  through to the SIDEKICK_PREFERRED_MODELS env var (comma-sep) for
- *  deployments that haven't switched to the yaml yet. */
-async function handlePreferredModelsGet(_req, res) {
-  res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-cache' });
-  res.end(PREFERRED_MODELS_RAW.join('\n') + (PREFERRED_MODELS_RAW.length ? '\n' : ''));
-}
-
-/** Write the request body (newline- or comma-separated globs) to the
- *  yaml's models.preferred list and re-derive the runtime matcher so
- *  the next picker fetch partitions correctly without a server
- *  restart. */
-async function handlePreferredModelsPost(req, res) {
-  const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c);
-  const body = Buffer.concat(chunks).toString('utf8');
-  const seen = new Set<string>();
-  const globs: string[] = [];
-  for (const line of body.split('\n')) {
-    const nocomment = line.replace(/#.*$/, '');
-    for (const part of nocomment.split(',')) {
-      const t = part.trim();
-      if (t && !seen.has(t)) { seen.add(t); globs.push(t); }
-    }
-  }
-  try {
-    const target = CONFIG_PATH || path.join(__dirname, 'sidekick.config.yaml');
-    if (!deployDoc) deployDoc = YAML.parseDocument('models:\n  preferred: []\n');
-    deployDoc.setIn(['models', 'preferred'], globs);
-    await fs.writeFile(target, deployDoc.toString(), 'utf8');
-    DEPLOY_CFG = cfgAsJS();
-    // Re-derive the live matcher. PREFERRED_MODELS_RAW/GLOBS are module
-    // consts, so swap them via reassignment through let if needed.
-    rebuildPreferredModels(globs);
-    res.writeHead(204); res.end();
-  } catch (e: any) {
-    console.error('preferred-models write failed:', e.message);
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end(`write failed: ${e.message}`);
-  }
-}
-
 function handleConfig(_req, res) {
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
   res.end(JSON.stringify({
@@ -791,28 +736,6 @@ sidekick.init({
   url: cfgVal('SIDEKICK_PLATFORM_URL', 'backend.sidekick_platform.url',
     'http://127.0.0.1:8645') as string,
 });
-
-// Cold-start initialization of the preferred-models matcher. Without
-// this, PREFERRED_MODELS_RAW stays at its module-default `[]` until
-// the first config-mtime change picks up the yaml value via
-// reloadConfigIfChanged() — which never happens on a stable deployment
-// where the yaml hasn't been edited since boot.
-//
-// Falls back to SIDEKICK_PREFERRED_MODELS env var (comma-sep) for
-// deployments that haven't switched to the yaml yet.
-(() => {
-  const cfg = DEPLOY_CFG?.models?.preferred;
-  if (Array.isArray(cfg)) {
-    rebuildPreferredModels(cfg.map((s: any) => String(s).trim()).filter(Boolean));
-    return;
-  }
-  const env = process.env.SIDEKICK_PREFERRED_MODELS;
-  if (env) {
-    rebuildPreferredModels(env.split(',').map(s => s.trim()).filter(Boolean));
-    return;
-  }
-  rebuildPreferredModels([]);
-})();
 
 // ── WebRTC voice transport proxy: /api/rtc/* → audio-bridge /v1/rtc/* ────────
 // The audio bridge (~/code/sidekick/audio-bridge/) is a standalone Python
@@ -904,8 +827,6 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === 'GET' && req.url === '/config') return handleConfig(req, res);
   if (req.method === 'GET' && req.url === '/api/keyterms') return handleKeytermsGet(req, res);
-  if (req.method === 'GET' && req.url === '/api/preferred-models') return handlePreferredModelsGet(req, res);
-  if (req.method === 'POST' && req.url === '/api/preferred-models') return handlePreferredModelsPost(req, res);
   if (req.method === 'POST' && req.url.startsWith('/tts')) return handleTts(req, res);
   if (req.method === 'POST' && req.url.startsWith('/gen-image')) return handleGenImage(req, res);
   if (req.method === 'POST' && req.url === '/canvas/show') return handleCanvasShow(req, res);

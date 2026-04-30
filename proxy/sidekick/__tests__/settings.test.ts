@@ -120,6 +120,63 @@ test('settings update — validation error propagates 400', async () => {
   }
 });
 
+test('settings update — string-list type round-trips a list', async () => {
+  const rig = await startRig();
+  try {
+    const def: SettingDef = {
+      id: 'preferred_models',
+      label: 'Preferred models',
+      type: 'string-list',
+      value: ['anthropic/*'],
+      placeholder: 'e.g. anthropic/* + Enter',
+    };
+    rig.fakeAgent.setSettingsSchema([def]);
+
+    // Schema endpoint surfaces the new type + initial list.
+    const sR = await fetch(`${rig.proxyUrl}/api/sidekick/settings/schema`);
+    assert.equal(sR.status, 200);
+    const sBody = await sR.json();
+    assert.equal(sBody.data[0].type, 'string-list');
+    assert.deepEqual(sBody.data[0].value, ['anthropic/*']);
+
+    // Update with a fresh list — chip add/remove sends the entire
+    // updated list per the contract.
+    const r = await fetch(`${rig.proxyUrl}/api/sidekick/settings/preferred_models`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ value: ['anthropic/*', 'google/gemini-*'] }),
+    });
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.deepEqual(body.value, ['anthropic/*', 'google/gemini-*']);
+  } finally {
+    await rig.stop();
+  }
+});
+
+test('settings update — string-list rejects non-array body', async () => {
+  const rig = await startRig();
+  try {
+    rig.fakeAgent.setSettingsSchema([{
+      id: 'preferred_models',
+      label: 'Preferred models',
+      type: 'string-list',
+      value: [],
+    }]);
+
+    const r = await fetch(`${rig.proxyUrl}/api/sidekick/settings/preferred_models`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ value: 'not-a-list' }),
+    });
+    assert.equal(r.status, 400);
+    const body = await r.json();
+    assert.match(body.error?.message ?? '', /string\[\]/);
+  } finally {
+    await rig.stop();
+  }
+});
+
 test('settings update — id validated at proxy boundary', async () => {
   const rig = await startRig();
   try {

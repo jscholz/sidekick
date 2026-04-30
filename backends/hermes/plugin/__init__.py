@@ -1129,34 +1129,59 @@ class SidekickAdapter(BasePlatformAdapter):
     # provider) is additive: append to _build_settings_schema() and
     # branch _apply_setting() on id.
 
-    def _build_settings_schema(self) -> List[Dict[str, Any]]:
-        """Build the SettingDef[] list. Reads hermes config.yaml for
-        the current model and openrouter for the catalog. Filters
-        the catalog by SIDEKICK_PREFERRED_MODELS (comma-separated
-        glob list — same env the legacy proxy honored)."""
-        import fnmatch
-
-        # Current model from ~/.hermes/config.yaml. Hermes stores it as
-        # either a scalar (`model: google/gemma-4-26b-a4b-it`) or a dict
-        # (`model: {default: ..., provider: ...}`). hermes_cli.config
-        # has a normalize step but we read raw to avoid pulling in the
-        # full-config-load surface (slower, plus loads providers, etc.);
-        # handle both shapes inline.
-        current_model = ""
+    def _read_hermes_config(self) -> Dict[str, Any]:
+        """Snapshot of ~/.hermes/config.yaml as a dict (or {} on failure).
+        Used by every settings read so we work from one consistent
+        view per request. Raw read — no normalization."""
         try:
             import yaml
             from hermes_cli.config import get_config_path
             cfg_path = get_config_path()
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                model_cfg = cfg.get("model")
-                if isinstance(model_cfg, dict):
-                    current_model = (model_cfg.get("default") or "").strip()
-                elif isinstance(model_cfg, str):
-                    current_model = model_cfg.strip()
+            if not cfg_path.exists():
+                return {}
+            with open(cfg_path, encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
         except Exception as e:
-            logger.warning("[sidekick] settings: read current model failed: %s", e)
+            logger.warning("[sidekick] settings: read hermes config failed: %s", e)
+            return {}
+
+    def _read_preferred_models(self, cfg: Dict[str, Any]) -> List[str]:
+        """Resolve the preferred-models glob list. Source of truth:
+        `sidekick.preferred_models:` in ~/.hermes/config.yaml (a yaml
+        list of glob strings). Falls back to SIDEKICK_PREFERRED_MODELS
+        env (comma-separated) for env-only deployments. Empty result
+        = no filter (full catalog)."""
+        sk = cfg.get("sidekick") if isinstance(cfg.get("sidekick"), dict) else {}
+        raw = sk.get("preferred_models")
+        if isinstance(raw, list):
+            out = [str(g).strip() for g in raw if isinstance(g, str) and str(g).strip()]
+            if out:
+                return out
+        env_raw = (os.environ.get("SIDEKICK_PREFERRED_MODELS") or "").strip()
+        if env_raw:
+            return [g.strip() for g in env_raw.split(",") if g.strip()]
+        return []
+
+    def _build_settings_schema(self) -> List[Dict[str, Any]]:
+        """Build the SettingDef[] list. Reads hermes config.yaml for
+        the current model + the preferred-models glob filter (under
+        `sidekick.preferred_models:`), and openrouter for the catalog."""
+        import fnmatch
+        cfg = self._read_hermes_config()
+
+        # Current model — hermes stores it as scalar
+        # (`model: google/gemma-4-26b-a4b-it`) or dict
+        # (`model: {default: ..., provider: ...}`); handle both.
+        current_model = ""
+        model_cfg = cfg.get("model")
+        if isinstance(model_cfg, dict):
+            current_model = (model_cfg.get("default") or "").strip()
+        elif isinstance(model_cfg, str):
+            current_model = model_cfg.strip()
+
+        # Preferred-models filter (string-list — also exposed as its
+        # own SettingDef below so the chip UI can edit it).
+        preferred = self._read_preferred_models(cfg)
 
         # Openrouter catalog. fetch_openrouter_models returns a list of
         # `(model_id, source_label)` tuples (curated by hermes — only
@@ -1189,23 +1214,17 @@ class SidekickAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("[sidekick] settings: openrouter catalog fetch failed: %s", e)
 
-        # Apply preferred-models filter (sidekick-specific env). When
-        # empty, keep the full catalog. The PWA never sees the unfiltered
-        # list — sidekick deployments are opinionated about which models
-        # they expose to the user.
-        preferred_raw = (os.environ.get("SIDEKICK_PREFERRED_MODELS") or "").strip()
-        if preferred_raw and catalog:
-            globs = [g.strip() for g in preferred_raw.split(",") if g.strip()]
-            if globs:
-                catalog = [
-                    e for e in catalog
-                    if any(fnmatch.fnmatch(e["value"], g) for g in globs)
-                ]
+        # Apply preferred-models filter to the catalog. Empty list =
+        # no filter (full catalog).
+        if preferred and catalog:
+            catalog = [
+                e for e in catalog
+                if any(fnmatch.fnmatch(e["value"], g) for g in preferred)
+            ]
 
         # Always include the current model in the options[] list so the
         # picker can show "what's set now" even if the catalog filter
-        # excluded it (e.g. user has SIDEKICK_PREFERRED_MODELS=anthropic/*
-        # but the current default is google/gemma-4*).
+        # excluded it.
         if current_model and not any(e["value"] == current_model for e in catalog):
             catalog.insert(0, {"value": current_model, "label": current_model})
 
@@ -1221,6 +1240,20 @@ class SidekickAdapter(BasePlatformAdapter):
                 "type": "enum",
                 "value": current_model,
                 "options": catalog,
+            },
+            {
+                "id": "preferred_models",
+                "label": "Preferred models",
+                "description": (
+                    "Glob patterns that filter the model dropdown above "
+                    "(e.g. anthropic/*, google/gemini-*). Empty = full "
+                    "openrouter catalog. Stored in ~/.hermes/config.yaml "
+                    "under sidekick.preferred_models."
+                ),
+                "category": "Agent",
+                "type": "string-list",
+                "value": preferred,
+                "placeholder": "e.g. anthropic/* + Enter",
             },
         ]
 
@@ -1283,7 +1316,70 @@ class SidekickAdapter(BasePlatformAdapter):
         _SettingsNotFoundError to map to 400 / 404 respectively."""
         if sid == "model":
             return self._apply_model_setting(value)
+        if sid == "preferred_models":
+            return self._apply_preferred_models_setting(value)
         raise _SettingsNotFoundError(f"unknown setting: {sid}")
+
+    def _apply_preferred_models_setting(self, value: Any) -> Dict[str, Any]:
+        """Persist the preferred-models glob list to
+        ~/.hermes/config.yaml under `sidekick.preferred_models:`. The
+        next /v1/settings/schema response uses the new list to filter
+        the catalog. Already-cached agents are unaffected — this knob
+        is purely a UI filter, not an agent-runtime setting."""
+        if not isinstance(value, list):
+            raise _SettingsValidationError("preferred_models value must be a list of strings")
+        cleaned: List[str] = []
+        seen: Set[str] = set()
+        for entry in value:
+            if not isinstance(entry, str):
+                raise _SettingsValidationError(
+                    f"preferred_models entries must be strings; got {type(entry).__name__}"
+                )
+            t = entry.strip()
+            if not t or t in seen:
+                continue
+            # Conservative charset — globs are ASCII printables minus
+            # whitespace + a few risky ones. Lets a forks-edit survive
+            # round-trip through yaml without surprises.
+            if any(ch in t for ch in (" ", "\t", "\n", "\r")):
+                raise _SettingsValidationError(
+                    f"preferred_models entry has whitespace: {t!r}"
+                )
+            seen.add(t)
+            cleaned.append(t)
+        try:
+            import yaml
+            from hermes_cli.config import get_config_path
+            cfg_path = get_config_path()
+            cfg: Dict[str, Any] = {}
+            if cfg_path.exists():
+                with open(cfg_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            sk = cfg.get("sidekick")
+            if not isinstance(sk, dict):
+                sk = {}
+                cfg["sidekick"] = sk
+            sk["preferred_models"] = cleaned
+            from hermes_cli.config import save_config
+            save_config(cfg)
+        except Exception as e:
+            logger.exception("[sidekick] preferred_models persist failed")
+            raise _SettingsValidationError(f"failed to write hermes config: {e}")
+        # Return the freshly-rebuilt def (in case the schema build
+        # normalized the list further — currently a no-op but keeps
+        # the response shape consistent with model setting).
+        new_schema = self._build_settings_schema()
+        for s in new_schema:
+            if s["id"] == "preferred_models":
+                return s
+        # Shouldn't reach here; fall through to a synthesized response.
+        return {
+            "id": "preferred_models",
+            "label": "Preferred models",
+            "category": "Agent",
+            "type": "string-list",
+            "value": cleaned,
+        }
 
     def _apply_model_setting(self, value: Any) -> Dict[str, Any]:
         """Persist a new default model to hermes config.yaml, mirroring

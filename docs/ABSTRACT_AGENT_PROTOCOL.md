@@ -391,11 +391,15 @@ by other clients changing the same agent state).
   - `slider` — numeric range. `min`, `max`, `step` required.
   - `toggle` — boolean.
   - `text` — free-form string.
+  - `string-list` — list of free-form strings (chip UI). The PWA
+    POSTs the entire updated list on each add/remove.
 - `value` — current value. Type matches `type`: string for
-  `enum`/`text`, number for `slider`, boolean for `toggle`.
+  `enum`/`text`, number for `slider`, boolean for `toggle`,
+  `string[]` for `string-list`.
 - `options[]` (enum only, required) — `{value, label, description?}`.
 - `min`, `max`, `step` (slider only, required).
-- `placeholder` (text only, optional).
+- `placeholder` (text/string-list only, optional) — hint text in
+  the input box.
 
 **Response (404):** Agent doesn't implement the extension. Sidekick
 hides the "Agent" settings group entirely.

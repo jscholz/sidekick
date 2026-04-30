@@ -31,8 +31,8 @@ export interface AgentSettingDef {
   label: string;
   description?: string;
   category?: string;
-  type: 'enum' | 'slider' | 'toggle' | 'text';
-  value: string | number | boolean;
+  type: 'enum' | 'slider' | 'toggle' | 'text' | 'string-list';
+  value: string | number | boolean | string[];
   options?: AgentSettingOption[];
   min?: number;
   max?: number;
@@ -139,6 +139,64 @@ function renderRow(def: AgentSettingDef): HTMLElement | null {
       input = txt;
       break;
     }
+    case 'string-list': {
+      // Chip-list editor: each entry renders as a removable chip;
+      // Enter or comma in the input commits a new entry. POSTs the
+      // entire updated list to the agent on each add/remove (full
+      // replacement; the contract doesn't have a partial-update
+      // shape and the lists are small enough to round-trip whole).
+      // Returns a `display: contents` wrapper so the chips + input
+      // share row layout with the label.
+      row.classList.add('row-wide');
+      const wrap = document.createElement('div');
+      wrap.style.display = 'contents';
+      const chips = document.createElement('div');
+      chips.className = 'keyterms-chips';
+      chips.setAttribute('aria-label', def.label);
+      const txt = document.createElement('input');
+      txt.type = 'text';
+      txt.id = `agent-set-${def.id}`;
+      txt.autocomplete = 'off';
+      txt.spellcheck = false;
+      if (def.placeholder) txt.placeholder = def.placeholder;
+      const renderChips = () => {
+        chips.innerHTML = '';
+        const list = Array.isArray(def.value) ? def.value as string[] : [];
+        for (const term of list) {
+          const chip = document.createElement('span');
+          chip.className = 'kt-chip';
+          chip.textContent = term;
+          const x = document.createElement('button');
+          x.className = 'kt-chip-x';
+          x.type = 'button';
+          x.setAttribute('aria-label', `remove ${term}`);
+          x.textContent = '×';
+          x.onclick = () => {
+            const next = (def.value as string[]).filter((t) => t !== term);
+            void onSubmit(def, next, chips, renderChips);
+          };
+          chip.appendChild(x);
+          chips.appendChild(chip);
+        }
+      };
+      renderChips();
+      txt.onkeydown = (e) => {
+        if (e.key === 'Enter' || e.key === ',') {
+          e.preventDefault();
+          const term = txt.value.trim();
+          if (!term) return;
+          const list = Array.isArray(def.value) ? def.value as string[] : [];
+          if (list.includes(term)) { txt.value = ''; return; }
+          const next = [...list, term];
+          txt.value = '';
+          void onSubmit(def, next, chips, renderChips);
+        }
+      };
+      wrap.appendChild(chips);
+      wrap.appendChild(txt);
+      input = wrap;
+      break;
+    }
     default:
       return null;
   }
@@ -154,12 +212,19 @@ function renderRow(def: AgentSettingDef): HTMLElement | null {
   return row;
 }
 
-/** POST the new value to the agent. Optimistic — we already updated
- *  the input by user action — so on error we revert the input to the
- *  pre-change value (kept on the inputEl as a `data-prev` attr) and
- *  surface the agent's message via window.alert (settings-panel-only;
- *  drives users back to a valid value). */
-async function onSubmit(def: AgentSettingDef, value: unknown, inputEl: HTMLElement) {
+/** POST the new value to the agent. Optimistic — the caller already
+ *  updated the input by user action — so on error we revert via the
+ *  inputEl's display refresh, and surface the agent's message via
+ *  window.alert (settings-panel-only; drives users back to a valid
+ *  value). For chip-list rows, the caller passes a `refresh` callback
+ *  that re-renders the chip strip (since the chips container isn't
+ *  a primitive input syncInputToValue can drive). */
+async function onSubmit(
+  def: AgentSettingDef,
+  value: unknown,
+  inputEl: HTMLElement,
+  refresh?: () => void,
+) {
   const prev = def.value;
   try {
     const adapter: any = (backend as any).adapter ?? await getAdapter();
@@ -172,9 +237,15 @@ async function onSubmit(def: AgentSettingDef, value: unknown, inputEl: HTMLEleme
     Object.assign(def, updated);
     // Re-sync the input in case the agent normalized.
     syncInputToValue(inputEl, def);
+    refresh?.();
   } catch (e: any) {
     // Revert.
     syncInputToValue(inputEl, { ...def, value: prev });
+    // For chip-list, restore the previous list before re-rendering.
+    if (refresh) {
+      def.value = prev;
+      refresh();
+    }
     // Surface the agent's rejection message — this only fires from
     // settings-panel interactions so window.alert is acceptable; a
     // toast would be nicer when the toast util lands.
@@ -188,6 +259,8 @@ function syncInputToValue(inputEl: HTMLElement, def: AgentSettingDef) {
     if (inputEl.type === 'checkbox') inputEl.checked = !!def.value;
     else inputEl.value = String(def.value ?? '');
   }
+  // string-list rows pass a non-input wrapper as inputEl; the
+  // refresh() callback in onSubmit owns their re-render.
 }
 
 /** Fetch the adapter via backend.ts internals. backend.ts proxies most

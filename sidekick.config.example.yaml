@@ -50,26 +50,15 @@ weather:
 # 2. FRONTEND-TUNABLE SEEDS (no restart; chip UI writes here)
 # ─────────────────────────────────────────────────────────────────────
 #
-# These are the live-mutable sections — Settings → Preferred models
-# and Settings → STT keyterms persist back into this file via the
-# `/api/preferred-models` and `/api/keyterms` proxy routes.
-#
 # Per-user runtime settings (theme, hotkeys, mic device, TTS voice,
 # audio levels, etc.) live in browser localStorage instead — they
 # don't round-trip through this file because they're per-tab, not
 # per-deployment.
-
-# Model picker filter. Glob patterns; only matching ids show in the
-# Settings → Agent → Model dropdown. Empty list = full agent catalog.
-# Glob syntax: `*` is a wildcard; everything else matches literally
-# (anchored at both ends).
-models:
-  preferred:
-    - anthropic/*
-    - google/gemini-*
-    - google/gemma-*
-    - openai/gpt-5*
-    - deepseek/*
+#
+# Agent-owned settings (model picker, preferred-models filter, etc.)
+# live with the agent — see backends/<name>/config.example.yaml.
+# Hermes specifically writes them to ~/.hermes/config.yaml under the
+# `sidekick:` namespace (e.g. `sidekick.preferred_models:`).
 
 # Deepgram STT vocabulary biasing. Names, project codes, jargon — the
 # stuff Deepgram would otherwise transcribe wrong. The PWA seeds each
