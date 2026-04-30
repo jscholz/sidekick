@@ -48,7 +48,7 @@ Sidekick configuration spans **two surfaces**:
 - **`.env`** (gitignored) — secrets only: API keys, bearer tokens.
 - **`sidekick.config.yaml`** (optional, gitignored) — non-secret deployment tuning: app name, theme, backend choice, preferred-models filter defaults, server port, etc. Every key here can be overridden by an env var of the matching name — handy for Docker/CI. Point sidekick at it via `SIDEKICK_CONFIG=/path/to/sidekick.config.yaml`.
 
-Precedence: env vars > yaml > built-in default. See `.env.example` for the full annotated env var list and `sidekick.config.example.yaml` for the YAML schema.
+Precedence: env vars > yaml > built-in default. See `.env.example` for the full annotated env var list and `example.sidekick.config.yaml` for the YAML schema.
 
 **2. Tunable from the frontend** (live, no restart)
 
@@ -57,8 +57,8 @@ The Settings panel (gear icon, bottom-left of the sidebar) edits three categorie
 | Category | Examples | Stored where |
 |---|---|---|
 | **Sidekick-owned, per-user** | theme, hotkeys, text size, mic device, TTS voice, audio feedback level, barge-in | browser `localStorage` (`sidekick.settings.v2`) — per-tab, syncs across tabs in the same browser |
-| **Sidekick-owned, server-side** | preferred-models filter (chip input), STT keyterms | `sidekick.config.yaml` — chip UIs write back to `models.preferred` and `stt.keyterms` via the proxy. Keyterm chips also persist per-user in IDB (the yaml is just the first-launch seed). |
-| **Agent-owned** | model picker, anything else the agent declares via `/v1/settings/schema` | upstream agent's persistence (e.g. backends/hermes/plugin writes the model setting back to `~/.hermes/config.yaml`). See [Agent settings](#agent-settings-v1settings) below. |
+| **Sidekick-owned, server-side** | STT keyterms | `sidekick.config.yaml` — `stt.keyterms` is the first-launch seed; per-user chips then live in IDB and the Refresh button merges new yaml entries in additively. |
+| **Agent-owned** | model picker, preferred-models filter, anything else the agent declares via `/v1/settings/schema` | upstream agent's persistence (e.g. backends/hermes/plugin writes back to `~/.hermes/config.yaml` under the `sidekick:` namespace). See [Agent settings](#agent-settings-v1settings) below. |
 
 The split mirrors the architecture: settings the agent doesn't care about (theme, mic device) stay client-side; settings the agent owns (model, persona) round-trip through the agent contract; settings sidekick-the-deployment cares about (preferred-models filter, keyterms) live on the proxy.
 
@@ -360,7 +360,7 @@ sidekick/
 ├── styles/                   app.css + manifest
 ├── sw.js                     service worker (PWA app-shell cache)
 ├── install.sh                one-command Mac/Linux installer (curl-pipe-bash)
-└── sidekick.config.example.yaml   copy to sidekick.config.yaml + fill in
+└── example.sidekick.config.yaml   copy to sidekick.config.yaml + fill in
 ```
 
 PWA breakdown:

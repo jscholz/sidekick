@@ -2448,6 +2448,17 @@ async function boot() {
       } catch (err) {
         diag(`refresh: SW update failed: ${(err as Error)?.message ?? err}`);
       }
+      // Pull any new server-seeded keyterms into IDB. Add-only: chips
+      // the user typed are preserved. Without this, edits to
+      // sidekick.config.yaml's stt.keyterms never reach existing
+      // installs because loadOrSeed() short-circuits on a populated
+      // IDB.
+      try {
+        const km = await import('./keyterms.ts');
+        await km.rehydrateFromSeed();
+      } catch (err) {
+        diag(`refresh: keyterms rehydrate failed: ${(err as Error)?.message ?? err}`);
+      }
       diag('refresh: location.reload()');
       location.reload();
     };

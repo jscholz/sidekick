@@ -49,16 +49,6 @@ weather:
 # ─────────────────────────────────────────────────────────────────────
 # 2. FRONTEND-TUNABLE SEEDS (no restart; chip UI writes here)
 # ─────────────────────────────────────────────────────────────────────
-#
-# Per-user runtime settings (theme, hotkeys, mic device, TTS voice,
-# audio levels, etc.) live in browser localStorage instead — they
-# don't round-trip through this file because they're per-tab, not
-# per-deployment.
-#
-# Agent-owned settings (model picker, preferred-models filter, etc.)
-# live with the agent — see backends/<name>/config.example.yaml.
-# Hermes specifically writes them to ~/.hermes/config.yaml under the
-# `sidekick:` namespace (e.g. `sidekick.preferred_models:`).
 
 # Deepgram STT vocabulary biasing. Names, project codes, jargon — the
 # stuff Deepgram would otherwise transcribe wrong. The PWA seeds each

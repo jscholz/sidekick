@@ -454,10 +454,6 @@ export function hydrate(handlers: {
     modelHandlers.reloadKeyterms = loadKeyterms;
   }
 
-  // Preferred-model globs — same chip UX as keyterms. Backs the
-  // sidekick.config.yaml models.preferred list; POST invalidates the
-  // server's openrouter-catalog cache so the model picker re-partitions
-  // on the next refresh without a restart.
   // (Legacy preferred-models chip wiring removed — agentSettings.ts
   // renders preferred_models as a `string-list` SettingDef declared
   // by the agent via /v1/settings/schema.)

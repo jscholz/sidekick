@@ -114,3 +114,40 @@ export async function loadOrSeed(): Promise<string[]> {
   await writeList(seeded);
   return seeded;
 }
+
+/** Re-fetch the server seed and merge any NEW entries into IDB.
+ *  User-added chips (entries not in the server list) are preserved.
+ *  Removals on the server side are NOT mirrored — once a term is
+ *  in a user's IDB, only their explicit chip-x click removes it.
+ *  Returns the merged list, or the existing IDB list if the fetch
+ *  fails (offline, server down). */
+export async function rehydrateFromSeed(): Promise<string[]> {
+  const existing = (await readList()) ?? [];
+  let serverSeed: string[] = [];
+  try {
+    const { fetchWithTimeout } = await import('./util/fetchWithTimeout.ts');
+    const r = await fetchWithTimeout('/api/keyterms', { timeoutMs: 5_000 });
+    if (!r.ok) return existing;
+    serverSeed = parseSeedBody(await r.text());
+  } catch (e) {
+    console.warn('[keyterms] rehydrate fetch failed:', e);
+    return existing;
+  }
+  const seen = new Set(existing.map((t) => t.toLowerCase()));
+  const added: string[] = [];
+  for (const t of serverSeed) {
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    added.push(t);
+  }
+  if (added.length === 0) {
+    console.log('[keyterms] rehydrate: no new entries from server');
+    return existing;
+  }
+  const merged = [...existing, ...added];
+  await writeList(merged);
+  console.log(`[keyterms] rehydrate: +${added.length} new entries`,
+    added.slice(0, 5).join(', ') + (added.length > 5 ? ` (+${added.length - 5})` : ''));
+  return merged;
+}
