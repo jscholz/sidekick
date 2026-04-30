@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCardsFromText, extractImageBlocks } from '../src/canvas/fallback.ts';
+import { parseCardsFromText, extractImageBlocks } from '../src/cards/fallback.ts';
 
 describe('parseCardsFromText', () => {
   it('extracts markdown images', () => {

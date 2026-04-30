@@ -9,11 +9,27 @@
 //   // mock.addChat(chat_id, {title, messages, lastActiveAt})
 //   // mock.simulateReply(chat_id, text)         — push a reply via the
 //   //                                              persistent stream
+//   // ...
+//   await mock.close();   // tears down the in-process SSE server
+//
+// /api/sidekick/stream is served by a real in-process http.Server on
+// an ephemeral 127.0.0.1 port (mirrors the proxy-test harness pattern
+// at server-lib/sidekick/__tests__/proxy-harness.ts).
+// Playwright forwards the PWA's /api/sidekick/stream request to that
+// local server via `route.continue({ url })`, so the EventSource sees
+// a single long-lived connection — `pushReply` / `pushSessionChanged`
+// land within milliseconds instead of having to wait for the
+// `retry: 200` reconnect cycle that `route.fulfill` was forced into.
+//
+// Other endpoints (sessions list, messages, config, keyterms) stay as
+// `route.fulfill` — they're one-shot HTTP, no streaming need.
 //
 // Scenarios that exercise the LLM logic itself (tool-turn, etc.)
 // should use the real backend via export const BACKEND = 'real'.
 // Drawer / UX / persistence tests don't care about LLM behavior and
 // run fine against the mock — orders of magnitude faster.
+
+import * as http from 'node:http';
 
 /** @typedef {{
  *    chatId: string,
@@ -25,10 +41,11 @@
 
 export async function installMockBackend(page) {
   const chats = new Map();          // chat_id → MockChat
-  const streamSubs = new Set();     // active stream connections (for replays)
+  /** Active SSE responses (real http.ServerResponse objects). */
+  const streamSubs = new Set();
   let envelopeId = 0;
-  // Replay ring — same shape as the real /api/sidekick/stream so a
-  // freshly-connecting PWA tab sees recent envelopes.
+  // Replay ring — so a freshly-connecting PWA tab (or a Last-Event-Id
+  // resume after a temporary disconnect) sees recent envelopes.
   const recent = [];
 
   const broadcast = (env) => {
@@ -36,11 +53,65 @@ export async function installMockBackend(page) {
     const id = envelopeId;
     recent.push({ id, env });
     if (recent.length > 128) recent.shift();
+    const frame = `id: ${id}\nevent: ${env.type}\ndata: ${JSON.stringify(env)}\n\n`;
     for (const sub of streamSubs) {
-      try { sub.write(`id: ${id}\nevent: ${env.type}\ndata: ${JSON.stringify(env)}\n\n`); }
+      try { sub.write(frame); }
       catch {}
     }
   };
+
+  // Real in-process http.Server hosting /api/sidekick/stream as a
+  // proper persistent SSE endpoint. Playwright redirects the PWA's
+  // request here via route.continue({ url }) below.
+  const sseServer = http.createServer((req, res) => {
+    if (req.method !== 'GET') {
+      res.writeHead(405).end();
+      return;
+    }
+    // Read Last-Event-Id from header OR ?lastEventId= (Playwright may
+    // strip non-allowlisted request headers when forwarding).
+    const headerId = req.headers['last-event-id'];
+    const url = new URL(req.url || '/', 'http://x');
+    const queryId = url.searchParams.get('lastEventId');
+    const cursor = headerId
+      ? Number.parseInt(String(headerId), 10)
+      : queryId
+      ? Number.parseInt(queryId, 10)
+      : -1;
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      'x-accel-buffering': 'no',
+      'connection': 'keep-alive',
+    });
+    // Tiny retry hint so a connection drop reconnects fast (the real
+    // proxy uses 5000ms; tests want sub-second).
+    res.write('retry: 200\n\n');
+    // Replay anything since the cursor.
+    for (const entry of recent) {
+      if (entry.id <= cursor) continue;
+      res.write(`id: ${entry.id}\nevent: ${entry.env.type}\ndata: ${JSON.stringify(entry.env)}\n\n`);
+    }
+    streamSubs.add(res);
+    const drop = () => { streamSubs.delete(res); };
+    req.on('close', drop);
+    res.on('close', drop);
+  });
+  // Track open sockets so `close()` can hang up immediately rather
+  // than waiting for the OS keep-alive timeout to drain.
+  const openSockets = new Set();
+  sseServer.on('connection', (sock) => {
+    openSockets.add(sock);
+    sock.on('close', () => openSockets.delete(sock));
+  });
+  await new Promise((resolve, reject) => {
+    sseServer.once('error', reject);
+    sseServer.listen(0, '127.0.0.1', () => resolve());
+  });
+  const sseAddr = sseServer.address();
+  const ssePort = typeof sseAddr === 'object' && sseAddr ? sseAddr.port : 0;
+  const sseUrl = `http://127.0.0.1:${ssePort}/stream`;
 
   // GET /api/sidekick/sessions — canned list from the in-memory map.
   await page.route('**/api/sidekick/sessions*', async (route) => {
@@ -149,45 +220,22 @@ export async function installMockBackend(page) {
     });
   });
 
-  // GET /api/sidekick/stream — persistent SSE. Replay ring + live broadcasts.
-  // Playwright's page.route doesn't support streaming bodies easily, so we
-  // use a different mechanism: continue() + intercept inside a CDP helper.
-  // Simpler approach: implement the stream as a long-poll-ish response that
-  // closes after a flush; the PWA's EventSource auto-reconnects via the
-  // server's `retry: 5000` hint. For tests, we serve a one-shot dump of
-  // the ring + active subscription registration via a mock-friendly path.
-  //
-  // Instead: route the PWA's GET /api/sidekick/stream to a streaming
-  // response built via the underlying request fulfill API. We can't write
-  // multiple chunks via route.fulfill, so we use a request handler that
-  // pipes a Readable.
+  // GET /api/sidekick/stream — persistent SSE forwarded to the
+  // in-process http.Server above. Playwright's `route.continue({ url })`
+  // re-issues the request to the new URL and pipes the response body
+  // back to the page, including streamed chunks. That gives us a real
+  // long-lived SSE channel: `pushReply` / `pushSessionChanged` write
+  // straight to `streamSubs` and the PWA sees them immediately, no
+  // EventSource-reconnect hop required.
   await page.route('**/api/sidekick/stream', async (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
-    // Build the initial replay payload + a short "keepalive" so the
-    // EventSource doesn't immediately error. The PWA reconnects on
-    // close; live envelopes between reconnects fall through to the
-    // recent ring on the next subscribe. For test purposes this is
-    // enough: scenarios send a message → POST handler schedules
-    // envelopes → next stream connect serves them via the ring.
     const lastEventId = route.request().headers()['last-event-id'];
-    const cursor = lastEventId ? Number.parseInt(lastEventId, 10) : -1;
-    // Tests need live envelopes (pushReply / pushSessionChanged) to
-    // reach the PWA quickly. Real proxy uses retry: 5000; the mock
-    // stream serves a one-shot ring dump and closes, so the
-    // EventSource reconnects on the retry interval and picks up
-    // any envelopes pushed since. Shorten to 200ms so live envelopes
-    // land within an assertion window of ~1s.
-    let body = 'retry: 200\n\n';
-    for (const entry of recent) {
-      if (entry.id <= cursor) continue;
-      body += `id: ${entry.id}\nevent: ${entry.env.type}\ndata: ${JSON.stringify(entry.env)}\n\n`;
-    }
-    await route.fulfill({
-      status: 200,
-      contentType: 'text/event-stream',
-      headers: { 'cache-control': 'no-cache', 'x-accel-buffering': 'no' },
-      body,
-    });
+    // Forward Last-Event-Id as a query param too — some Playwright
+    // versions strip the header when overriding `url`.
+    const target = lastEventId
+      ? `${sseUrl}?lastEventId=${encodeURIComponent(lastEventId)}`
+      : sseUrl;
+    await route.continue({ url: target });
   });
 
   // GET /config — minimal config so the PWA doesn't 404.
@@ -202,7 +250,7 @@ export async function installMockBackend(page) {
         appSubtitle: 'Agent Portal',
         agentLabel: 'Clawdian',
         themePrimary: '',
-        backend: 'hermes-gateway',
+        backend: 'proxy-client',
       }),
     });
   });
@@ -253,5 +301,21 @@ export async function installMockBackend(page) {
     chatCount() { return chats.size; },
     listChats() { return Array.from(chats.values()); },
     getChat(chatId) { return chats.get(chatId); },
+    /** Tear down the in-process SSE server. Call from the runner's
+     *  cleanup so we don't leak ports between scenarios. */
+    async close() {
+      // Close active SSE responses + sockets first so server.close()
+      // resolves immediately instead of waiting for the keep-alive
+      // timeout to drain.
+      for (const sub of streamSubs) {
+        try { sub.end(); } catch {}
+      }
+      streamSubs.clear();
+      for (const sock of openSockets) {
+        try { sock.destroy(); } catch {}
+      }
+      openSockets.clear();
+      await new Promise((resolve) => sseServer.close(() => resolve()));
+    },
   };
 }

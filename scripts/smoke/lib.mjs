@@ -12,33 +12,44 @@
 //     Assert SHAPE: bubble appeared, tool fired, summary rendered.
 
 import { chromium } from 'playwright-core';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 
 export const CHROMIUM = '/usr/bin/chromium';
 export const DEFAULT_URL = process.env.SMOKE_URL || 'http://127.0.0.1:3001';
 
-/** Launch a fresh persistent context. Each scenario gets one — so
- *  IDB / SW state is clean and scenarios can't leak into each other.
- *  Caller must `await ctx.close()` and `cleanup()` when done. */
-export async function launchBrowser({ headed = false, debug = true } = {}) {
-  const userDataDir = mkdtempSync(path.join(tmpdir(), 'sk-smoke-'));
-  const ctx = await chromium.launchPersistentContext(userDataDir, {
+/** Launch a single Chromium process for the entire smoke run. Returns
+ *  the `Browser` and a `closeShared()` to tear down at the end. Each
+ *  scenario gets its own ephemeral `BrowserContext` (isolated storage,
+ *  IDB, SW state) via `launchBrowser(browser)` — that's ~100ms vs. the
+ *  ~2-3s per-scenario cost of relaunching Chromium. */
+export async function launchSharedBrowser({ headed = false } = {}) {
+  const browser = await chromium.launch({
     executablePath: CHROMIUM,
     headless: !headed,
     args: ['--no-sandbox'],
+  });
+  const closeShared = async () => {
+    try { await browser.close(); } catch {}
+  };
+  return { browser, closeShared };
+}
+
+/** Spin up a fresh per-scenario context off the shared browser. Each
+ *  context has its own cookie jar, localStorage, IndexedDB and service-
+ *  worker registration — same isolation guarantee as the old
+ *  per-scenario `launchPersistentContext` path, minus the Chromium boot
+ *  cost. Caller must `await cleanup()` when the scenario finishes. */
+export async function launchBrowser(browser, { headed: _headed = false } = {}) {
+  const ctx = await browser.newContext({
     // Desktop viewport — sidekick's mobile breakpoint auto-collapses
     // the sidebar drawer on small screens, which would make drawer
     // rows non-clickable in tests. Pin to a stable desktop size.
     viewport: { width: 1280, height: 800 },
   });
-  const page = ctx.pages()[0] || await ctx.newPage();
+  const page = await ctx.newPage();
   const cleanup = async () => {
     try { await ctx.close(); } catch {}
-    try { rmSync(userDataDir, { recursive: true, force: true }); } catch {}
   };
-  return { ctx, page, userDataDir, cleanup };
+  return { ctx, page, cleanup };
 }
 
 /** Attach console-line capture to a Playwright page. Returns a function
@@ -157,6 +168,53 @@ export async function deleteChat(page, chatId) {
       } catch {}
     }, chatId);
   } catch {}
+}
+
+/** Click a drawer row by chat id. No waits, no assertions — centralized
+ *  so rapid-fire and steady-pace tests share identical click semantics
+ *  (tests that diverge here drift on selectors). */
+export async function clickRow(page, chatId) {
+  const locator = page.locator(`#sessions-list li[data-chat-id="${chatId}"] .sess-body`);
+  await locator.first().click();
+}
+
+/** Wait until no `/api/sidekick/sessions/<id>/messages` request has
+ *  fired for `idleMs`. Used by drawer tests to synchronize on "all in-
+ *  flight resume() callbacks have settled" before asserting final state.
+ *  Without this, a test that asserts immediately after the last click
+ *  will race the trailing server fetch. */
+export async function waitForDrawerQuiet(page, idleMs = 500, timeoutMs = 10_000) {
+  let lastSeenAt = Date.now();
+  const onReq = (req) => {
+    if (/\/api\/sidekick\/sessions\/[^/]+\/messages/.test(req.url())) lastSeenAt = Date.now();
+  };
+  page.on('request', onReq);
+  try {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (Date.now() - lastSeenAt >= idleMs) return;
+      await page.waitForTimeout(50);
+    }
+    throw new Error(`waitForDrawerQuiet: still seeing /messages requests after ${timeoutMs}ms`);
+  } finally {
+    page.off('request', onReq);
+  }
+}
+
+/** Snapshot the drawer-vs-transcript 1:1 invariant in one page.evaluate
+ *  call so the read isn't itself raced by ongoing async work. Returns
+ *  `{ activeId, transcriptText, transcriptMarkers }` where
+ *  `transcriptMarkers` is the subset of `allMarkers` currently rendered
+ *  in #transcript. */
+export async function getDrawerSnapshot(page, allMarkers) {
+  return page.evaluate((markers) => {
+    const t = document.getElementById('transcript')?.textContent || '';
+    return {
+      activeId: document.querySelector('#sessions-list li.active')?.dataset?.chatId || null,
+      transcriptText: t.slice(0, 200),
+      transcriptMarkers: markers.filter((m) => t.includes(m)),
+    };
+  }, allMarkers);
 }
 
 /** Dump the first N .line elements as `[i] class="…" text="…"` for

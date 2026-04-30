@@ -67,7 +67,11 @@
     transition: padding-left 0.18s ease;
     /* --content-size: 15px; comes from :root, controlled by settings slider */
   }
-  body.sidebar-expanded { padding-left: 300px; }
+  /* Match the sidebar's --sidebar-width so the chat content shifts
+   * exactly behind the panel without overlap. JS sidebarResize updates
+   * the variable; CSS reads it. Default 300px matches the no-resize
+   * baseline. */
+  body.sidebar-expanded { padding-left: var(--sidebar-width, 300px); }
 
   /* ── Sidebar (Gemini-style): persistent collapsed rail, expands on hamburger ── */
   #sidebar {
@@ -80,8 +84,43 @@
     overflow: hidden;
   }
   /* Desktop expand: no shadow — content shifts right so the panel isn't
-   * overlaying anything. Mobile re-adds the shadow below since it overlays. */
-  #sidebar.expanded { width: 300px; }
+   * overlaying anything. Mobile re-adds the shadow below since it overlays.
+   * Width comes from the `--sidebar-width` custom property so the JS
+   * resizer can adjust it without battling the CSS cascade. Default
+   * 300px; main.ts restores any persisted preference on boot and clamps
+   * to [220, 600] in the drag handler. */
+  #sidebar.expanded { width: var(--sidebar-width, 300px); }
+  /* Resizer: a thin column hugging the sidebar's right edge. Catches
+   * pointer events on a 6px-wide hit zone (visual line is 1px). Only
+   * visible/usable when the sidebar is expanded; hidden on the rail and
+   * on mobile where the sidebar is an overlay above the chat. */
+  #sidebar-resizer {
+    position: absolute; top: 0; right: -3px; bottom: 0;
+    width: 6px;
+    cursor: ew-resize;
+    /* Keep it above the sidebar content but below modals. */
+    z-index: 5;
+    /* Visual: 1px line on hover/drag, transparent at rest so the
+     * sidebar edge isn't visually busy. Inheriting via theme keeps it
+     * consistent with the rebrand colors. */
+    background: transparent;
+    transition: background 120ms;
+  }
+  #sidebar-resizer:hover, #sidebar-resizer.dragging {
+    background: var(--primary, #7a9a7a);
+  }
+  /* Hide the resizer when the sidebar is the rail or when the sidebar
+   * is overlaying on mobile (its width is full-screen-ish, not user-
+   * controlled). */
+  #sidebar.collapsed #sidebar-resizer { display: none; }
+  /* Belt-and-suspenders class the JS sets on body during a drag — kills
+   * text selection + iframe pointer events so the drag stays smooth
+   * over child content. */
+  body.sidebar-resizing,
+  body.sidebar-resizing * {
+    user-select: none !important;
+    cursor: ew-resize !important;
+  }
   .sidebar-top { display: flex; flex-direction: column; padding: 10px 8px 6px; gap: 4px; }
   /* Top header row: hamburger left, search right (Gemini-style). When the
    * sidebar is collapsed (rail), the row collapses to just the hamburger
@@ -158,6 +197,10 @@
        * of content instead of pushing it. */
       box-shadow: 0 0 24px rgba(0,0,0,0.35);
     }
+    /* Mobile: the sidebar is an overlay panel, not a resizable column.
+     * Hide the resizer so users can't accidentally drag it during a
+     * gesture. */
+    #sidebar-resizer { display: none; }
     .toolbar .toolbar-btn.mobile-only { display: flex; }
     body.sidebar-expanded #sb-toggle-mobile { display: none; }
   }
@@ -302,12 +345,6 @@
     transition: opacity .08s linear, transform .08s linear;
     pointer-events: none;
   }
-  /* Speak icon — muted vs on state */
-  .toolbar #btn-speak .speaker-mute-x { display: none; }
-  .toolbar #btn-speak.muted .speaker-waves { display: none; }
-  .toolbar #btn-speak.muted .speaker-mute-x { display: inline; }
-  .toolbar #btn-speak.muted { color: var(--muted); opacity: 0.6; }
-  .toolbar #btn-speak:not(.muted) { color: var(--primary); }
   /* Lock icon — engaged state (when fake-lock is active, though we hide
      the toolbar so this mainly affects future UX consistency) */
   .toolbar #btn-lock.active { color: var(--primary); }
@@ -372,6 +409,87 @@
   }
   .sessions-list li:hover { background: var(--surface-hover, var(--surface)); }
   .sessions-list li.active { border-color: var(--primary); background: var(--surface); }
+  /* Multi-select highlight — shift-click toggles. Visually distinct
+   * from .active (the single-row resume target) so users can tell the
+   * two modes apart at a glance. */
+  .sessions-list li.multiselected {
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 14%, var(--surface) 86%);
+  }
+  .sessions-list li.multiselected.active { background: color-mix(in srgb, var(--primary) 22%, var(--surface) 78%); }
+
+  /* While the user is in session multi-select mode, kill native text
+   * selection across the page so shift-click doesn't simultaneously
+   * paint a session highlight AND a browser text-range highlight
+   * (the awkward dual-selection state Jonathan reported). Inputs +
+   * textareas keep their normal text-edit behavior — composer / filter
+   * field stay typeable. */
+  body.session-multiselect-active {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  body.session-multiselect-active input,
+  body.session-multiselect-active textarea,
+  body.session-multiselect-active [contenteditable="true"] {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  /* Bulk-action panel — replaces the chat surface when 2+ rows are
+   * selected. Mounted directly on body by src/multiSelect.ts; uses
+   * fixed positioning with the sidebar's left margin so it visually
+   * "lives" in the chat region without us having to thread it through
+   * the chat-surface DOM. */
+  #multi-select-panel {
+    position: fixed;
+    top: 0; right: 0; bottom: 0;
+    left: var(--sidebar-width, 300px);
+    background: var(--bg, #1a1a1a);
+    z-index: 4;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .multi-select-card {
+    max-width: 480px; width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  }
+  .multi-select-card .ms-title {
+    font-size: 18px; font-weight: 600; margin-bottom: 14px;
+    color: var(--fg);
+  }
+  .multi-select-card .ms-stats {
+    display: grid; grid-template-columns: max-content 1fr;
+    gap: 4px 14px; margin: 0 0 18px; font-size: 14px;
+  }
+  .multi-select-card .ms-stats dt { color: var(--muted); }
+  .multi-select-card .ms-stats dd { margin: 0; color: var(--fg); }
+  .multi-select-card .ms-actions {
+    display: flex; gap: 8px; justify-content: flex-end;
+  }
+  .multi-select-card .ms-btn {
+    padding: 8px 14px; border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface-2, var(--surface));
+    color: var(--fg); cursor: pointer;
+    font-size: 14px;
+  }
+  .multi-select-card .ms-btn:hover { background: var(--surface-hover, var(--surface)); }
+  .multi-select-card .ms-btn-danger {
+    background: #c0392b;  /* tomato — semantic-danger across themes */
+    border-color: #a83327;
+    color: white;
+  }
+  .multi-select-card .ms-btn-danger:hover { background: #a83327; }
+  /* Mobile: the sidebar is an overlay, so the panel sits at left:0
+   * (full-width minus a small inset). The drawer overlays on top
+   * thanks to its higher z-index when expanded. */
+  @media (max-width: 699px) {
+    #multi-select-panel { left: 0; padding: 12px; }
+  }
   .sessions-list .sess-snippet {
     font-size: 13px; color: var(--fg); line-height: 1.35;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;

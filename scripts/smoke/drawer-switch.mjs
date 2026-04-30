@@ -171,14 +171,9 @@ export default async function run({ page, log, ctx, mock }) {
 
   // Serial click sequence: click each row, wait for it to switch +
   // hold (catch bounce-back), repeat. 10 clicks total (top→bottom→top).
-  //
-  // KNOWN LIMITATION: rapid-fire clicks (<50ms apart) trigger a race
-  // in sessionDrawer.resume() — different-id concurrent resumes can
-  // fire onResumeCb in completion-order, last-one-wins. This is
-  // demonstrable with throttled history endpoints + no awaits between
-  // clicks, but humans don't click that fast (5+ clicks in 100ms).
-  // Tracked for fix; not exercised here because the realistic case
-  // is what matters for smoke regression detection.
+  // Rapid-fire (<100ms apart) is exercised by drawer-rapid-switch.mjs
+  // which asserts the 1:1 invariant against a 12-click sequence with
+  // a 200ms history-endpoint throttle.
   log('serial click sequence with hold-check (10 clicks)');
   for (let i = 0; i < sequence.length; i++) {
     const target = sequence[i];

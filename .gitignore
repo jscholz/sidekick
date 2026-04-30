@@ -1,7 +1,10 @@
 node_modules/
 build/
-.env*
+.env
+.env.local
 *.log
 sidekick.config.yaml
 config.yaml
 .DS_Store
+__pycache__/
+*.pyc

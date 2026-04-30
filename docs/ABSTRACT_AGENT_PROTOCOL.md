@@ -125,6 +125,213 @@ through the proxy and the proxy adds the token.
 
 ---
 
+## Conversation lifecycle endpoints
+
+The following endpoints exist alongside `POST /v1/responses` so a
+sidekick deployment can populate its drawer (chat list), replay
+transcripts on resume, and delete chats. Backends that don't
+implement them MUST return `404` consistently — sidekick degrades
+gracefully (drawer becomes IDB-cached only, deletes become local-
+only). Backends that implement them MUST cascade through any
+ancillary stores they own (hindsight memory, transcript jsonl,
+search index) so a delete is durable across the whole agent.
+
+The shape mirrors a subset of the OpenAI Conversations API. Field
+names are normative; sidekick parses them by name.
+
+### `GET /v1/conversations`
+
+Returns the agent's list of conversations sorted most-recent-first.
+
+**Query parameters:**
+
+| Field   | Type    | Required | Description |
+| ------- | ------- | -------- | ----------- |
+| `limit` | integer | no       | 1..200, default 50. |
+
+**Response (200):**
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "<opaque conversation id>",
+      "object": "conversation",
+      "created_at": 1777203774,
+      "metadata": {
+        "title": "Trip planning",
+        "message_count": 14,
+        "last_active_at": 1777290174,
+        "first_user_message": "let's plan the trip..."
+      }
+    }
+  ]
+}
+```
+
+**Field semantics in `metadata`:**
+
+- `title` — human-readable label. Empty string is allowed; sidekick
+  falls back to `first_user_message` for display.
+- `message_count` — visible message count (excluding internal context-
+  compaction rows). Zero for empty conversations.
+- `last_active_at` — UNIX seconds of the most recent message. Drives
+  the drawer sort order.
+- `first_user_message` — first user-role message text, truncated to
+  ≤ 80 chars. Optional. Sidekick uses this when `title` is empty.
+
+`id` is opaque to sidekick; the backend MAY use the same value as the
+`conversation` parameter passed to `POST /v1/responses`, or it MAY
+mint distinct ids. Sidekick stores this verbatim for use on
+subsequent `/v1/conversations/{id}/items` and `DELETE` calls.
+
+`object: "conversation"` is informational; sidekick doesn't validate
+the field but it SHOULD be present for OpenAI compatibility.
+
+### `GET /v1/conversations/{id}/items`
+
+Returns the message transcript for a conversation, oldest-first. Used
+on resume to repaint the chat surface from server state.
+
+**Path parameter:**
+
+- `id` — the conversation id (URL-encoded if it contains special chars).
+
+**Query parameters:**
+
+| Field      | Type    | Required | Description |
+| ---------- | ------- | -------- | ----------- |
+| `limit`    | integer | no       | 1..500, default 200. |
+| `before`   | string  | no       | Cursor for pagination — return items strictly before this id. Used by load-earlier on long transcripts. |
+
+**Response (200):**
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "msg_<opaque>",
+      "object": "message",
+      "role": "user" | "assistant" | "system",
+      "content": "...",
+      "created_at": 1777203774
+    }
+  ],
+  "first_id": "msg_<opaque>",
+  "has_more": false
+}
+```
+
+`first_id` is the id of the oldest item in `data` (used for the next
+`?before=` cursor). `has_more` is true when older items exist.
+
+`content` is plain string for the simple case. The OpenAI Responses
+API also supports a structured `content: [{type, text}]` shape; sidekick
+accepts both — backends MAY emit either. For tool-call items the
+content shape follows the same structure as the `output` array in
+`response.completed` (see `POST /v1/responses` above).
+
+Backends that compress or fork conversations (e.g. context-window
+rotation) MUST traverse the fork chain server-side and return the
+flattened, replayable transcript here. Sidekick does not walk forks.
+
+**404** — unknown conversation id.
+
+### `DELETE /v1/conversations/{id}`
+
+Hard-delete a conversation and all data the agent stores against it.
+
+**Required cascade:** the backend MUST delete:
+
+1. The conversation row + transcript items.
+2. Any external memory the agent has retained from this conversation
+   (e.g. embeddings in a vector store, summarization caches).
+3. Any filesystem artifacts (jsonl transcripts, etc.) keyed by this
+   conversation id.
+
+This is non-negotiable for privacy: sidekick exposes "Delete chat"
+as a user-facing affordance and the user reasonably expects the
+agent to forget. A delete that leaves memory traces is a privacy bug.
+
+**Response (200):**
+
+```json
+{ "ok": true }
+```
+
+**Error responses:**
+
+- `404` — unknown conversation id.
+- `500` — partial failure (some cascade steps succeeded, some didn't).
+  The response body SHOULD include an `error.message` describing
+  which steps failed. Sidekick treats 500 as "do not remove the
+  drawer entry" so the user can retry.
+
+---
+
+## Optional gateway extension — `/v1/gateway/*`
+
+A second contract layered on top of the channel contract above.
+Implementing it makes an agent a "gateway" — its state spans
+multiple platforms and sidekick should surface them in a single
+drawer with per-row source badges.
+
+The extension is **strictly optional**. Single-channel agents leave
+it unimplemented; sidekick probes, gets 404, and falls back to
+`GET /v1/conversations` with `source: "sidekick"` stamped on each
+row. Other failure codes propagate (transient outages must not
+silently degrade the drawer to channel-only).
+
+The namespace prefix `/v1/gateway/*` is reserved for this contract
+so future gateway-shaped capabilities (e.g. `GET /v1/gateway/sources`,
+cross-source delete) have a documented home and don't scatter as
+optional flags on the channel endpoints. Sidekick squats on the
+prefix; OAI doesn't use it.
+
+### `GET /v1/gateway/conversations`
+
+Cross-platform drawer list. Same OAI row shape as
+`GET /v1/conversations`, plus `metadata.source` and
+`metadata.chat_type`:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "<chat_id>",
+      "object": "conversation",
+      "created_at": 1777290174,
+      "metadata": {
+        "title": "Trip planning",
+        "message_count": 14,
+        "last_active_at": 1777290174,
+        "first_user_message": "let's plan the trip...",
+        "source": "telegram",
+        "chat_type": "dm"
+      }
+    }
+  ]
+}
+```
+
+**Required `metadata` fields:** `source` (lowercase string —
+`sidekick`, `telegram`, `slack`, `whatsapp`, etc.), `chat_type`
+(`dm`, `group`, agent-defined). All other fields match
+`/v1/conversations`.
+
+**Query params:** `limit` (1..200, default 50). Most-recent-first
+ordering required.
+
+**Cross-platform send is NOT part of this extension.** Sidekick's
+composer goes read-only when `source !== 'sidekick'`. Agents that
+want bidirectional cross-platform messaging would extend further
+(future: `POST /v1/gateway/responses?source=...`).
+
+---
+
 ## Errors
 
 Errors use the OpenAI shape:

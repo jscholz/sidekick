@@ -4,14 +4,10 @@
  * The toolbar #btn-mic that used to live here is gone — the unified
  * composer mic now drives all four voice modes (memo/call × auto/manual)
  * and invokes `toggleCall` / `closeIfOpen` directly through this module's
- * exports.  What remains:
- *
- *   #btn-speak = TTS-reply preference. Tap to mute / unmute. Persists
- *                via settings.tts (default false = muted = stream
- *                mode at call open). Mid-call clicks update the
- *                preference for the NEXT call only — we don't cycle
- *                the connection (the old wiring did, and it killed
- *                in-progress utterances on every flip).
+ * exports.  The toolbar #btn-speak is also gone — the TTS-reply
+ * preference (settings.tts) now lives as a "Speak replies" toggle in
+ * the mic-mode menu (see main.ts flipMicSetting). Mid-call flips
+ * cycle the connection into the new mode immediately.
  *
  *   toggleCall / closeIfOpen / isOpen / currentMode = exports the
  *   composer-mic dispatch in main.ts uses to open/close a stream-mode
@@ -32,7 +28,7 @@ import { log, diag } from '../../util/log.ts';
  *  which one is set — see audio-bridge/stt_bridge.py:_dispatch_to_agent. */
 function resolveCallSession(): { sessionId: string | null; chatId: string | null } {
   const id = opts?.getSessionId() ?? null;
-  if (backend.name() === 'hermes-gateway') {
+  if (backend.name() === 'proxy-client') {
     return { sessionId: null, chatId: id };
   }
   return { sessionId: id, chatId: null };
@@ -88,33 +84,6 @@ export function init(o: ControlsOpts) {
     else if (state === 'idle') opts.onStatus('');
   });
 
-  const speak = btnEl('btn-speak');
-  if (speak) {
-    // Apply persisted preference at boot. settings.tts === true means
-    // TTS replies are unmuted; false (default) means muted.
-    applySpeakMuted(speak, !settings.get().tts);
-    speak.onclick = () => {
-      const nowMuted = !speak.classList.contains('muted');
-      applySpeakMuted(speak, nowMuted);
-      settings.set('tts', !nowMuted);
-      // Mid-call clicks update preference for the NEXT call only.
-      // We deliberately don't cycle the connection — the old wiring
-      // did, and it tore down the user's in-progress utterance every
-      // time. If a call is open, hint at this so it isn't surprising.
-      if (conn.isOpen() && opts?.onStatus) {
-        opts.onStatus(
-          nowMuted ? 'TTS muted (next call)' : 'TTS on (next call)',
-        );
-      }
-    };
-  }
-}
-
-function applySpeakMuted(el: HTMLButtonElement, muted: boolean): void {
-  el.classList.toggle('muted', muted);
-  el.title = muted
-    ? 'TTS reply — currently muted; tap to unmute · ⌥T'
-    : 'TTS reply — currently on; tap to mute · ⌥T';
 }
 
 /** Open a call (or close if one is open). Mode derives from
@@ -139,8 +108,8 @@ export async function toggleCall(): Promise<void> {
 
 /** Open a call in a specific mode without consulting settings.tts.
  *  Used by the composer mic when call-mode is requested — auto-send=true
- *  needs the talk/stream choice driven by btn-speak preference (which is
- *  stored in settings.tts), but the COMPOSER mic might want to force
+ *  needs the talk/stream choice driven by the user's settings.tts
+ *  preference, but the COMPOSER mic might want to force
  *  stream regardless (e.g. for cursor-aware dictation, where TTS makes
  *  no sense). Idempotent if a matching call is already open. */
 export async function openCall(mode: conn.CallMode): Promise<void> {

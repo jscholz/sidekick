@@ -9,7 +9,7 @@
 //
 // Recent regression ("three replies in active chat") was caused by
 // this gate dropping envelopes during a stale-getViewed window. The
-// proxy's `?chat_id=` filter (server-lib/backends/hermes-gateway/
+// proxy's `?chat_id=` filter (server-lib/sidekick/
 // stream.ts) makes it impossible for cross-chat envelopes to escape
 // the proxy in the first place — but the PWA today subscribes to the
 // firehose to get cross-chat notification / session_changed events.

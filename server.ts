@@ -24,29 +24,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import YAML from 'yaml';
-import { validators } from './src/canvas/validators.ts';
+import { validators } from './src/cards/validators.ts';
 import {
-  initHermesConfig,
-  handleHermesSessionsList,
-  handleHermesSessionRename,
-  handleHermesSearch,
-  handleHermesSessionDelete,
-  handleHermesSessionMessages,
-  handleHermesSessionLastResponseId,
-  handleHermesModelsCatalog,
-  handleHermesModelGet,
-  handleHermesModelSet,
-  handleHermesProxy,
-  handleDrawerEvents,
   rebuildPreferredModels,
   PREFERRED_MODELS_RAW,
-  clearOpenrouterCatalogCache,
-} from './server-lib/backends/hermes/index.ts';
-import {
-  initOpenAICompatConfig,
-  handleOpenAICompatChat,
-} from './server-lib/backends/openai-compat/index.ts';
-import * as hermesGateway from './server-lib/backends/hermes-gateway/index.ts';
+} from './server-lib/preferred-models.ts';
+import * as sidekick from './server-lib/sidekick/index.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -735,8 +718,8 @@ async function handlePreferredModelsGet(_req, res) {
 
 /** Write the request body (newline- or comma-separated globs) to the
  *  yaml's models.preferred list and re-derive the runtime matcher so
- *  the next /api/hermes/models-catalog call partitions correctly
- *  without a server restart. */
+ *  the next picker fetch partitions correctly without a server
+ *  restart. */
 async function handlePreferredModelsPost(req, res) {
   const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c);
@@ -759,8 +742,6 @@ async function handlePreferredModelsPost(req, res) {
     // Re-derive the live matcher. PREFERRED_MODELS_RAW/GLOBS are module
     // consts, so swap them via reassignment through let if needed.
     rebuildPreferredModels(globs);
-    // Invalidate openrouter catalog cache so the next fetch re-partitions.
-    clearOpenrouterCatalogCache();
     res.writeHead(204); res.end();
   } catch (e: any) {
     console.error('preferred-models write failed:', e.message);
@@ -782,98 +763,43 @@ function handleConfig(_req, res) {
     agentLabel: cfgVal('SIDEKICK_AGENT_LABEL', 'app.agent_label', 'Clawdian'),
     // Any valid CSS color (hex, rgb(), hsl()). Empty = keep stylesheet default.
     themePrimary: cfgVal('SIDEKICK_THEME_PRIMARY', 'app.theme_primary', ''),
-    // Which BackendAdapter the client loads. 'hermes' default; other values:
-    // 'openclaw', 'zeroclaw', 'openai-compat'. See src/backends/.
-    backend: cfgVal('SIDEKICK_BACKEND', 'backend.type', 'hermes'),
-    openaiCompatModel: cfgVal('SIDEKICK_OPENAI_COMPAT_MODEL', 'backend.openai_compat.model', ''),
+    // Which BackendAdapter the client loads. Always 'hermes-gateway'
+    // post-refactor — the legacy openclaw / openai-compat / zeroclaw
+    // direct-PWA-to-LLM adapters were removed in step 7. Setting any
+    // other value loads hermes-gateway anyway.
+    backend: cfgVal('SIDEKICK_BACKEND', 'backend.type', 'hermes-gateway'),
   }));
 }
 
 // Sidekick audio bridge — standalone Python aiortc service for WebRTC
-// signaling + STT + TTS. The proxy forwards /api/rtc/* to the bridge
-// rather than hermes; the bridge talks back to the proxy at
-// /api/hermes/responses for agent dispatch (single sidekick→agent
-// gateway). See ~/code/sidekick/audio-bridge/.
+// signaling + STT + TTS. The proxy forwards /api/rtc/* to the bridge;
+// the bridge POSTs back to /api/sidekick/messages with {chat_id, text}
+// for agent dispatch (single sidekick→agent gateway). See
+// ~/code/sidekick/audio-bridge/.
 const AUDIO_BRIDGE_UPSTREAM = cfgVal(
   'SIDEKICK_AUDIO_BRIDGE_URL',
   'backend.audio_bridge.url',
   'http://127.0.0.1:8643',
 ) as string;
 
-// ─── Hermes backend ─────────────────────────────────────────────────────────
-// All hermes-specific code (sqlite session browser, search, delete, model
-// selector, /api/hermes/* proxy, drawer-events SSE) lives in
-// ./server-lib/backends/hermes/. server.ts wires deploy-config-derived
-// constants into that module via initHermesConfig() below, then dispatches
-// requests to the imported handlers. See server-lib/backends/hermes/search.ts
-// for the canonical mental-model anchor on how hermes ids and forks work.
 const HOME = os.homedir();
-/** Expand ~ / $HOME prefixes in config-supplied paths. */
-function expandHome(p: string): string {
-  if (!p) return p;
-  if (p.startsWith('~/')) return path.join(HOME, p.slice(2));
-  if (p.startsWith('$HOME/')) return path.join(HOME, p.slice(6));
-  return p;
-}
-initHermesConfig({
-  HERMES_STORE_DB: expandHome(cfgVal('SIDEKICK_HERMES_STORE_DB', 'backend.hermes.store_db',
-    path.join(HOME, '.hermes/response_store.db')) as string),
-  HERMES_STATE_DB: expandHome(cfgVal('SIDEKICK_HERMES_STATE_DB', 'backend.hermes.state_db',
-    path.join(HOME, '.hermes/state.db')) as string),
-  HERMES_CLI: expandHome(cfgVal('SIDEKICK_HERMES_CLI', 'backend.hermes.cli_path',
-    path.join(HOME, '.local/bin/hermes')) as string),
-  // Hindsight long-term memory bank — used to scrub session-derived memories
-  // when the user deletes a session. Defaults match the local_external setup
-  // described in ~/.hermes/hindsight/config.json. Empty url disables the purge
-  // step (e.g. cloud mode where we don't have a direct delete path wired).
-  HINDSIGHT_URL: (cfgVal('SIDEKICK_HINDSIGHT_URL', 'backend.hindsight.url',
-    'http://127.0.0.1:8765') as string).replace(/\/+$/, ''),
-  HINDSIGHT_BANK: cfgVal('SIDEKICK_HINDSIGHT_BANK', 'backend.hindsight.bank_id',
-    'default') as string,
-  HINDSIGHT_API_KEY: (process.env.HINDSIGHT_API_KEY ||
-    cfgVal('SIDEKICK_HINDSIGHT_API_KEY', 'backend.hindsight.api_key', '') as string).trim(),
-  // Filter so random test names / non-sidekick conversations don't clutter the UI.
-  // hermes adapter generates names as 'sidekick-main' or 'sidekick-<timestamp>'.
-  HERMES_SESSION_PREFIX: cfgVal('SIDEKICK_HERMES_SESSION_PREFIX',
-    'backend.hermes.session_prefix', 'sidekick-') as string,
-  // Source filter for state.db/sessions — hermes tags each session with where
-  // it came from ('api_server' = sidekick webchat; 'telegram' = telegram bot;
-  // 'cli' = terminal sessions). Sidekick drawer shows the channels the user
-  // actually talks through; 'cli' is excluded by default since those are
-  // ad-hoc debug sessions.
-  HERMES_SESSION_SOURCES: (() => {
-    const env = process.env.SIDEKICK_HERMES_SESSION_SOURCES;
-    if (env) return env.split(',').map(s => s.trim()).filter(Boolean);
-    const cfg = DEPLOY_CFG?.backend?.hermes?.session_sources;
-    if (Array.isArray(cfg)) return cfg.map((s: any) => String(s).trim()).filter(Boolean);
-    return ['api_server', 'telegram'];
-  })(),
-  // ── Hermes API proxy: /api/hermes/* → http://127.0.0.1:8642/v1/* ────────
-  // Sideclaw-facing shim for Hermes's OpenAI-compatible API server. Keeps
-  // the upstream loopback-bound and injects the bearer token server-side
-  // so the browser never handles it. Pipes responses (including SSE for
-  // /responses) straight through without buffering — SSE breaks if buffered.
-  HERMES_UPSTREAM: cfgVal('SIDEKICK_HERMES_URL', 'backend.hermes.url', 'http://127.0.0.1:8642') as string,
-  HERMES_TOKEN: process.env.SIDEKICK_HERMES_TOKEN || '',  // secret — env only
-});
 
-initOpenAICompatConfig({
-  OPENAI_COMPAT_URL: cfgVal('SIDEKICK_OPENAI_COMPAT_URL', 'backend.openai_compat.url',
-    'http://localhost:11434/v1/chat/completions') as string,  // Ollama default
-  OPENAI_COMPAT_KEY: process.env.SIDEKICK_OPENAI_COMPAT_KEY || '',  // secret — env only
-});
-
-// ─── Hermes-gateway backend ─────────────────────────────────────────────
-// WS client to the in-process hermes sidekick platform adapter (the
-// hermes-plugin/sidekick_platform.py adapter, peer of telegram/slack).
-// Coexists with the legacy /api/hermes/* /v1/responses path; the PWA
-// picks one via its backend setting. With no token configured, the WS
-// client logs a warning and the /api/sidekick/* endpoints return 503.
-hermesGateway.init({
+// ─── Sidekick agent contract ────────────────────────────────────────────
+// The proxy talks to ANY upstream that speaks the abstract agent
+// contract (HTTP+SSE — see docs/ABSTRACT_AGENT_PROTOCOL.md).
+// hermes-plugin is the typical upstream; the stub agent under
+// `agent/` is a hermes-free reference. With no token configured the
+// proxy connects in open mode (no Authorization header) — that's
+// what the stub agent expects. Hermes-plugin requires a real token.
+sidekick.init({
   token: process.env.SIDEKICK_PLATFORM_TOKEN
     || (cfgVal('SIDEKICK_PLATFORM_TOKEN', 'backend.sidekick_platform.token', '') as string),
+  // Default to the in-tree stub agent's port (boots alongside the
+  // proxy via `npm start` → `scripts/start-all.mjs`). Hermes-plugin
+  // users override via `SIDEKICK_PLATFORM_URL=http://127.0.0.1:8645`
+  // in `.env`.
   url: cfgVal('SIDEKICK_PLATFORM_URL', 'backend.sidekick_platform.url',
-    'ws://127.0.0.1:8645/ws') as string,
+    'http://127.0.0.1:4001') as string,
 });
 
 // Cold-start initialization of the preferred-models matcher. Without
@@ -901,9 +827,8 @@ hermesGateway.init({
 // ── WebRTC voice transport proxy: /api/rtc/* → audio-bridge /v1/rtc/* ────────
 // The audio bridge (~/code/sidekick/audio-bridge/) is a standalone Python
 // aiortc service on :8643. The bridge owns WebRTC signaling, STT, and
-// TTS; it dispatches utterances back through this proxy at
-// /api/hermes/responses (agent traffic stays funneled through one
-// sidekick→agent gateway).
+// TTS; it POSTs back through this proxy at /api/sidekick/messages with
+// {chat_id, text} for agent dispatch (single sidekick→agent gateway).
 //
 // Body sizes are tiny (an SDP offer is <4KB, ICE candidates <1KB) so no
 // special streaming concerns. No auth header forwarding — the bridge is
@@ -950,69 +875,37 @@ function handleRtcProxy(req, res) {
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
   // WebRTC voice signaling proxy → /v1/rtc/* on hermes upstream.
-  // Match before /api/hermes (we only forward the rtc subtree).
   if (req.url && req.url.startsWith('/api/rtc')) return handleRtcProxy(req, res);
-  // Hermes session-browser routes (handled locally via sqlite; must match
-  // before the generic /api/hermes pass-through proxy below).
-  if (req.url) {
-    const msgMatch = req.method === 'GET' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)\/messages(?:\?.*)?$/);
-    if (msgMatch) return handleHermesSessionMessages(req, res, decodeURIComponent(msgMatch[1]));
-    const lastRespMatch = req.method === 'GET' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)\/last-response-id(?:\?.*)?$/);
-    if (lastRespMatch) return handleHermesSessionLastResponseId(req, res, decodeURIComponent(lastRespMatch[1]));
-    const renameMatch = req.method === 'POST' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)\/rename(?:\?.*)?$/);
-    if (renameMatch) return handleHermesSessionRename(req, res, decodeURIComponent(renameMatch[1]));
-    const deleteMatch = req.method === 'DELETE' && req.url.match(/^\/api\/hermes\/sessions\/([^/?]+)(?:\?.*)?$/);
-    if (deleteMatch) return handleHermesSessionDelete(req, res, decodeURIComponent(deleteMatch[1]));
-    if (req.method === 'GET' && req.url === '/api/hermes/drawer-events') return handleDrawerEvents(req, res);
-    if (req.method === 'GET' && /^\/api\/hermes\/sessions(?:\?.*)?$/.test(req.url)) return handleHermesSessionsList(req, res);
-    if (req.method === 'GET' && /^\/api\/hermes\/search(?:\?.*)?$/.test(req.url)) return handleHermesSearch(req, res);
-    if (req.method === 'GET' && /^\/api\/hermes\/models-catalog(?:\?.*)?$/.test(req.url)) {
-      // Pick up any edits to models.preferred in sidekick.config.yaml since
-      // last load (VSCode save, manual edit, etc.). mtime-gated so cost is a
-      // stat syscall when nothing changed. The settings UI polls this
-      // endpoint every 30s, so yaml edits land in the picker within one
-      // poll tick without a service restart. (Reload was previously called
-      // from inside the handler before the hermes backend was extracted —
-      // moved up to keep the handler module self-contained.)
-      reloadConfigIfChanged();
-      return handleHermesModelsCatalog(req, res);
-    }
-    if (req.method === 'GET' && /^\/api\/hermes\/model(?:\?.*)?$/.test(req.url)) return handleHermesModelGet(req, res);
-    if (req.method === 'POST' && /^\/api\/hermes\/model(?:\?.*)?$/.test(req.url)) return handleHermesModelSet(req, res);
-  }
-  if (req.url && req.url.startsWith('/api/hermes')) return handleHermesProxy(req, res);
-  // Sidekick platform-adapter endpoints (coexist with /api/hermes/*).
-  // Match before the static fallback. The DELETE pattern's chat_id
-  // capture group is permissive on character class to match the
-  // IDB-minted UUIDs we expect.
+  // Sidekick agent-contract endpoints. Match before the static
+  // fallback. The DELETE pattern's chat_id capture group is permissive
+  // on character class to match the IDB-minted UUIDs we expect.
   if (req.url) {
     if (req.method === 'POST' && req.url === '/api/sidekick/messages') {
-      return hermesGateway.handleSidekickMessage(req, res);
+      return sidekick.handleSidekickMessage(req, res);
     }
-    if (req.method === 'GET' && req.url === '/api/sidekick/stream') {
-      return hermesGateway.handleSidekickStream(req, res);
+    if (req.method === 'GET' && /^\/api\/sidekick\/stream(?:\?.*)?$/.test(req.url)) {
+      return sidekick.handleSidekickStream(req, res);
     }
     if (req.method === 'GET' && /^\/api\/sidekick\/sessions(?:\?.*)?$/.test(req.url)) {
-      return hermesGateway.handleSidekickSessionsList(req, res);
+      return sidekick.handleSidekickSessionsList(req, res);
     }
     // Per-chat_id transcript history. Match BEFORE the generic
     // /sessions/<id> DELETE pattern so the more-specific subroute wins.
     const sidekickHistory = req.method === 'GET'
       && req.url.match(/^\/api\/sidekick\/sessions\/([^/?]+)\/messages(?:\?.*)?$/);
     if (sidekickHistory) {
-      return hermesGateway.handleSidekickSessionMessages(req, res, decodeURIComponent(sidekickHistory[1]));
+      return sidekick.handleSidekickSessionMessages(req, res, decodeURIComponent(sidekickHistory[1]));
     }
     const sidekickDelete = req.method === 'DELETE'
       && req.url.match(/^\/api\/sidekick\/sessions\/([^/?]+)(?:\?.*)?$/);
     if (sidekickDelete) {
-      return hermesGateway.handleSidekickSessionDelete(req, res, decodeURIComponent(sidekickDelete[1]));
+      return sidekick.handleSidekickSessionDelete(req, res, decodeURIComponent(sidekickDelete[1]));
     }
   }
   if (req.method === 'GET' && req.url === '/config') return handleConfig(req, res);
   if (req.method === 'GET' && req.url === '/api/keyterms') return handleKeytermsGet(req, res);
   if (req.method === 'GET' && req.url === '/api/preferred-models') return handlePreferredModelsGet(req, res);
   if (req.method === 'POST' && req.url === '/api/preferred-models') return handlePreferredModelsPost(req, res);
-  if (req.method === 'POST' && req.url === '/api/chat') return handleOpenAICompatChat(req, res);
   if (req.method === 'POST' && req.url.startsWith('/tts')) return handleTts(req, res);
   if (req.method === 'POST' && req.url.startsWith('/gen-image')) return handleGenImage(req, res);
   if (req.method === 'POST' && req.url === '/canvas/show') return handleCanvasShow(req, res);

@@ -5,14 +5,14 @@ import assert from 'node:assert/strict';
 // Card modules that call document.createElement are fine to import —
 // we only call validate(), which is pure logic.
 
-import { registerCard, getCard } from '../src/canvas/registry.ts';
-import { validateCard } from '../src/canvas/validate.ts';
-import imageCard from '../src/canvas/cards/image.ts';
-import youtubeCard from '../src/canvas/cards/youtube.ts';
-import spotifyCard from '../src/canvas/cards/spotify.ts';
-import linksCard from '../src/canvas/cards/links.ts';
-import markdownCard from '../src/canvas/cards/markdown.ts';
-import loadingCard from '../src/canvas/cards/loading.ts';
+import { registerCard, getCard } from '../src/cards/registry.ts';
+import { validateCard } from '../src/cards/validate.ts';
+import imageCard from '../src/cards/kinds/image.ts';
+import youtubeCard from '../src/cards/kinds/youtube.ts';
+import spotifyCard from '../src/cards/kinds/spotify.ts';
+import linksCard from '../src/cards/kinds/links.ts';
+import markdownCard from '../src/cards/kinds/markdown.ts';
+import loadingCard from '../src/cards/kinds/loading.ts';
 
 // Register all cards
 [imageCard, youtubeCard, spotifyCard, linksCard, markdownCard, loadingCard]

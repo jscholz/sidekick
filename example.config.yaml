@@ -21,42 +21,13 @@ app:
   theme_primary: ~
 
 # ── Backend selection ─────────────────────────────────────────────────
+# Sidekick has a single backend: the proxy's /api/sidekick/* surface,
+# which talks to ANY agent that speaks the abstract agent contract
+# (HTTP+SSE, OAI Responses-shaped — see docs/ABSTRACT_AGENT_PROTOCOL.md).
+# The backend.type key is reserved for future per-deployment tuning;
+# 'hermes-gateway' is the only value that does anything today.
 backend:
-  # SIDEKICK_BACKEND — 'hermes' | 'hermes-gateway' | 'openclaw' | 'zeroclaw' | 'openai-compat'
-  # 'hermes-gateway' (Phase-3) is the new platform-adapter path: chat
-  # routing via /api/sidekick/* with chat_ids minted in PWA IDB.
-  # Requires the hermes plugin from hermes-plugin/sidekick_platform.py.
-  type: hermes
-
-  # Per-backend options below. Only the one matching `type` is used;
-  # others are ignored but kept here for quick switching.
-
-  hermes:
-    # SIDEKICK_HERMES_URL
-    url: http://127.0.0.1:8642
-    # SIDEKICK_HERMES_CLI — path to the hermes CLI for rename / delete
-    cli_path: ~/.local/bin/hermes
-    # SIDEKICK_HERMES_STATE_DB + SIDEKICK_HERMES_STORE_DB
-    state_db: ~/.hermes/state.db
-    store_db: ~/.hermes/response_store.db
-    # SIDEKICK_HERMES_SESSION_PREFIX — default drawer filter
-    session_prefix: sidekick-
-    # SIDEKICK_HERMES_SESSION_SOURCES — which source tags show in drawer
-    session_sources: [api_server, telegram]
-
-  openclaw:
-    # Assumes wss://<host>:18789/ws unless overridden via server code
-    ws_host: same
-    ws_port: 18789
-
-  zeroclaw:
-    # SIDEKICK_ZEROCLAW_WS
-    ws_url: ~
-
-  openai_compat:
-    # SIDEKICK_OPENAI_COMPAT_URL + _MODEL (key stays in .env)
-    url: ~
-    model: ~
+  type: hermes-gateway
 
 # ── Model picker ──────────────────────────────────────────────────────
 models:

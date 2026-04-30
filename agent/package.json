@@ -1,0 +1,17 @@
+{
+  "name": "@sidekick/stub-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference agent implementation for sidekick. Implements the Abstract Agent Protocol (POST /v1/responses) so a fresh sidekick clone has a working backend out of the box.",
+  "bin": {
+    "sidekick-stub-agent": "bin/start.mjs"
+  },
+  "scripts": {
+    "start": "node bin/start.mjs",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

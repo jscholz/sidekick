@@ -1,7 +1,10 @@
 /**
  * @fileoverview cmd+K command palette — search across the cached session
- * list (instant) and against hermes' messages_fts index (debounced 300ms,
- * over /api/hermes/search).
+ * list (instant) and against the active backend's message-search index
+ * (debounced 300ms, via `backend.search('both', q, …)`). Backends without
+ * a search implementation (openclaw, openai-compat, hermes-gateway today)
+ * return an empty result and the palette degrades to the cached-sessions
+ * filter only.
  *
  * Layout: <dialog> modal mirroring the session-info-dialog pattern in
  * sessionDrawer.ts (centered, ::backdrop, click-outside-to-close, Esc
@@ -16,7 +19,7 @@
 import * as backend from './backend.ts';
 import * as sessionDrawer from './sessionDrawer.ts';
 import { parseQuery, applyFilter } from './sessionFilter.ts';
-import { searchBoth, type MessageHit as ServerMessageHit } from './sessionSearch.ts';
+import type { SearchMessageHit as ServerMessageHit } from './backends/types.ts';
 import { diag } from './util/log.ts';
 
 type SessionHit = {
@@ -54,11 +57,17 @@ let messagesAbortCtl: AbortController | null = null;
  *  funnel through it so we don't have to re-implement replaySessionMessages
  *  here. (Backend.resumeSession returns the messages payload.) */
 let onResumeCb: ((id: string, messages: any[], pagination?: any) => void) | null = null;
+let onBeforeSwitchCb: ((leavingId: string | null) => void) | null = null;
 
 export function init(opts: {
   onResume: (id: string, messages: any[], pagination?: any) => void;
+  /** Same hook as sessionDrawer.init's onBeforeSwitch — fires with the
+   *  chat being navigated AWAY from at the moment a palette hit
+   *  activates. Lets the shell drop empty/abandoned chats. */
+  onBeforeSwitch?: (leavingId: string | null) => void;
 }) {
   onResumeCb = opts.onResume;
+  onBeforeSwitchCb = opts.onBeforeSwitch || null;
   // Modal-open shortcut. Listen at document level so it works no matter
   // what's focused (including inside the composer textarea — cmd+K is
   // explicit enough that it should always win).
@@ -166,9 +175,11 @@ function ensureDialog() {
     if (messagesStatusEl) messagesStatusEl.textContent = '…';
     // Debounce backend search — don't pummel server with one query per
     // keystroke. 300ms hits the sweet spot for a chunky type-and-pause.
-    // searchBoth returns sessions + messages in one round trip, so the
-    // server-authoritative sessions list reconciles into the panel as
-    // well (covers matches outside the cached top-50).
+    // backend.search(q, 'both') returns sessions + messages in one round
+    // trip, so the server-authoritative sessions list reconciles into the
+    // panel as well (covers matches outside the cached top-50). Backends
+    // without a search implementation return {sessions:[], hits:[]} and
+    // the messages section just stays empty.
     messagesDebounceTimer = setTimeout(() => {
       messagesDebounceTimer = null;
       runUnifiedSearch(q);
@@ -242,39 +253,59 @@ function renderSessionRow(s: any): HTMLLIElement {
   return li;
 }
 
-/** Run a single round-trip via searchBoth — pulls sessions (server-
- *  authoritative, may include rows outside the cached top-50) and
- *  message FTS hits in one request. The sessions section is repainted
+/** Run a single round-trip via backend.search('both') — pulls sessions
+ *  (server-authoritative, may include rows outside the cached top-50)
+ *  and message FTS hits in one request. The sessions section is repainted
  *  with the server-truth result so deep-history matches surface.
  *  AbortController is shared with the legacy `messagesAbortCtl` slot
- *  so an in-flight earlier query gets cancelled correctly. */
+ *  so an in-flight earlier query gets cancelled correctly. Backends
+ *  without an index return `{sessions:[], hits:[]}`; the cached-sessions
+ *  paint from rerenderSessions() above is what the user actually sees. */
 async function runUnifiedSearch(q: string) {
   if (messagesAbortCtl) messagesAbortCtl.abort();
   messagesAbortCtl = new AbortController();
   try {
-    const result = await searchBoth(q, 20, messagesAbortCtl.signal);
+    const result = await backend.search(q, 'both', { limit: 20, signal: messagesAbortCtl.signal });
     if (!messagesListEl || !messagesStatusEl || !sessionsListEl) return;
-    // Repaint sessions section from the server result (top 10).
-    const topSessions = result.sessions.slice(0, 10);
-    sessionsListEl.innerHTML = '';
-    if (topSessions.length === 0 && q.trim()) {
-      const empty = document.createElement('li');
-      empty.className = 'cmdk-empty';
-      empty.textContent = 'No matching sessions.';
-      sessionsListEl.appendChild(empty);
-    } else {
-      for (const s of topSessions) sessionsListEl.appendChild(renderSessionRow(s));
+    // Sessions section: only repaint from the SERVER result if the
+    // active backend actually has a search index. Otherwise the
+    // cached client-side fuzzy filter (painted by rerenderSessions
+    // on every keystroke) is the answer — we do not want to clobber
+    // it with an empty server response. Pre-fix bug: a hermes-gateway
+    // user typing "lon" would briefly see fuzzy hits, then watch them
+    // disappear 300ms later when the empty server search overwrote
+    // the section with "No matching sessions." (Jonathan repro
+    // 2026-04-29.)
+    if (backend.hasSearch()) {
+      const topSessions = result.sessions.slice(0, 10);
+      sessionsListEl.innerHTML = '';
+      if (topSessions.length === 0 && q.trim()) {
+        const empty = document.createElement('li');
+        empty.className = 'cmdk-empty';
+        empty.textContent = 'No matching sessions.';
+        sessionsListEl.appendChild(empty);
+      } else {
+        for (const s of topSessions) sessionsListEl.appendChild(renderSessionRow(s));
+      }
     }
-    // Repaint messages section.
+    // Messages section: always repaint. Backends without a search
+    // index return result.hits = [] and the status flips to "no
+    // matches" — that's accurate for messages (we can't fuzzy-match
+    // message bodies client-side; cached IDB only stores transcripts
+    // for chats the user has resumed).
     messagesListEl.innerHTML = '';
     if (result.error) {
       messagesStatusEl.textContent = result.error;
       rebuildVisibleHits();
       return;
     }
-    messagesStatusEl.textContent = result.hits.length ? '' : 'no matches';
-    for (const h of result.hits) {
-      messagesListEl.appendChild(renderMessageRow(h));
+    if (!backend.hasSearch()) {
+      messagesStatusEl.textContent = '';
+    } else {
+      messagesStatusEl.textContent = result.hits.length ? '' : 'no matches';
+      for (const h of result.hits) {
+        messagesListEl.appendChild(renderMessageRow(h));
+      }
     }
     rebuildVisibleHits();
   } catch (e: any) {
@@ -379,6 +410,15 @@ async function activate(hit: Hit) {
   const id = hit.kind === 'session' ? hit.id : hit.session_id;
   if (!id) return;
   close();
+  // Fire onBeforeSwitch with the chat we're navigating AWAY from
+  // BEFORE backend.resumeSession flips the active pointer. Lets the
+  // shell clean up empty/abandoned chats so they don't pollute the
+  // drawer.
+  const leaving = backend.getCurrentSessionId?.() ?? null;
+  if (leaving !== id) {
+    try { onBeforeSwitchCb?.(leaving); }
+    catch (e: any) { diag(`cmdk: onBeforeSwitch threw: ${e?.message || e}`); }
+  }
   try {
     const result: any = await backend.resumeSession(id);
     const messages = result.messages || [];
