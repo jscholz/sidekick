@@ -32,12 +32,12 @@ which Tier-1 tests get implemented; this doc is the menu.
 ## Test layout convention
 
 **Sidekick proxy contract tests live with the proxy code.** They
-belong at `server-lib/sidekick/__tests__/` (or a new harness — the
+belong at `proxy/sidekick/__tests__/` (or a new harness — the
 WS-shaped fixture was removed during the agent-contract refactor;
-HTTP-shaped follow-up is queued). The PWA-side `hermes-plugin/`
+HTTP-shaped follow-up is queued). The PWA-side `backends/hermes/plugin/`
 package is independently extractable. Rationale: sidekick is meant
 to be modular — a fork pointing at a different agent should be able
-to delete `hermes-plugin/` (or replace it with their own plugin) and
+to delete `backends/hermes/plugin/` (or replace it with their own plugin) and
 not lose anything elsewhere.
 
 Generic / backend-agnostic tests (markdown, voice state machines,
@@ -130,7 +130,7 @@ mechanisms that make sidekick usable.
   switches transcript on FIRST try (no stale-callback bounce-back);
   hold 600ms after each click to detect delayed race.
 - **Type**: Playwright (mock backend)
-- **Files**: `src/sessionDrawer.ts:resume()`, `src/backends/hermes-gateway.ts`
+- **Files**: `src/sessionDrawer.ts:resume()`, `src/hermes-gateway.ts`
 - **Complexity**: Medium (already prototyped — `drawer-switch.mjs`
   has the throttling pattern; just enforce mock setup)
 - **Addresses**: the iOS Safari "1/3 of clicks fail" bug class
@@ -141,7 +141,7 @@ mechanisms that make sidekick usable.
   by chat_id). Switch back to A → A's reply renders.
 - **Type**: Playwright (mock backend can sequence cross-chat
   envelopes deterministically)
-- **Files**: `src/backends/hermes-gateway.ts` (envelope handlers),
+- **Files**: `src/hermes-gateway.ts` (envelope handlers),
   `src/main.ts:handleReplyDelta()`, `src/sessionDrawer.ts:getViewed()`
 - **Complexity**: Medium
 - **Addresses**: the "three replies in active chat" bug class — the
@@ -168,7 +168,7 @@ mechanisms that make sidekick usable.
   envelope synthetically; default mocked, real-backend run is
   manual / on-demand when touching adjacent code).
 - **Files**: `src/sessionDrawer.ts:refresh()`,
-  `src/backends/hermes-gateway.ts` session_changed handler
+  `src/hermes-gateway.ts` session_changed handler
 - **Complexity**: Low (this is the existing stub; just implement)
 - **Addresses**: user-reported bug; stub already named.
 - **Note**: this is a UX test, not a hermes integration test. Mocked

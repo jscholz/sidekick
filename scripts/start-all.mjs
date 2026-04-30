@@ -4,7 +4,7 @@
  *
  * Spawns two child processes:
  *   - proxy: `node --experimental-strip-types ... server.ts`
- *   - agent: `cd agent && npm start` (echo LLM)
+ *   - agent: `cd backends/stub && npm start` (echo LLM)
  *
  * Stdout from each is prefixed (`[proxy]` / `[agent]`) so a single
  * terminal can follow both. SIGINT (Ctrl-C) cleanly tears down both
@@ -25,7 +25,7 @@
  * stub for a different upstream (a different binary, a docker exec,
  * etc.). Set it to an empty string to skip starting the agent
  * entirely (useful when running against an already-running
- * hermes-plugin).
+ * backends/hermes/plugin).
  */
 import { spawn } from 'node:child_process';
 import net from 'node:net';
@@ -154,7 +154,7 @@ if (!skipAgent) {
   } else {
     // Default: in-tree stub agent.
     agent = spawnPrefixed('agent', 'npm', ['start'], {
-      cwd: path.join(REPO_ROOT, 'agent'),
+      cwd: path.join(REPO_ROOT, 'backends', 'stub'),
       env: { AGENT_PORT: String(agentPort) },
     });
   }

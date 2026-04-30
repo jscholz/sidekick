@@ -28,8 +28,8 @@ import { validators } from './src/cards/validators.ts';
 import {
   rebuildPreferredModels,
   PREFERRED_MODELS_RAW,
-} from './server-lib/preferred-models.ts';
-import * as sidekick from './server-lib/sidekick/index.ts';
+} from './proxy/preferred-models.ts';
+import * as sidekick from './proxy/sidekick/index.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -662,36 +662,31 @@ async function handleTranscribe(req, res) {
 // (app name, default coords) can be set without a rebuild.
 const GW_TOKEN = process.env.GW_TOKEN || '';
 
-// Default STT keyterm seed file. Read-only at runtime: the PWA fetches
-// it ONCE on first boot to seed each user's IndexedDB-backed list, then
-// reads/writes only IDB thereafter. Forks editing this file affect new
-// users only — existing installs keep their per-user IDB list. One term
-// per line; '#' comments and blank lines are ignored. Lives next to
-// server.ts so it ships with the repo.
-const DEFAULT_KEYTERMS_SEED_PATH = path.join(__dirname, 'default_stt_keyterms.txt');
-
-// Final fallback when the seed file is missing or unreadable. Minimal so
-// forks don't inherit unrelated vocabulary biases.
+// STT keyterm seed list. Read from sidekick.config.yaml's `stt.keyterms`
+// (a YAML list); the PWA fetches this ONCE on first boot to seed each
+// user's IndexedDB-backed list, then reads/writes only IDB thereafter.
+// Edits to the yaml affect new users only — existing installs keep
+// their per-user IDB list. Falls back to FALLBACK_KEYTERMS if the yaml
+// is missing the section (or sidekick is running without a config).
 const FALLBACK_KEYTERMS: string[] = ['Sidekick', 'Deepgram'];
 
-/** Read + parse the keyterm seed file. Strips '#' comments, splits on
- *  newlines and commas (matches the chip-UI parser). Falls back to
- *  FALLBACK_KEYTERMS if the file is missing/unreadable. */
+/** Resolve the keyterm seed list from sidekick.config.yaml. Strings
+ *  are trimmed + deduped (case-insensitive). Anything non-string in
+ *  the array is dropped silently. Reads via the live DEPLOY_CFG so a
+ *  yaml mtime-triggered reload picks up edits without a restart. */
 function readSeedKeyterms(): string[] {
-  let raw = '';
-  try {
-    raw = fsSync.readFileSync(DEFAULT_KEYTERMS_SEED_PATH, 'utf8');
-  } catch {
-    return [...FALLBACK_KEYTERMS];
-  }
+  const raw = DEPLOY_CFG?.stt?.keyterms;
+  if (!Array.isArray(raw)) return [...FALLBACK_KEYTERMS];
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const line of raw.split('\n')) {
-    const nocomment = line.replace(/#.*$/, '');
-    for (const part of nocomment.split(',')) {
-      const t = part.trim();
-      if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
-    }
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const t = entry.trim();
+    if (!t) continue;
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
   }
   return out.length ? out : [...FALLBACK_KEYTERMS];
 }
@@ -787,7 +782,7 @@ const HOME = os.homedir();
 // ─── Sidekick agent contract ────────────────────────────────────────────
 // The proxy talks to ANY upstream that speaks the abstract agent
 // contract (HTTP+SSE — see docs/ABSTRACT_AGENT_PROTOCOL.md).
-// hermes-plugin is the typical upstream; the stub agent under
+// backends/hermes/plugin is the typical upstream; the stub agent under
 // `agent/` is a hermes-free reference. With no token configured,
 // `/api/sidekick/*` endpoints return 503.
 sidekick.init({

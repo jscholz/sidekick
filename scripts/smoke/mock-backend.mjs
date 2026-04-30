@@ -14,7 +14,7 @@
 //
 // /api/sidekick/stream is served by a real in-process http.Server on
 // an ephemeral 127.0.0.1 port (mirrors the proxy-test harness pattern
-// at server-lib/sidekick/__tests__/proxy-harness.ts).
+// at proxy/sidekick/__tests__/proxy-harness.ts).
 // Playwright forwards the PWA's /api/sidekick/stream request to that
 // local server via `route.continue({ url })`, so the EventSource sees
 // a single long-lived connection — `pushReply` / `pushSessionChanged`

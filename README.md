@@ -6,13 +6,13 @@ Talks to any agent that speaks the abstract agent contract
 (OpenAI-Responses-shaped HTTP+SSE — see
 `docs/ABSTRACT_AGENT_PROTOCOL.md`). Ships with:
 
-- **Hermes plugin** (`hermes-plugin/`) — turns a hermes-agent install
+- **Hermes plugin** (`backends/hermes/plugin/`) — turns a hermes-agent install
   into a sidekick-compatible upstream. Supports cross-platform
   drawer (telegram, slack, whatsapp sessions surface alongside
   sidekick) via the `/v1/gateway/conversations` extension.
-- **Stub agent** (`agent/`) — standalone TypeScript reference
+- **Stub agent** (`backends/stub/`) — standalone TypeScript reference
   implementation with echo / Gemini / Ollama LLM adapters. Run it
-  on `localhost:4001` with `cd agent && npm start` for
+  on `localhost:4001` with `cd backends/stub && npm start` for
   hermes-free demos and tests.
 
 **Features**
@@ -41,12 +41,26 @@ The default backend is Hermes. See [Backend setup](#backend-setup) below.
 
 ### Configuration
 
-Two layers:
+Sidekick configuration spans **two surfaces**:
 
-- **`sidekick.config.yaml`** (optional, gitignored) — non-secret deployment tuning. Copy `config.example.yaml` → `sidekick.config.yaml` and edit to customize your instance (app name, theme, backend choice, preferred-model filter, etc.). Every key here can be overridden by an env var of the matching name — handy for Docker/CI.
-- **`.env`** (gitignored) — secrets only: API keys, bearer tokens. Precedence: env vars > config file > built-in default.
+**1. Static on-disk** (set at deploy time, requires service restart to change)
 
-See `.env.example` for the full annotated env var list and `config.example.yaml` for the YAML schema.
+- **`.env`** (gitignored) — secrets only: API keys, bearer tokens.
+- **`sidekick.config.yaml`** (optional, gitignored) — non-secret deployment tuning: app name, theme, backend choice, preferred-models filter defaults, server port, etc. Every key here can be overridden by an env var of the matching name — handy for Docker/CI. Point sidekick at it via `SIDEKICK_CONFIG=/path/to/sidekick.config.yaml`.
+
+Precedence: env vars > yaml > built-in default. See `.env.example` for the full annotated env var list and `sidekick.config.example.yaml` for the YAML schema.
+
+**2. Tunable from the frontend** (live, no restart)
+
+The Settings panel (gear icon, bottom-left of the sidebar) edits three categories of state, each stored in a different place:
+
+| Category | Examples | Stored where |
+|---|---|---|
+| **Sidekick-owned, per-user** | theme, hotkeys, text size, mic device, TTS voice, audio feedback level, barge-in | browser `localStorage` (`sidekick.settings.v2`) — per-tab, syncs across tabs in the same browser |
+| **Sidekick-owned, server-side** | preferred-models filter (chip input), STT keyterms | `sidekick.config.yaml` — chip UIs write back to `models.preferred` and `stt.keyterms` via the proxy. Keyterm chips also persist per-user in IDB (the yaml is just the first-launch seed). |
+| **Agent-owned** | model picker, anything else the agent declares via `/v1/settings/schema` | upstream agent's persistence (e.g. backends/hermes/plugin writes the model setting back to `~/.hermes/config.yaml`). See [Agent settings](#agent-settings-v1settings) below. |
+
+The split mirrors the architecture: settings the agent doesn't care about (theme, mic device) stay client-side; settings the agent owns (model, persona) round-trip through the agent contract; settings sidekick-the-deployment cares about (preferred-models filter, keyterms) live on the proxy.
 
 The essentials:
 
@@ -70,28 +84,29 @@ The essentials:
 Install Hermes via its [official guide](https://github.com/NousResearch/hermes-agent), then drop the bundled plugin in:
 
 ```bash
-ln -s "$(pwd)/hermes-plugin" ~/.hermes/plugins/sidekick
+ln -s "$(pwd)/backends/hermes/plugin" ~/.hermes/plugins/sidekick
 echo "SIDEKICK_PLATFORM_TOKEN=$(openssl rand -hex 32)" >> ~/.hermes/.env
 ```
 
 Apply the one-time hermes-core patch (registers `Platform.SIDEKICK`):
 ```bash
 cd <your hermes-agent install>
-patch -p1 < <sidekick-repo>/hermes-plugin/0001-add-sidekick-platform.patch
+patch -p1 < <sidekick-repo>/backends/hermes/plugin/0001-add-sidekick-platform.patch
 ```
 
 Restart hermes-gateway. Sidekick's drawer, replay, delete, attachments, and cross-platform views (telegram/slack/whatsapp sessions surface alongside sidekick) all work out of the box.
 
-See `hermes-plugin/README.md` for full install + the agent contract.
+See `backends/hermes/README.md` for full install instructions, hermes-side config keys (`backends/hermes/config.example.yaml`), and a description of which contract pieces this backend implements.
 
 ### Stub agent (no hermes required)
 
-Useful for development and demos:
+Useful for development and demos. Full install + LLM-adapter docs in
+`backends/stub/README.md`. tl;dr:
 
 ```bash
-cd agent && npm start
+cd backends/stub && npm start
 # port 4001, echo LLM by default
-# Set GEMINI_API_KEY / OLLAMA_URL to swap LLM backends
+# Set AGENT_LLM=gemini + GEMINI_API_KEY (or AGENT_LLM=ollama) to swap
 ```
 
 Then point sidekick at it:
@@ -136,9 +151,9 @@ Two endpoints, both optional:
 }
 ```
 
-The hermes-plugin upstream declares the model picker as one entry that wraps `~/.hermes/config.yaml` + the openrouter catalog (filtered by `SIDEKICK_PREFERRED_MODELS` env). Adding more knobs (persona, default provider, max-tokens) is purely additive in `hermes-plugin/__init__.py:_build_settings_schema`.
+The backends/hermes/plugin upstream declares the model picker as one entry that wraps `~/.hermes/config.yaml` + the openrouter catalog (filtered by `SIDEKICK_PREFERRED_MODELS` env). Adding more knobs (persona, default provider, max-tokens) is purely additive in `backends/hermes/plugin/__init__.py:_build_settings_schema`.
 
-The in-tree stub agent (`agent/src/server.mjs`) declares one `model` enum reflecting the configured LLM — a minimal reference impl for forks. Settings the PWA owns (theme, hotkeys, mic, TTS voice) stay in their original groups; the schema is for **agent-owned** settings only.
+The in-tree stub agent (`backends/stub/src/server.mjs`) declares one `model` enum reflecting the configured LLM — a minimal reference impl for forks. Settings the PWA owns (theme, hotkeys, mic, TTS voice) stay in their original groups; the schema is for **agent-owned** settings only.
 
 The settings panel re-fetches the schema on **open and close** so changes from parallel clients (CLI, sibling tab) surface without an explicit refresh.
 
@@ -146,16 +161,14 @@ The settings panel re-fetches the schema on **open and close** so changes from p
 
 Custom vocabulary — names, project codes, product terms — is stored **per user** in the browser's IndexedDB. Manage via **Settings → STT keyterms** in the UI (type-Enter chips). Changes take effect on the next mic-stream start.
 
-For multi-user / fork deployments, the seed list in `default_stt_keyterms.txt` (repo root) is copied into each user's IDB on first boot. Edit that file to change defaults for fresh installs; existing users keep whatever they've curated.
-
-> **Legacy note:** earlier versions stored keyterms in `keyterms.txt` and then `sidekick.config.yaml` under `stt.keyterms`. Both of those server-side stores are gone — the chip UI now writes to IndexedDB. Existing yaml entries are ignored; re-add them via the chip UI on first launch.
+For multi-user / fork deployments, the seed list lives in `sidekick.config.yaml` under `stt.keyterms` (a YAML list). The PWA fetches it on first boot to seed each user's IDB; edits to the yaml affect future first-launches only — existing users keep whatever they've curated.
 
 ## Architecture
 
 Sidekick is a **four-process system**: a browser PWA, a Node proxy,
 a Python audio bridge, and a separate agent upstream. The PWA, proxy,
 and bridge are sidekick code. The agent is whatever you point
-upstream at (hermes-plugin, the in-tree stub, or any third-party
+upstream at (backends/hermes/plugin, the in-tree stub, or any third-party
 `/v1/*`-speaking server).
 
 The PWA only ever talks to the proxy and the audio bridge — never to
@@ -202,12 +215,12 @@ the agent directly. The bridge only ever talks to the proxy.
               ┌──────────────────────────┐
               │ Upstream agent            │
               │   any /v1/*-speaking      │
-              │   server:                 │
-              │   - hermes-plugin         │
-              │     (in-process w/        │
+              │   server, e.g. one of:    │
+              │   - backends/hermes/      │
+              │     (Python plugin into   │
               │     hermes-agent)         │
-              │   - stub agent (in-tree,  │
-              │     agent/, echo /        │
+              │   - backends/stub/        │
+              │     (in-tree TS, echo /   │
               │     gemini / ollama)      │
               │   - any 3rd-party         │
               │     OpenAI-compat         │
@@ -298,7 +311,7 @@ For the refactor history that landed the current architecture, see
 ## Build + test
 
 Authoring is **TypeScript-only**, both for the PWA (`src/**/*.ts`)
-and for the proxy (`server.ts`, `server-lib/**/*.ts`). There's no
+and for the proxy (`server.ts`, `proxy/**/*.ts`). There's no
 separate transpile step at runtime — the proxy runs under Node 22's
 `--experimental-strip-types` flag, which strips type annotations on
 the fly with zero overhead. The PWA needs a real bundle (browsers
@@ -324,17 +337,45 @@ cards. One headless Chromium binary, two consumers.
 
 ## Modules
 
+Top-level layout:
+
+```
+sidekick/
+├── server.ts                 proxy entry point
+├── proxy/                    proxy-side TS (handlers, upstream client)
+│   ├── sidekick/                /api/sidekick/* PWA-facing routes
+│   ├── preferred-models.ts       chip-list filter (yaml-backed)
+│   └── generic/                  shared utilities
+├── src/                      PWA (browser) code; see breakdown below
+├── audio-bridge/             Python WebRTC bridge (STT + TTS + barge-in)
+├── backends/                 each subdirectory = one /v1/*-speaking agent
+│   ├── README.md                "what's here, how to add a backend"
+│   ├── stub/                    in-tree TS reference impl (echo / gemini / ollama)
+│   └── hermes/
+│       ├── plugin/                Python plugin loaded into hermes-agent
+│       ├── README.md              install + which contract pieces it implements
+│       └── config.example.yaml    annotated subset of ~/.hermes/config.yaml
+├── scripts/                  build + smoke runner + start-all
+├── docs/                     ABSTRACT_AGENT_PROTOCOL, FRONTEND_ARCHITECTURE, ...
+├── styles/                   app.css + manifest
+├── sw.js                     service worker (PWA app-shell cache)
+├── install.sh                one-command Mac/Linux installer (curl-pipe-bash)
+└── sidekick.config.example.yaml   copy to sidekick.config.yaml + fill in
+```
+
+PWA breakdown:
+
 ```
 src/
 ├── main.ts              entry — boots modules, wires cross-module callbacks
 ├── config.ts            runtime config loaded from /config, applies skinning
 ├── backend.ts           adapter loader — single proxy-client path
-├── backends/
-│   ├── types.ts             BackendAdapter contract
-│   └── hermes-gateway.ts    proxy client — calls /api/sidekick/* on the
-│                            local Node proxy. Name is historical (will
-│                            rename to proxy-client.ts later); the file
-│                            itself is fully agent-agnostic.
+├── proxyClient.ts       calls /api/sidekick/* on the local Node proxy.
+│                        Fully agent-agnostic; the proxy translates to
+│                        /v1/* on its end.
+├── proxyClientTypes.ts  BackendAdapter contract types
+├── agentSettings.ts     generic SettingDef[] renderer for the agent's
+│                        /v1/settings/* contract (model picker etc.)
 ├── chat.ts              transcript rendering + sessionStorage persistence
 ├── sessionDrawer.ts     past-conversations list, rename/delete, IDB cache
 ├── sessionCache.ts      IndexedDB cache for instant tap-to-resume

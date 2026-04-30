@@ -6,7 +6,7 @@
 // the /api/sidekick/* HTTP routes the PWA + audio-bridge consume.
 //
 // Usage from server.ts:
-//   import * as sidekick from './server-lib/sidekick/index.ts';
+//   import * as sidekick from './proxy/sidekick/index.ts';
 //   sidekick.init({ token: SIDEKICK_PLATFORM_TOKEN, url: SIDEKICK_PLATFORM_URL });
 //   // route handlers:
 //   if (req.method === 'POST' && url === '/api/sidekick/messages')

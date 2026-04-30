@@ -336,7 +336,7 @@ sidekick platform adapter** (Python, in-process inside hermes-gateway,
 port 8645 by default). The adapter is a peer of telegram/slack/signal
 in hermes-agent's gateway/platforms/* — not an audio thing.
 
-Reference implementation of the adapter: `hermes-plugin/sidekick_platform.py`.
+Reference implementation of the adapter: `backends/hermes/plugin/sidekick_platform.py`.
 
 ### Connection
 
@@ -422,6 +422,6 @@ the existing fetch+EventSource code path applies unchanged:
 
 The adapter detects compression by polling `state.db.sessions` for
 known chat_ids — see the `session_changed envelope` section in
-`hermes-plugin/sidekick_platform.py` for cadence + envelope shape.
+`backends/hermes/plugin/sidekick_platform.py` for cadence + envelope shape.
 Trade-off: ~1s lag on title refresh after compression, no hermes-core
 patch required.

@@ -1,20 +1,20 @@
 // UpstreamAgent — the proxy's contract with whatever's behind it.
 //
-// Today: hermes-plugin (in-process with hermes-agent, exposing /v1/*
-// HTTP endpoints — see hermes-plugin/__init__.py).
+// Today: backends/hermes/plugin (in-process with hermes-agent, exposing /v1/*
+// HTTP endpoints — see backends/hermes/plugin/__init__.py).
 // Tomorrow: a stub agent (echo / gemini / ollama), or any third-party
 // /v1/*-speaking server (OpenAI, Groq, Together, an Ollama OpenAI-compat
 // proxy, the openclaw plugin via api.registerHttpRoute).
 //
 // One interface, one implementation. The PWA-facing routes in
-// server-lib/sidekick/{messages,sessions,history}.ts call into this.
+// proxy/sidekick/{messages,sessions,history}.ts call into this.
 
 // No imports — this module is self-contained so it can be reused
-// across upstreams (hermes-plugin, stub agent, etc.) without dragging
+// across upstreams (backends/hermes/plugin, stub agent, etc.) without dragging
 // in WS-specific machinery. Auth comes from env or constructor opts.
 
 /** Sidekick envelope shape that the proxy's stream multiplexer consumes.
- *  Same shape as the legacy WS protocol — see hermes-plugin/__init__.py
+ *  Same shape as the legacy WS protocol — see backends/hermes/plugin/__init__.py
  *  module docstring for the canonical wire spec. */
 export type SidekickEnvelope =
   | { type: 'reply_delta'; chat_id: string; text: string; message_id: string; edit?: boolean }
@@ -154,7 +154,7 @@ export class UpstreamHTTPError extends Error {
 
 const DEFAULT_URL = process.env.UPSTREAM_URL || 'http://127.0.0.1:8645';
 // Fall back to the same shared secret the WS path uses; this lets
-// hermes-plugin auth both transports with one env var.
+// backends/hermes/plugin auth both transports with one env var.
 const DEFAULT_AUTH = (
   process.env.UPSTREAM_TOKEN || process.env.SIDEKICK_PLATFORM_TOKEN || ''
 ).trim();

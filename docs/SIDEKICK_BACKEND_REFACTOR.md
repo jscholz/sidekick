@@ -37,7 +37,7 @@ squash-commit when tests + manual verification pass.
 ┌────────────▼────────────┐
 │  Sidekick proxy (Node)  │
 │  server.ts              │
-│  server-lib/agents/     │
+│  proxy/agents/     │
 │  ──────────────────     │
 │  Owns:                  │
 │   - protocol translation│
@@ -52,7 +52,7 @@ squash-commit when tests + manual verification pass.
              │   DELETE /v1/conversations/{id}
 ┌────────────▼─────────────────────────────┐
 │  Upstream agent — any of:                 │
-│   • hermes-plugin (in-process w/ hermes,  │
+│   • backends/hermes/plugin (in-process w/ hermes,  │
 │     accesses session_manager via Python   │
 │     imports)                              │
 │   • stub agent (echo / gemini / ollama)   │
@@ -78,7 +78,7 @@ implementable as an openclaw plugin via `definePluginEntry` +
 `api.registerHttpRoute(...)` (NOT the channel-plugin idiom — see
 [`OPENCLAW_COMPATIBILITY.md`](OPENCLAW_COMPATIBILITY.md) for the data-
 flow mismatch). When that work gets prioritized, the proxy doesn't
-change at all — only the `UPSTREAM_URL` flips. `server-lib/agents/`
+change at all — only the `UPSTREAM_URL` flips. `proxy/agents/`
 stays single-impl; per-agent code lives in each agent's plugin
 codebase. Three open questions on openclaw internals (streaming-SSE
 support, in-process session enumeration API, plugin auth) are tracked
@@ -201,7 +201,7 @@ views.
 
 ## 3. Hermes-plugin migration (sidekick repo, our code)
 
-`hermes-plugin/__init__.py` currently runs an aiohttp WebSocket server
+`backends/hermes/plugin/__init__.py` currently runs an aiohttp WebSocket server
 on `127.0.0.1:8645`. Migrate to aiohttp HTTP+SSE on the same port.
 
 ### Endpoints the plugin exposes
@@ -255,7 +255,7 @@ in upstream hermes.
 
 ## 4. Proxy migration
 
-`server-lib/backends/hermes-gateway/` becomes `server-lib/agents/` and
+`proxy/backends/hermes-gateway/` becomes `proxy/agents/` and
 gains a single `UpstreamAgent` interface with one impl that talks
 HTTP+SSE.
 
@@ -290,13 +290,13 @@ bearer token mechanism (`SIDEKICK_PLATFORM_TOKEN`).
 
 ### Files reorganized
 
-- `server-lib/backends/hermes-gateway/` → `server-lib/agents/`
-- `server-lib/agents/{messages,sessions,history,stream,session-index,client}.ts`
-  collapse into `server-lib/agents/upstream.ts` (the
-  `HTTPAgentUpstream` class) + `server-lib/agents/sse-multiplexer.ts`
+- `proxy/backends/hermes-gateway/` → `proxy/agents/`
+- `proxy/agents/{messages,sessions,history,stream,session-index,client}.ts`
+  collapse into `proxy/agents/upstream.ts` (the
+  `HTTPAgentUpstream` class) + `proxy/agents/sse-multiplexer.ts`
   (the persistent `/api/sidekick/stream` channel logic).
-- `server-lib/agents/CONTRACT.md` updated to reflect the new layering.
-- `server-lib/agents/__tests__/` retained, tests rewritten to drive
+- `proxy/agents/CONTRACT.md` updated to reflect the new layering.
+- `proxy/agents/__tests__/` retained, tests rewritten to drive
   `HTTPAgentUpstream` with a mock HTTP server.
 
 The `/api/sidekick/*` HTTP route definitions (`server.ts`'s
@@ -307,9 +307,9 @@ The `/api/sidekick/*` HTTP route definitions (`server.ts`'s
 
 These go away:
 
-- `server-lib/backends/hermes-gateway/sessions.ts:107-119` (state.db
+- `proxy/backends/hermes-gateway/sessions.ts:107-119` (state.db
   query)
-- `server-lib/backends/hermes-gateway/history.ts` (state.db CTE walk
+- `proxy/backends/hermes-gateway/history.ts` (state.db CTE walk
   for compression-fork chains)
 - All `sqlQuery(HERMES_STATE_DB, ...)` call sites
 - All `~/.hermes/sessions/sessions.json` reads from the proxy
@@ -328,29 +328,29 @@ top-level of the repo as a sibling runnable. Refactor finishes it:
 - `agent/src/llm/{echo,gemini,ollama}.mjs` — already done.
 - `agent/bin/start.mjs` — already done.
 
-To run standalone: `cd agent && npm start`. The proxy
-sees it identically to hermes-plugin (both speak `/v1/*` on a known
+To run standalone: `cd backends/stub && npm start`. The proxy
+sees it identically to backends/hermes/plugin (both speak `/v1/*` on a known
 port).
 
 ---
 
 ## 6. PWA migration
 
-`src/backends/` collapses to `src/proxy-client.ts` (single client for
+`src/` collapses to `src/proxy-client.ts` (single client for
 `/api/sidekick/*`). Mode B deployments (PWA → upstream directly,
 bypassing the proxy) are dropped.
 
 Files deleted:
 
-- `src/backends/openai-compat.ts`
-- `src/backends/zeroclaw.ts`
-- `src/backends/openclaw.ts` (already legacy)
-- `src/backends/types.ts` (consolidates into `src/proxy-client.ts`)
-- `src/backends/README.md`
+- `src/openai-compat.ts`
+- `src/zeroclaw.ts`
+- `src/openclaw.ts` (already legacy)
+- `src/proxyClientTypes.ts` (consolidates into `src/proxy-client.ts`)
+- `src/README.md`
 
 Files added:
 
-- `src/proxy-client.ts` (renamed from `src/backends/hermes-gateway.ts`)
+- `src/proxy-client.ts` (renamed from `src/hermes-gateway.ts`)
 
 Files modified:
 
@@ -397,9 +397,9 @@ mid-refactor smoke run is meaningful:
    message dispatch handlers. ~30min.
 6. **Proxy: delete WS code path.** Single `UpstreamAgent` impl
    remains. Delete `sqlQuery(HERMES_STATE_DB, ...)` everywhere. ~1h.
-7. **PWA: collapse `src/backends/` → `src/proxy-client.ts`. Delete
+7. **PWA: collapse `src/` → `src/proxy-client.ts`. Delete
    Mode B adapters. Update config + tests.** ~45min.
-8. **Rename `server-lib/backends/` → `server-lib/agents/`. Update
+8. **Rename `proxy/backends/` → `proxy/agents/`. Update
    imports.** ~15min.
 9. **Stub agent: add `/v1/conversations*` endpoints. Wire into
    smoke runner as an alt upstream.** ~1h.
@@ -439,7 +439,7 @@ with a non-hermes upstream.
 
 ### Unit tests
 
-`server-lib/agents/__tests__/` rewritten to drive `HTTPAgentUpstream`
+`proxy/agents/__tests__/` rewritten to drive `HTTPAgentUpstream`
 against a mock HTTP server (the existing test harness pattern at
 `proxy-harness.ts` extends to this).
 
@@ -471,7 +471,7 @@ re-attempt.
 | R1 | Hermes's internal `session_manager` doesn't have a `list_for_source` method, requires a small patch to add one. | The plugin's existing direct sessions.json + state.db read is the fallback. Encapsulated inside the plugin; no proxy filesystem reads. |
 | R2 | Plugin's aiohttp HTTP server has subtle differences from its WS server (e.g. how heartbeats / disconnects are handled) that surface as transcript-loss bugs. | Smoke tests on every step. Manual session-changed + reply-final round-trips on step 4. |
 | R3 | `UPSTREAM_URL` config rename breaks existing private-config files (`hermes-agent-private/sidekick.config.yaml`). | Doc the migration: `backend.type: hermes-gateway` + `backend.hermes_gateway.*` → `upstream.url` + `upstream.token`. Single hermes-agent-private commit. |
-| R4 | OpenAI-compat upstreams may not implement `/v1/conversations` — drawer goes empty when pointed at vanilla OpenAI. | Documented as expected — Mode A with vanilla OpenAI = no drawer (acceptable; same as today's mode B with openai-compat). Stub agent + hermes-plugin both implement the full surface. |
+| R4 | OpenAI-compat upstreams may not implement `/v1/conversations` — drawer goes empty when pointed at vanilla OpenAI. | Documented as expected — Mode A with vanilla OpenAI = no drawer (acceptable; same as today's mode B with openai-compat). Stub agent + backends/hermes/plugin both implement the full surface. |
 | R6 | Cross-platform drawer (telegram + slack rows alongside sidekick) silently disappears under the new HTTP path. | **Resolved**: gateway extension namespace `/v1/gateway/conversations` (section 2). Hermes implements it; proxy probes-and-falls-back. Single-channel agents leave it off → drawer correctly degrades to channel-only. |
 | R5 | Audio-bridge legacy `/v1/responses` dispatch path becomes ambiguous (which `/v1/responses` — proxy's or upstream's?). | Bridge talks only to proxy via `/api/sidekick/messages` (already the post-bridge-fix behavior, commit 79a3407). Legacy dispatch path can be deleted in a follow-up. |
 
@@ -482,7 +482,7 @@ re-attempt.
    gives easier `git log -p` review. I lean squash; happy to do
    logical-split if you prefer.
 2. **Mode B deletion confirmed?** This plan deletes
-   `src/backends/{openai-compat,zeroclaw,openclaw}.ts`. OpenAI-compat
+   `src/{openai-compat,zeroclaw,openclaw}.ts`. OpenAI-compat
    support survives via Mode A (proxy → OpenAI as upstream), but
    zero-config "PWA standalone against an OpenAI-compat server with
    no proxy" goes away. Confirm acceptable.

@@ -197,7 +197,7 @@ async function getAdapter(): Promise<any> {
   // backend.ts's loadAdapter returns the configured adapter. We import
   // the proxy-client directly because that's the only adapter wired in
   // post-refactor.
-  const mod: any = await import('./backends/proxy-client.ts');
+  const mod: any = await import('./proxyClient.ts');
   return mod.proxyClientAdapter;
 }
 

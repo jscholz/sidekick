@@ -521,7 +521,7 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
     #   responses        — response.output_text.delta (per-token delta) /
     #                      response.completed (terminal)
     #   sidekick-platform — reply_delta (cumulative text) / reply_final
-    #                       (terminal). See hermes-plugin/sidekick_platform.py.
+    #                       (terminal). See backends/hermes/plugin/sidekick_platform.py.
     #
     # For the cumulative-text path we diff against the previously-seen
     # text so the data-channel envelope to the PWA stays per-token (the

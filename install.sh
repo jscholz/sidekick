@@ -9,7 +9,7 @@
 #      --experimental-strip-types flag at runtime).
 #   2. Clones the sidekick repo to ~/sidekick if missing, or pulls
 #      latest if already there.
-#   3. Runs `npm install` at root + under `agent/`.
+#   3. Runs `npm install` at root + under `backends/stub/`.
 #   4. Copies `.env.example` to `.env` (idempotent — won't overwrite
 #      an existing .env).
 #   5. Starts the proxy + the in-tree stub agent (echo LLM) via
@@ -55,9 +55,9 @@ cd "$INSTALL_DIR"
 # 3. npm install (root + agent)
 echo "==> installing root dependencies"
 npm install --no-audit --no-fund
-if [ -f "agent/package.json" ]; then
+if [ -f "backends/stub/package.json" ]; then
   echo "==> installing agent dependencies"
-  (cd agent && npm install --no-audit --no-fund)
+  (cd backends/stub && npm install --no-audit --no-fund)
 fi
 
 # 4. .env (idempotent)

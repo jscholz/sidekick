@@ -1,11 +1,11 @@
 /**
  * @fileoverview Proxy-client BackendAdapter — wraps the local sidekick
  * proxy's /api/sidekick/* HTTP+SSE surface (served by
- * server-lib/sidekick/) into the BackendAdapter contract. Fully
+ * proxy/sidekick/) into the BackendAdapter contract. Fully
  * agent-agnostic: the proxy translates /api/sidekick/* to the agent
  * contract (/v1/*) on its own. Filename was historically
  * `hermes-gateway.ts`; renamed during the post-refactor cleanup
- * after the proxy module rename to server-lib/sidekick/.
+ * after the proxy module rename to proxy/sidekick/.
  *
  * Wire path:
  *   PWA → POST /api/sidekick/messages {chat_id, text}    (fire-and-forget)
@@ -37,13 +37,13 @@
  * — they're a PWA concern. Lazy: we don't allocate until the user
  * sends their first message OR explicitly clicks "New chat".
  *
- * @typedef {import('./types.ts').BackendAdapter} BackendAdapter
- * @typedef {import('./types.ts').ConnectOpts} ConnectOpts
- * @typedef {import('./types.ts').SendOpts} SendOpts
+ * @typedef {import('./proxyClientTypes.ts').BackendAdapter} BackendAdapter
+ * @typedef {import('./proxyClientTypes.ts').ConnectOpts} ConnectOpts
+ * @typedef {import('./proxyClientTypes.ts').SendOpts} SendOpts
  */
 
-import { log, diag } from '../util/log.ts';
-import * as conversations from '../conversations.ts';
+import { log, diag } from './util/log.ts';
+import * as conversations from './conversations.ts';
 
 let subs: any = null;
 let connected = false;

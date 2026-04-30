@@ -43,7 +43,7 @@ export function createServer({ conversations, llm, bearerToken }) {
   /** Out-of-turn event channel state. Stub agent rarely emits these
    *  (no cron, no proactive replies), but the contract requires the
    *  endpoint so proxies can subscribe. We keep a bounded ring +
-   *  per-subscriber queues mirroring the hermes-plugin pattern. */
+   *  per-subscriber queues mirroring the backends/hermes/plugin pattern. */
   const eventSubscribers = new Set();
   let eventIdCounter = 0;
   const eventReplayRing = [];
@@ -74,7 +74,7 @@ export function createServer({ conversations, llm, bearerToken }) {
     try {
       // Both /health and /healthz are common conventions; accept both
       // so existing UpstreamAgent clients (which probe /health to match
-      // the hermes-plugin) work unchanged.
+      // the backends/hermes/plugin) work unchanged.
       if (req.method === 'GET' && (req.url === '/healthz' || req.url === '/health')) {
         return json(res, 200, { status: 'ok', llm: llm.name });
       }

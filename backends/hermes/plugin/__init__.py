@@ -215,7 +215,7 @@ class SidekickAdapter(BasePlatformAdapter):
         if platform_value is None:
             raise RuntimeError(
                 "Platform.SIDEKICK is not registered. "
-                "Apply hermes-plugin/0001-add-sidekick-platform.patch."
+                "Apply backends/hermes/plugin/0001-add-sidekick-platform.patch."
             )
         super().__init__(config, platform_value)
 

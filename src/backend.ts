@@ -11,7 +11,7 @@
  * a third-party `/v1/responses`-speaker — through the proxy by
  * setting SIDEKICK_PLATFORM_URL + SIDEKICK_PLATFORM_TOKEN.
  *
- * @typedef {import('./backends/types.ts').BackendAdapter} BackendAdapter
+ * @typedef {import('./proxyClientTypes.ts').BackendAdapter} BackendAdapter
  */
 
 import { log } from './util/log.ts';
@@ -31,7 +31,7 @@ export async function loadAdapter() {
   if (loadingPromise) return loadingPromise;
   log("backend: loading 'proxy-client'");
   loadingPromise = (async () => {
-    const m = await import('./backends/proxy-client.ts');
+    const m = await import('./proxyClient.ts');
     adapter = m.proxyClientAdapter;
     return adapter;
   })();

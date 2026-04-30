@@ -1,7 +1,0 @@
-# Default seed terms — the PWA fetches this once on first boot and
-# stores them per-user in IndexedDB. Edits here only affect users who
-# haven't yet seeded their local keyterm list (i.e. fresh installs).
-# Existing users manage their list via Settings → STT keyterms (chips).
-# One term per line; blank lines and `# comments` ignored.
-Sidekick
-Deepgram

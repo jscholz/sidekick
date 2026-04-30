@@ -29,7 +29,7 @@
 
 import * as settings from './settings.ts';
 import * as sessionDrawer from './sessionDrawer.ts';
-import type { ToolCallEvent, ToolResultEvent } from './backends/types.ts';
+import type { ToolCallEvent, ToolResultEvent } from './proxyClientTypes.ts';
 
 interface ToolEntry {
   callId: string;

@@ -1124,9 +1124,9 @@ export function applyCapabilities() {
 //
 // Cross-platform sessions (telegram, slack, etc.) don't fire a sidekick-
 // targeted `session_changed` envelope when they get activity — only
-// chats hermes-plugin owns (Platform.SIDEKICK) do. To get sub-1s lag
+// chats backends/hermes/plugin owns (Platform.SIDEKICK) do. To get sub-1s lag
 // for "telegram chat just got a new message" → drawer reflects it,
-// we'd need a hermes-plugin extension that emits cross-platform
+// we'd need a backends/hermes/plugin extension that emits cross-platform
 // session_activity envelopes. Pragmatic v1: poll listSessions every
 // few seconds while the tab is foregrounded. ~3-5s lag for non-
 // sidekick chats; sidekick chats already update live via the existing

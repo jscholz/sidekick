@@ -3,6 +3,11 @@ build/
 .env
 .env.local
 *.log
+# Stub-agent runtime persistence (jsonl transcripts).
+agent/data/
+backends/stub/data/
+# Top-level data/ in case the stub gets booted from repo root.
+/data/
 sidekick.config.yaml
 config.yaml
 .DS_Store
