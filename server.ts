@@ -788,18 +788,13 @@ const HOME = os.homedir();
 // The proxy talks to ANY upstream that speaks the abstract agent
 // contract (HTTP+SSE — see docs/ABSTRACT_AGENT_PROTOCOL.md).
 // hermes-plugin is the typical upstream; the stub agent under
-// `agent/` is a hermes-free reference. With no token configured the
-// proxy connects in open mode (no Authorization header) — that's
-// what the stub agent expects. Hermes-plugin requires a real token.
+// `agent/` is a hermes-free reference. With no token configured,
+// `/api/sidekick/*` endpoints return 503.
 sidekick.init({
   token: process.env.SIDEKICK_PLATFORM_TOKEN
     || (cfgVal('SIDEKICK_PLATFORM_TOKEN', 'backend.sidekick_platform.token', '') as string),
-  // Default to the in-tree stub agent's port (boots alongside the
-  // proxy via `npm start` → `scripts/start-all.mjs`). Hermes-plugin
-  // users override via `SIDEKICK_PLATFORM_URL=http://127.0.0.1:8645`
-  // in `.env`.
   url: cfgVal('SIDEKICK_PLATFORM_URL', 'backend.sidekick_platform.url',
-    'http://127.0.0.1:4001') as string,
+    'http://127.0.0.1:8645') as string,
 });
 
 // Cold-start initialization of the preferred-models matcher. Without
@@ -900,6 +895,16 @@ const server = http.createServer(async (req, res) => {
       && req.url.match(/^\/api\/sidekick\/sessions\/([^/?]+)(?:\?.*)?$/);
     if (sidekickDelete) {
       return sidekick.handleSidekickSessionDelete(req, res, decodeURIComponent(sidekickDelete[1]));
+    }
+    if (req.method === 'GET' && /^\/api\/sidekick\/settings\/schema(?:\?.*)?$/.test(req.url)) {
+      return sidekick.handleSidekickSettingsSchema(req, res);
+    }
+    const sidekickSettingsUpdate = req.method === 'POST'
+      && req.url.match(/^\/api\/sidekick\/settings\/([^/?]+)(?:\?.*)?$/);
+    if (sidekickSettingsUpdate) {
+      return sidekick.handleSidekickSettingsUpdate(
+        req, res, decodeURIComponent(sidekickSettingsUpdate[1]),
+      );
     }
   }
   if (req.method === 'GET' && req.url === '/config') return handleConfig(req, res);

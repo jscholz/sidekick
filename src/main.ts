@@ -2425,19 +2425,29 @@ async function boot() {
     }
   }, true);
 
-  // ── Refresh button (full page reload for standalone PWA) ──
-  // Previously did a transport-rebind which had a confusing mental model
-  // ("why didn't it actually refresh?"). Renamed to "Refresh" + now
-  // does a real location.reload() — same as hitting browser-refresh on
-  // desktop. With the SSE-detach proxy fix, server-side agent runs
-  // outlive the reload, so refreshing mid-conversation no longer kills
-  // an in-flight reply (the next request on the same conversation
-  // chains via previous_response_id and picks up the reply).
+  // ── Refresh button ──
+  // Forces a SW update check before reload. iOS PWA suspends the page
+  // aggressively, so the periodic reg.update() polling rarely fires in
+  // practice — devices end up stuck on an old cached SW indefinitely.
+  // This gives the user an explicit escape hatch: hit Refresh and the
+  // browser actually re-fetches sw.js, installs the new SW, then the
+  // controllerchange listener in index.html reloads the page on top of
+  // the new SW. Falls back to a plain reload if there's no SW or the
+  // update check fails.
   const btnRefresh = document.getElementById('btn-refresh');
   if (btnRefresh) {
-    btnRefresh.onclick = () => {
+    btnRefresh.onclick = async () => {
       try { void webrtcControls.closeIfOpen(); } catch {}
       try { player.pause(); player.src = ''; player.load(); } catch {}
+      try {
+        const reg = await navigator.serviceWorker?.getRegistration();
+        if (reg) {
+          await reg.update();
+          reg.waiting?.postMessage({ type: 'SKIP_WAITING' });
+        }
+      } catch (err) {
+        diag(`refresh: SW update failed: ${(err as Error)?.message ?? err}`);
+      }
       diag('refresh: location.reload()');
       location.reload();
     };

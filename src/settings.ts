@@ -3,6 +3,7 @@
  */
 
 import * as backend from './backend.ts';
+import * as agentSettings from './agentSettings.ts';
 
 const STORAGE_KEY = 'sidekick.settings.v2';
 
@@ -697,10 +698,18 @@ export function hydrate(handlers: {
     // .toolbar while .settings.on is active makes the toolbar unable to
     // receive the synthetic-click that iOS fires post-touchend.
     document.body.classList.add('settings-modal-open');
-    refreshModelState();
+    // Schema-driven agent settings (model picker, future persona/temp/...).
+    // Replaces the legacy refreshModelState path; the agent now declares
+    // what's user-tunable via /v1/settings/schema.
+    agentSettings.load().catch(() => {});
     modelHandlers.reloadKeyterms?.();
   };
   const closePanel = () => {
+    // Re-fetch the schema on close so changes made by parallel clients
+    // (CLI, sibling tab) surface the next time the panel opens. Cheap:
+    // one HTTP roundtrip; runs after the close animation starts so it
+    // doesn't block the dismiss.
+    agentSettings.load().catch(() => {});
     // Suppress toolbar clicks for a brief delay AFTER close to cover the
     // remainder of the iOS touch sequence (touchend → click). 350ms is
     // long enough for the synthetic click to fire and be ignored, short
@@ -759,31 +768,8 @@ export function hydrate(handlers: {
     }
   }
 
-  // Model selector: switch the session's active model via /model slash
-  // command (same path as the CLI, updates sessionEntry.modelOverride).
-  // Verifies via sessions.list afterward so we don't lie if the server
-  // rejects the change.
-  const setModel = $sel('set-model');
-  if (setModel) {
-    setModel.onchange = async () => {
-      const newRef = setModel.value;
-      if (!newRef) return;
-      backend.setModel(newRef);
-      // Optimistic UI update + immediate system line.
-      const prev = modelState.current;
-      modelState.current = newRef;
-      if (modelHandlers.onModelChange) modelHandlers.onModelChange(newRef, modelState.catalog);
-      // Verify after ~800ms (slash command processing); revert if rejected.
-      setTimeout(async () => {
-        const actual = await backend.getCurrentModel();
-        if (actual && actual !== newRef) {
-          modelState.current = actual;
-          setModel.value = modelState.catalog.some(e => e.id === actual) ? actual : '';
-          if (modelHandlers.onModelChange) modelHandlers.onModelChange(actual, modelState.catalog);
-        }
-      }, 1500);
-    };
-  }
+  // (Legacy set-model dropdown handler removed — agentSettings.ts now
+  // owns the model picker via the /v1/settings/* schema contract.)
 
   // Expand checkbox hit area to the entire row — clicking the label (handled
   // natively via `for=`) or the hint/padding (handled here) toggles the
@@ -801,7 +787,10 @@ export function hydrate(handlers: {
     });
   }
 
-  // Initial model state fetch + 30s poll for external (CLI) changes.
-  refreshModelState().catch(() => {});
-  startModelPoll();
+  // Settings-panel open / close drive the agent-settings refresh now;
+  // see openPanel/closePanel above. The legacy refreshModelState + 30s
+  // poll talked to per-backend listModels/setModel/getCurrentModel
+  // methods the proxy-client adapter doesn't implement — kept here as
+  // dead code only because main.ts still references the modelHandlers
+  // surface for attachment-button gating.
 }

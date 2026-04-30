@@ -11,6 +11,10 @@
  *   node scripts/run-smoke.mjs text-turn    # filter by name
  *   node scripts/run-smoke.mjs --headed     # show browsers (debug)
  *   node scripts/run-smoke.mjs --include-stubs   # run stubs (always FAIL)
+ *   node scripts/run-smoke.mjs --mocked-only     # skip BACKEND='real' tests
+ *                                                  (so the live hermes
+ *                                                   doesn't accumulate
+ *                                                   smoke-test sessions)
  *
  * Exit codes:
  *   0 — all enabled scenarios passed
@@ -44,6 +48,14 @@ const INCLUDE_STUBS = argv.includes('--include-stubs');
 // stack regardless of its declared BACKEND. Default mode honors each
 // scenario's BACKEND export ('mocked' | 'real' | 'either').
 const FORCE_REAL = argv.includes('--real-backend');
+// --mocked-only skips scenarios that declare BACKEND='real'. Useful
+// when iterating against a live hermes — real-backend smokes leave
+// real chats in state.db that have to be cleaned up afterward.
+const MOCKED_ONLY = argv.includes('--mocked-only');
+if (FORCE_REAL && MOCKED_ONLY) {
+  console.error('[smoke] --real-backend and --mocked-only are mutually exclusive');
+  process.exit(2);
+}
 const filter = argv.filter(a => !a.startsWith('--'));
 
 function logRunner(msg) { console.log(`[smoke] ${msg}`); }
@@ -116,6 +128,9 @@ async function main() {
   let runnable = scenarios.filter(s => INCLUDE_STUBS || s.status === 'implemented');
   if (filter.length > 0) {
     runnable = runnable.filter(s => filter.some(f => s.name.includes(f)));
+  }
+  if (MOCKED_ONLY) {
+    runnable = runnable.filter(s => s.backend !== 'real');
   }
   const skipped = scenarios.filter(s => !runnable.includes(s));
 

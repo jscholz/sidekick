@@ -60,6 +60,20 @@ export interface FakeOutOfTurnEnvelope {
 
 export type FakeMode = 'gateway' | 'channel-only';
 
+export interface SettingDef {
+  id: string;
+  label: string;
+  description?: string;
+  category?: string;
+  type: 'enum' | 'slider' | 'toggle' | 'text';
+  value: string | number | boolean;
+  options?: Array<{ value: string; label: string; description?: string }>;
+  min?: number;
+  max?: number;
+  step?: number;
+  placeholder?: string;
+}
+
 export class FakeAgent {
   private server: http.Server | null = null;
   private port = 0;
@@ -77,6 +91,15 @@ export class FakeAgent {
    *  tests can assert on it. */
   public lastResponsesConversation: string | null = null;
   public lastResponsesAttachments: unknown[] | null = null;
+
+  /** Settings extension — null means the agent doesn't implement
+   *  /v1/settings/* (the harness returns 404, matching the contract
+   *  for opt-out agents). Populated array means the agent declares
+   *  those settings. */
+  private settingsSchema: SettingDef[] | null = [];
+  /** Most-recent /v1/settings/{id} POST observed — tests assert the
+   *  proxy forwarded the right body. */
+  public lastSettingsPost: { id: string; body: unknown } | null = null;
 
   setMode(mode: FakeMode): void { this.mode = mode; }
 
@@ -109,6 +132,14 @@ export class FakeAgent {
   }
 
   hasDeleted(chatId: string): boolean { return this.deletedChats.has(chatId); }
+
+  /** Configure the settings schema served at GET /v1/settings/schema.
+   *  Pass `null` to declare that the agent doesn't implement the
+   *  optional settings extension (route returns 404). */
+  setSettingsSchema(schema: SettingDef[] | null): void {
+    this.settingsSchema = schema;
+    this.lastSettingsPost = null;
+  }
 
   /** Number of /v1/events SSE subscribers currently attached. Tests
    *  use this to wait for the proxy's `subscribeEvents` loop to
@@ -193,7 +224,56 @@ export class FakeAgent {
       this.handleEvents(req, res);
       return;
     }
+    if (method === 'GET' && url.pathname === '/v1/settings/schema') {
+      if (this.settingsSchema === null) {
+        this.json(res, 404, { error: { message: 'settings not supported' } });
+        return;
+      }
+      this.json(res, 200, { object: 'list', data: this.settingsSchema });
+      return;
+    }
+    const settingsPostMatch = url.pathname.match(/^\/v1\/settings\/([^/]+)$/);
+    if (method === 'POST' && settingsPostMatch) {
+      void this.handleSettingsUpdate(req, res, settingsPostMatch[1]);
+      return;
+    }
     this.json(res, 404, { error: 'no route' });
+  }
+
+  private async handleSettingsUpdate(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    id: string,
+  ): Promise<void> {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    let body: any;
+    try { body = JSON.parse(raw); } catch { body = {}; }
+    this.lastSettingsPost = { id, body };
+    if (this.settingsSchema === null) {
+      this.json(res, 404, { error: { message: 'settings not supported' } });
+      return;
+    }
+    const def = this.settingsSchema.find((s) => s.id === id);
+    if (!def) {
+      this.json(res, 404, { error: { message: `unknown setting: ${id}` } });
+      return;
+    }
+    const v = body?.value;
+    // Minimal validation that mirrors what real agents are expected
+    // to do. The proxy passes through verbatim; the agent is the
+    // source of truth for "is this value acceptable?".
+    if (def.type === 'enum') {
+      const ok = (def.options ?? []).some((o) => o.value === v);
+      if (!ok) {
+        this.json(res, 400, {
+          error: { message: `value not in options[]: ${JSON.stringify(v)}` },
+        });
+        return;
+      }
+    }
+    def.value = v;
+    this.json(res, 200, def);
   }
 
   private async handleResponses(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -279,6 +359,16 @@ export async function startRig(opts: { mode?: FakeMode } = {}): Promise<ProxyRig
     if (delMatch) {
       return sidekick.handleSidekickSessionDelete(
         req, res, decodeURIComponent(delMatch[1]),
+      );
+    }
+    if (method === 'GET' && path === '/api/sidekick/settings/schema') {
+      return sidekick.handleSidekickSettingsSchema(req, res);
+    }
+    const setMatch = method === 'POST'
+      && path.match(/^\/api\/sidekick\/settings\/([^/]+)$/);
+    if (setMatch) {
+      return sidekick.handleSidekickSettingsUpdate(
+        req, res, decodeURIComponent(setMatch[1]),
       );
     }
     res.writeHead(404, { 'content-type': 'application/json' });

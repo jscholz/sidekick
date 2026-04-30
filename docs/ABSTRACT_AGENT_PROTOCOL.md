@@ -332,6 +332,116 @@ want bidirectional cross-platform messaging would extend further
 
 ---
 
+## Optional settings extension — `/v1/settings/*`
+
+Lets the agent declare its own user-facing knobs and have sidekick
+render them generically in the Settings panel. Replaces the
+pre-refactor pattern of hardcoding agent-owned options (e.g. the
+model picker) into the PWA — which made every cross-agent setting
+a frontend change.
+
+The extension is **strictly optional**. Agents that don't expose
+settings return 404 on the schema endpoint; the PWA hides the
+"Agent" settings group. Single-purpose agents (the in-tree stub)
+typically leave it unimplemented or return an empty list.
+
+Settings owned by the PWA itself (theme, hotkeys, mic device, TTS
+voice) stay in the local UI and are NOT part of this contract —
+the schema is for **agent-owned** settings only.
+
+### `GET /v1/settings/schema`
+
+Lists the settings the agent supports. The PWA fetches this when
+the Settings panel opens (and on close, to surface drift caused
+by other clients changing the same agent state).
+
+**Response (200):**
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "model",
+      "label": "Model",
+      "description": "LLM used for replies",
+      "category": "Agent",
+      "type": "enum",
+      "value": "anthropic/claude-opus-4-6",
+      "options": [
+        { "value": "anthropic/claude-opus-4-6", "label": "Claude Opus 4.6" },
+        { "value": "google/gemini-3-flash-preview", "label": "Gemini 3 Flash" }
+      ]
+    }
+  ]
+}
+```
+
+**Setting fields:**
+
+- `id` (string, required) — opaque identifier, also the URL fragment
+  on the write endpoint. `[a-z0-9_]+` recommended.
+- `label` (string, required) — short user-facing label (`"Model"`).
+- `description` (string, optional) — hint text rendered next to /
+  beneath the input.
+- `category` (string, optional) — group key for the UI. Defaults to
+  `"Agent"`. Same string across multiple settings groups them.
+- `type` (string, required) — one of:
+  - `enum` — dropdown. `options[]` required.
+  - `slider` — numeric range. `min`, `max`, `step` required.
+  - `toggle` — boolean.
+  - `text` — free-form string.
+- `value` — current value. Type matches `type`: string for
+  `enum`/`text`, number for `slider`, boolean for `toggle`.
+- `options[]` (enum only, required) — `{value, label, description?}`.
+- `min`, `max`, `step` (slider only, required).
+- `placeholder` (text only, optional).
+
+**Response (404):** Agent doesn't implement the extension. Sidekick
+hides the "Agent" settings group entirely.
+
+### `POST /v1/settings/{id}`
+
+Update one setting. Body is `{"value": <new>}` matching the
+declared `type`.
+
+**Request:**
+
+```json
+{ "value": "anthropic/claude-opus-4-6" }
+```
+
+**Response (200):** the updated `SettingDef` (same shape as one
+entry in `GET /v1/settings/schema`'s `data[]`). Returning the full
+def lets the agent surface side-effects — e.g. setting a model that
+caps `max_tokens` lower than its current value can return a
+secondary `max_tokens` setting in a follow-up panel refresh.
+
+```json
+{
+  "id": "model",
+  "label": "Model",
+  "type": "enum",
+  "value": "anthropic/claude-opus-4-6",
+  "options": [...]
+}
+```
+
+**Error responses:**
+
+- `400` — value doesn't match the declared `type` (e.g. string sent
+  to a slider, value not in `options[]` for an enum).
+- `404` — unknown setting id.
+- `500` — server-side failure applying the change. The PWA reverts
+  the optimistic UI state and surfaces the error.
+
+**Idempotency:** same value re-submitted is a no-op (still 200).
+
+**Validation is the agent's job.** The proxy forwards verbatim; if
+the agent doesn't validate, malformed values land in agent state.
+
+---
+
 ## Errors
 
 Errors use the OpenAI shape:

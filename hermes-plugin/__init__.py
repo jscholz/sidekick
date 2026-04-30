@@ -166,6 +166,16 @@ SESSION_POLL_INTERVAL_S = 1.5
 SESSION_KEY_PREFIX = "agent:main:sidekick:dm:"
 
 
+class _SettingsValidationError(ValueError):
+    """Raised by _apply_setting when the value is invalid for the
+    declared type. Maps to HTTP 400 in _handle_settings_update."""
+
+
+class _SettingsNotFoundError(KeyError):
+    """Raised by _apply_setting when the setting id isn't declared.
+    Maps to HTTP 404 in _handle_settings_update."""
+
+
 def check_sidekick_requirements() -> bool:
     """Return True when adapter dependencies are available.
 
@@ -349,6 +359,17 @@ class SidekickAdapter(BasePlatformAdapter):
         )
         self._app.router.add_get(
             "/v1/events", self._handle_events
+        )
+        # Optional settings extension. Today: a single "model" enum
+        # entry that wraps hermes config + the openrouter catalog,
+        # filtered by SIDEKICK_PREFERRED_MODELS. Adding more
+        # (persona, temperature, ...) is purely additive: extend
+        # _build_settings_schema + _apply_setting.
+        self._app.router.add_get(
+            "/v1/settings/schema", self._handle_settings_schema
+        )
+        self._app.router.add_post(
+            "/v1/settings/{id}", self._handle_settings_update
         )
 
         self._runner = web.AppRunner(self._app)
@@ -1100,6 +1121,253 @@ class SidekickAdapter(BasePlatformAdapter):
             if parts:
                 return "\n".join(parts)
         return None
+
+    # ── Optional settings extension (/v1/settings/*) ──────────────────
+    # Lets the PWA render an agent-owned controls panel without
+    # frontend-side knowledge of what the agent supports. Today: one
+    # "model" enum. Adding more knobs (persona, temperature, default
+    # provider) is additive: append to _build_settings_schema() and
+    # branch _apply_setting() on id.
+
+    def _build_settings_schema(self) -> List[Dict[str, Any]]:
+        """Build the SettingDef[] list. Reads hermes config.yaml for
+        the current model and openrouter for the catalog. Filters
+        the catalog by SIDEKICK_PREFERRED_MODELS (comma-separated
+        glob list — same env the legacy proxy honored)."""
+        import fnmatch
+
+        # Current model from ~/.hermes/config.yaml. Hermes stores it as
+        # either a scalar (`model: google/gemma-4-26b-a4b-it`) or a dict
+        # (`model: {default: ..., provider: ...}`). hermes_cli.config
+        # has a normalize step but we read raw to avoid pulling in the
+        # full-config-load surface (slower, plus loads providers, etc.);
+        # handle both shapes inline.
+        current_model = ""
+        try:
+            import yaml
+            from hermes_cli.config import get_config_path
+            cfg_path = get_config_path()
+            if cfg_path.exists():
+                with open(cfg_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                model_cfg = cfg.get("model")
+                if isinstance(model_cfg, dict):
+                    current_model = (model_cfg.get("default") or "").strip()
+                elif isinstance(model_cfg, str):
+                    current_model = model_cfg.strip()
+        except Exception as e:
+            logger.warning("[sidekick] settings: read current model failed: %s", e)
+
+        # Openrouter catalog. fetch_openrouter_models returns a list of
+        # `(model_id, source_label)` tuples (curated by hermes — only
+        # tool-supporting models, ranked by the preferred_ids list).
+        # The label is "recommended" / "free" / "" — useful as a hint
+        # in the dropdown but we just use the id for now to keep the
+        # contract simple. Be defensive about shape: any future return
+        # type change should degrade to "no options" instead of 500ing
+        # the whole settings panel.
+        catalog: List[Dict[str, Any]] = []
+        try:
+            from hermes_cli.models import fetch_openrouter_models
+            raw = fetch_openrouter_models() or []
+            for entry in raw:
+                if isinstance(entry, tuple) and len(entry) >= 1:
+                    mid = str(entry[0] or "").strip()
+                    tag = str(entry[1] or "").strip() if len(entry) >= 2 else ""
+                elif isinstance(entry, dict):
+                    mid = str(entry.get("id") or "").strip()
+                    tag = ""
+                elif isinstance(entry, str):
+                    mid = entry.strip()
+                    tag = ""
+                else:
+                    continue
+                if not mid:
+                    continue
+                label = f"{mid} ({tag})" if tag else mid
+                catalog.append({"value": mid, "label": label})
+        except Exception as e:
+            logger.warning("[sidekick] settings: openrouter catalog fetch failed: %s", e)
+
+        # Apply preferred-models filter (sidekick-specific env). When
+        # empty, keep the full catalog. The PWA never sees the unfiltered
+        # list — sidekick deployments are opinionated about which models
+        # they expose to the user.
+        preferred_raw = (os.environ.get("SIDEKICK_PREFERRED_MODELS") or "").strip()
+        if preferred_raw and catalog:
+            globs = [g.strip() for g in preferred_raw.split(",") if g.strip()]
+            if globs:
+                catalog = [
+                    e for e in catalog
+                    if any(fnmatch.fnmatch(e["value"], g) for g in globs)
+                ]
+
+        # Always include the current model in the options[] list so the
+        # picker can show "what's set now" even if the catalog filter
+        # excluded it (e.g. user has SIDEKICK_PREFERRED_MODELS=anthropic/*
+        # but the current default is google/gemma-4*).
+        if current_model and not any(e["value"] == current_model for e in catalog):
+            catalog.insert(0, {"value": current_model, "label": current_model})
+
+        # Stable sort by label for the dropdown.
+        catalog.sort(key=lambda e: (e["label"] or "").lower())
+
+        return [
+            {
+                "id": "model",
+                "label": "Model",
+                "description": "LLM used for replies",
+                "category": "Agent",
+                "type": "enum",
+                "value": current_model,
+                "options": catalog,
+            },
+        ]
+
+    async def _handle_settings_schema(self, request: "web.Request") -> "web.Response":
+        """GET /v1/settings/schema — list the agent's user-facing knobs."""
+        if not self._check_http_auth(request):
+            return web.Response(status=401, text="invalid token")
+        try:
+            schema = await asyncio.get_running_loop().run_in_executor(
+                None, self._build_settings_schema,
+            )
+        except Exception as e:
+            logger.exception("[sidekick] settings schema build failed")
+            return web.json_response(
+                {"error": {"type": "server_error", "message": str(e)}},
+                status=500,
+            )
+        return web.json_response({"object": "list", "data": schema})
+
+    async def _handle_settings_update(self, request: "web.Request") -> "web.Response":
+        """POST /v1/settings/{id} — apply one setting."""
+        if not self._check_http_auth(request):
+            return web.Response(status=401, text="invalid token")
+        sid = request.match_info.get("id", "")
+        try:
+            body = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            return web.json_response(
+                {"error": {"type": "invalid_request_error",
+                           "message": "body is not valid JSON"}},
+                status=400,
+            )
+        value = body.get("value")
+        try:
+            updated = await asyncio.get_running_loop().run_in_executor(
+                None, self._apply_setting, sid, value,
+            )
+        except _SettingsValidationError as e:
+            return web.json_response(
+                {"error": {"type": "invalid_request_error", "message": str(e)}},
+                status=400,
+            )
+        except _SettingsNotFoundError as e:
+            return web.json_response(
+                {"error": {"type": "invalid_request_error", "message": str(e)}},
+                status=404,
+            )
+        except Exception as e:
+            logger.exception("[sidekick] settings apply failed: %s", sid)
+            return web.json_response(
+                {"error": {"type": "server_error", "message": str(e)}},
+                status=500,
+            )
+        return web.json_response(updated)
+
+    def _apply_setting(self, sid: str, value: Any) -> Dict[str, Any]:
+        """Apply one setting and return the updated def. Synchronous —
+        called from a thread executor since switch_model + config
+        write are blocking. Raises _SettingsValidationError /
+        _SettingsNotFoundError to map to 400 / 404 respectively."""
+        if sid == "model":
+            return self._apply_model_setting(value)
+        raise _SettingsNotFoundError(f"unknown setting: {sid}")
+
+    def _apply_model_setting(self, value: Any) -> Dict[str, Any]:
+        """Persist a new default model to hermes config.yaml, mirroring
+        what `/model <name> --global` does in chat. Cached agents on
+        existing sessions keep their model until evicted (typical
+        case: next conversation start). New conversations pick up
+        the new default immediately on next /v1/responses dispatch."""
+        if not isinstance(value, str) or not value.strip():
+            raise _SettingsValidationError("model value must be a non-empty string")
+        new_model = value.strip()
+
+        # Validate against the declared options[] (sidekick filter +
+        # current). Same logic as _build_settings_schema; we re-derive
+        # to avoid round-tripping through the schema endpoint.
+        schema = self._build_settings_schema()
+        model_def = next((s for s in schema if s["id"] == "model"), None)
+        if model_def is None:
+            raise _SettingsNotFoundError("model setting not declared")
+        valid_values = {o["value"] for o in (model_def.get("options") or [])}
+        if new_model not in valid_values:
+            raise _SettingsValidationError(
+                f"value not in options[]: {new_model!r}"
+            )
+
+        # Read current state to feed switch_model.
+        try:
+            import yaml
+            from hermes_cli.config import get_config_path
+            cfg_path = get_config_path()
+            cfg: Dict[str, Any] = {}
+            if cfg_path.exists():
+                with open(cfg_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            raw_model = cfg.get("model")
+            if isinstance(raw_model, dict):
+                model_cfg = raw_model
+            elif isinstance(raw_model, str):
+                model_cfg = {"default": raw_model}
+            else:
+                model_cfg = {}
+            current_model = (model_cfg.get("default") or "").strip()
+            current_provider = (model_cfg.get("provider") or "openrouter").strip()
+            current_base_url = (model_cfg.get("base_url") or "").strip()
+            user_provs = cfg.get("providers")
+            try:
+                from hermes_cli.config import get_compatible_custom_providers
+                custom_provs = get_compatible_custom_providers(cfg)
+            except Exception:
+                custom_provs = cfg.get("custom_providers")
+        except Exception as e:
+            raise _SettingsValidationError(
+                f"failed to read hermes config: {e}"
+            )
+
+        # Delegate provider resolution + persist via switch_model.
+        # is_global=True writes to config.yaml; we don't manage
+        # session overrides from the proxy path (sidekick treats
+        # the model as a global agent setting).
+        try:
+            from hermes_cli.model_switch import switch_model
+            result = switch_model(
+                raw_input=new_model,
+                current_provider=current_provider,
+                current_model=current_model,
+                current_base_url=current_base_url,
+                current_api_key="",
+                is_global=True,
+                explicit_provider="",
+                user_providers=user_provs,
+                custom_providers=custom_provs,
+            )
+        except Exception as e:
+            logger.exception("[sidekick] switch_model raised")
+            raise _SettingsValidationError(f"switch_model failed: {e}")
+        if not result.success:
+            raise _SettingsValidationError(
+                result.error_message or "model switch rejected"
+            )
+
+        # Re-derive the schema so the response reflects the actual
+        # post-write state (catches cases where switch_model
+        # normalized the model id to a canonical form).
+        new_schema = self._build_settings_schema()
+        return next((s for s in new_schema if s["id"] == "model"), schema[0])
 
     async def _handle_responses(self, request: "web.Request") -> "web.StreamResponse":
         """POST /v1/responses — turn dispatch with optional streaming."""

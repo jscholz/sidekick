@@ -528,7 +528,8 @@ export const proxyClientAdapter = {
   capabilities: {
     streaming: true,
     sessions: true,           // chat_id provides multi-session semantics
-    models: false,            // not exposed via the gateway adapter (yet)
+    models: false,            // legacy hardcoded picker — superseded by `agentSettings`
+    agentSettings: true,      // /api/sidekick/settings/* schema-driven panel (model picker etc.)
     toolEvents: true,         // tool_call / tool_result envelopes (Phase 3); image is also tool-like
 
     history: true,            // /api/sidekick/sessions/<chat_id>/messages
@@ -872,6 +873,47 @@ export const proxyClientAdapter = {
       firstId: d.firstId ?? null,
       hasMore: !!d.hasMore,
     };
+  },
+
+  /** GET /api/sidekick/settings/schema → agent-declared settings list,
+   *  or `null` if the agent doesn't implement the optional extension
+   *  (404). Caller (settings panel) hides the "Agent" group on null. */
+  async getSettingsSchema(): Promise<any[] | null> {
+    try {
+      const r = await fetch(`${apiBase()}/settings/schema`);
+      if (r.status === 404) return null;
+      if (!r.ok) {
+        diag(`proxy-client.getSettingsSchema: HTTP ${r.status}`);
+        return null;
+      }
+      const j = await r.json();
+      return Array.isArray(j?.data) ? j.data : [];
+    } catch (e: any) {
+      diag(`proxy-client.getSettingsSchema failed: ${e.message}`);
+      return null;
+    }
+  },
+
+  /** POST /api/sidekick/settings/{id} {value} → updated SettingDef.
+   *  Throws on 4xx/5xx with the upstream's error.message extracted so
+   *  the panel can revert + surface the message inline. */
+  async updateSetting(id: string, value: unknown): Promise<any> {
+    const r = await fetch(`${apiBase()}/settings/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ value }),
+    });
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try {
+        const j = await r.json();
+        msg = j?.error?.message ?? msg;
+      } catch {}
+      const err = new Error(msg) as Error & { status?: number };
+      err.status = r.status;
+      throw err;
+    }
+    return await r.json();
   },
 
   async deleteSession(id: string) {

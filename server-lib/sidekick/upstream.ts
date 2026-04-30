@@ -53,6 +53,22 @@ export interface GatewayConversationSummary extends ConversationSummary {
   };
 }
 
+/** Agent-declared user-facing setting — see
+ *  docs/ABSTRACT_AGENT_PROTOCOL.md "Optional settings extension". */
+export interface SettingDef {
+  id: string;
+  label: string;
+  description?: string;
+  category?: string;
+  type: 'enum' | 'slider' | 'toggle' | 'text';
+  value: string | number | boolean;
+  options?: Array<{ value: string; label: string; description?: string }>;
+  min?: number;
+  max?: number;
+  step?: number;
+  placeholder?: string;
+}
+
 /** Single transcript item, OAI shape (with optional sidekick extension). */
 export interface ConversationItem {
   id: number;
@@ -105,6 +121,31 @@ export interface UpstreamAgent {
 
   /** Liveness check. */
   healthcheck(): Promise<{ ok: boolean }>;
+
+  /** Optional settings extension — agent-declared knobs. Returns null
+   *  when the upstream doesn't implement /v1/settings/* (404); the
+   *  proxy surfaces 404 to the PWA so the "Agent" group hides. */
+  getSettingsSchema(): Promise<SettingDef[] | null>;
+
+  /** Update one setting. Returns the updated def. Throws on 4xx/5xx
+   *  with the upstream's response body included on `.cause` so the
+   *  proxy can pass status + body through to the PWA. */
+  updateSetting(id: string, value: unknown): Promise<SettingDef>;
+}
+
+/** Error thrown by HTTPAgentUpstream when the upstream returns a 4xx
+ *  / 5xx and the proxy needs to forward that status verbatim (not
+ *  collapse to 500). Currently used by updateSetting where the agent
+ *  is the validator — invalid values come back as 400. */
+export class UpstreamHTTPError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+  constructor(status: number, body: unknown, message?: string) {
+    super(message ?? `upstream HTTP ${status}`);
+    this.name = 'UpstreamHTTPError';
+    this.status = status;
+    this.body = body;
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -198,6 +239,36 @@ export class HTTPAgentUpstream implements UpstreamAgent {
       first_id: j?.first_id ?? null,
       has_more: !!j?.has_more,
     };
+  }
+
+  async getSettingsSchema(): Promise<SettingDef[] | null> {
+    const r = await fetch(`${this.url}/v1/settings/schema`, {
+      headers: this.headers(),
+    });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`upstream getSettingsSchema: HTTP ${r.status}`);
+    const j: any = await r.json();
+    return Array.isArray(j?.data) ? j.data : [];
+  }
+
+  async updateSetting(id: string, value: unknown): Promise<SettingDef> {
+    const r = await fetch(
+      `${this.url}/v1/settings/${encodeURIComponent(id)}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ value }),
+      },
+    );
+    let body: any;
+    try { body = await r.json(); } catch { body = null; }
+    if (!r.ok) {
+      // Pass status + body through so the proxy can mirror the
+      // upstream's error envelope verbatim — particularly the
+      // validation-error message that the PWA surfaces inline.
+      throw new UpstreamHTTPError(r.status, body);
+    }
+    return body as SettingDef;
   }
 
   async deleteConversation(chatId: string): Promise<void> {
