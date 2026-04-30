@@ -1876,7 +1876,12 @@ async function boot() {
     // button means pointermove/pointerup route here even when the
     // finger drifts onto the memo bar. Drag LEFT past the trash
     // bounding rect → discard-armed; release in red → discard.
-    const TAP_THRESHOLD_MS = 200;
+    // 200ms originally — too tight for a deliberate "tap" gesture
+    // (natural finger lift takes ~250ms), so a tap that the user
+    // intended as toggle-mode kept finalizing as PTT instead. 350ms
+    // matches the iOS "long press" threshold range and gives borderline
+    // taps room without making true PTT feel laggy.
+    const TAP_THRESHOLD_MS = 350;
 
     type MicState = 'idle' | 'recording' | 'recording_toggle';
     let micState: MicState = 'idle';

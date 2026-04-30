@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any, AsyncIterator, Dict, Optional
 
@@ -393,6 +394,34 @@ def _frame_rms(pcm: bytes) -> int:
     return int(math.isqrt(mean_sq))
 
 
+# Match XML/HTML-style tags <foo …> and </foo>. Conservative — won't
+# match angle brackets used as math/comparison ("a < b") because those
+# don't form valid tag-name shapes.
+_TAG_RE = re.compile(r"<[^>]{1,200}>")
+# Markdown image syntax `![alt](url)`. Drop entirely — the URL is
+# noise to TTS.
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
+# Markdown link syntax `[label](url)`. Keep the label, drop the URL.
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+# Code spans / fences — pronounce the content but lose the backticks.
+_CODE_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*\n?")
+
+
+def _sanitize_for_tts(text: str) -> str:
+    """Strip markup that TTS shouldn't pronounce. Catches the agent
+    leaking <audio src="…">, markdown image embeds, link URLs, and
+    code-fence delimiters into its reply text. Idempotent — running
+    twice is a no-op."""
+    if not text:
+        return text
+    out = _TAG_RE.sub("", text)
+    out = _MD_IMAGE_RE.sub(r"\1", out)
+    out = _MD_LINK_RE.sub(r"\1", out)
+    out = _CODE_FENCE_RE.sub("", out)
+    out = out.replace("`", "")
+    return out
+
+
 def _send_data_channel(peer, payload: dict) -> None:
     """Best-effort send of a JSON envelope over the peer's data channel.
 
@@ -529,13 +558,18 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
     # text-queue gets only the new tokens.
     current_event: Optional[str] = None
     prev_cumulative: str = ""
+    # Stripped mirror of prev_cumulative — what the TTS queue has
+    # actually consumed so far. Diffing against this rather than the
+    # raw cumulative lets us push only the SPEAKABLE delta (HTML/
+    # markdown/etc. dropped) without splitting tags mid-token.
+    prev_stripped_for_tts: str = ""
 
     # Inline SSE parser: consumes one frame at a time from `content_iter`,
     # feeds delta tokens into the TTS queue + on_transcript hook + data
     # channel envelope. Returns True when a terminal event arrives
     # (response.completed / reply_final), so the caller breaks out.
     async def _process_sse_frame(line_bytes) -> bool:
-        nonlocal current_event, prev_cumulative
+        nonlocal current_event, prev_cumulative, prev_stripped_for_tts
         line = line_bytes.rstrip(b"\r\n")
         if not line:
             current_event = None
@@ -585,9 +619,25 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
             prev_cumulative = cumulative
             if not delta:
                 return False
-            if text_queue is not None:
-                try: text_queue.put_nowait(delta)
+            # TTS path: feed the SPEAKABLE delta only. Strip XML/HTML
+            # tags + markdown link/image syntax from the cumulative
+            # text, diff against prev_stripped_for_tts to compute the
+            # new audible portion. Keeps Aura from pronouncing
+            # `<audio src="speech_…mp3">` literally when the agent
+            # leaks markup into its output (gemma-4 sometimes hallucinates
+            # an audio embed; gpt-oss leaks Harmony channel tokens).
+            new_stripped = _sanitize_for_tts(cumulative)
+            if new_stripped.startswith(prev_stripped_for_tts):
+                tts_delta = new_stripped[len(prev_stripped_for_tts):]
+            else:
+                tts_delta = new_stripped
+            prev_stripped_for_tts = new_stripped
+            if tts_delta and text_queue is not None:
+                try: text_queue.put_nowait(tts_delta)
                 except asyncio.QueueFull: pass
+            # PWA-side surfaces (data channel + on_transcript) get the
+            # raw delta — the chat-bubble renderer handles its own
+            # display cleanup.
             if peer.on_transcript is not None:
                 try: await peer.on_transcript(delta, False)
                 except Exception: pass
@@ -609,7 +659,16 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
                 # FIRST so we don't race the agent's first reply_delta,
                 # then dispatch the message, then drain the stream until
                 # reply_final.
-                stream_url = f"{proxy_url}/api/sidekick/stream?chat_id={chat_id}"
+                # `live_only=1` opts out of the proxy's replay-ring
+                # catch-up. The bridge opens a fresh subscriber PER
+                # turn and only wants envelopes broadcast after this
+                # connection — historical envelopes from prior turns
+                # in the same chat would re-feed Aura TTS and cause
+                # the bridge to break out on a replayed reply_final
+                # before the actual new agent reply arrives. The PWA
+                # path keeps its long-lived subscriber + Last-Event-ID
+                # cursor; only the bridge needs this opt-out.
+                stream_url = f"{proxy_url}/api/sidekick/stream?chat_id={chat_id}&live_only=1"
                 async with sess.get(stream_url, timeout=aiohttp.ClientTimeout(total=None)) as stream_resp:
                     if stream_resp.status != 200:
                         err = (await stream_resp.text())[:200]
