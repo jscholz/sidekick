@@ -143,13 +143,16 @@ async function populateMicPicker() {
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
 async function boot() {
-  // Hydrate localStorage settings BEFORE any UI wiring reads them. Earlier
+  // Hydrate settings BEFORE any UI wiring reads them. Earlier
   // settings.load() lived ~300 lines down in boot, after toolbar wiring,
   // which made btn-transport's sync() read DEFAULTS instead of the stored
   // value — the toggle would flip in storage but the highlight wouldn't
   // reflect it. Generally: any boot code that calls settings.get() before
   // this line was reading uninitialised defaults.
-  settings.load();
+  // Async now: yaml-backed settings come from /api/sidekick/config; the
+  // remaining per-device keys are read from localStorage in the same
+  // call. Built-in DEFAULTS are the offline / proxy-down fallback.
+  await settings.load();
 
   // Load config from server (keys, gateway info)
   await loadConfig();
@@ -407,8 +410,11 @@ async function boot() {
     });
   }
 
-  // Settings
-  settings.load();
+  // Settings — first load() ran above in boot(); this is a redundant
+  // resync left for safety in case anything mutated `current` between
+  // boot's load and now (e.g. a backend.connect() that called
+  // settings.set()).
+  await settings.load();
   settings.applyVisuals();
   settings.hydrate({
     onThemeChange: () => theme.applyTheme(settings.get().theme),
@@ -2458,6 +2464,14 @@ async function boot() {
         await km.rehydrateFromSeed();
       } catch (err) {
         diag(`refresh: keyterms rehydrate failed: ${(err as Error)?.message ?? err}`);
+      }
+      // Re-pull yaml-backed settings (theme, hotkeys, voice phrases,
+      // etc.) so disk edits propagate without depending on the
+      // localStorage-shadowing dance the legacy path relied on.
+      try {
+        await settings.reload();
+      } catch (err) {
+        diag(`refresh: settings reload failed: ${(err as Error)?.message ?? err}`);
       }
       diag('refresh: location.reload()');
       location.reload();

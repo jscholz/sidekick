@@ -138,90 +138,60 @@ function startModelPoll() {
   modelPollTimer = setInterval(() => { refreshModelState().catch(() => {}); }, 30_000);
 }
 
+// Built-in fallbacks. Two storage backends:
+//
+//   - Per-device keys (PER_DEVICE_KEYS below) — `micDevice`,
+//     `ttsVoiceLocal` — stay in browser localStorage. Their values
+//     are hardware-specific (mic device IDs differ Mac vs iPhone;
+//     Web Speech voice names differ per OS) so they can't be
+//     deployment-wide.
+//   - Everything else lives in `sidekick.config.yaml` under
+//     `frontend.<category>.<key>:`, served by GET /api/sidekick/config
+//     and written by POST /api/sidekick/config/<key>. The proxy is
+//     the source of truth; localStorage is no longer consulted for
+//     these keys.
+//
+// The DEFAULTS object below is only used when:
+//   1. The proxy-fetch fails (offline / 503 / unconfigured) — last-
+//      resort fallback so the UI still renders.
+//   2. A new key was added to the schema and existing yamls don't
+//      have it yet.
+//
+// Keys + values match `proxy/sidekick/frontend-config.ts`'s
+// FRONTEND_SETTINGS table. If you add a setting, add it to BOTH.
 const DEFAULTS = {
-  tts: false,          // TTS output off by default; user enables via Speaking toolbar button
-  autoSend: true,      // auto-send voice transcripts when speaking is on
+  tts: false,
+  autoSend: true,
   voice: 'aura-2-thalia-en',
-  micDevice: '',            // audio input device ID ('' = system default)
-  streamingEngine: 'server', // 'server' (Deepgram) or 'local' (Web Speech only)
-  // When on, a Deepgram stall / disconnect switches STT to Web Speech so
-  // the user keeps getting transcripts. Default on: without it, any DG
-  // connectivity issue leaves streaming silently dead. Users who strongly
-  // prefer DG accuracy over degraded-but-live can toggle off in settings.
+  micDevice: '',
+  streamingEngine: 'server',
   autoFallback: true,
-  ttsEngine: 'server',       // 'server' (Deepgram Aura /tts) or 'local' (Web Speech synthesis)
-  ttsVoiceLocal: '',         // Web Speech voice name (empty = system default)
-  // dictationAutoSend was the legacy "auto-send vs land in composer"
-  // toggle for memo+dictate. Replaced by micAutoSend (below) which
-  // applies uniformly across all four mic-mode combinations.
+  ttsEngine: 'server',
+  ttsVoiceLocal: '',
   wakeLock: true,
-  commitPhrase: 'over',   // empty = commit-word disabled
+  commitPhrase: 'over',
   commitDelaySec: 1.5,
-  silenceSec: 15,  // 8s was triggering mid-sentence sends on slow-cadence dictation (e.g. "interaction" → ~1.5s breath → "video" — DG endpointing slow-restart let timer expire). Interim-cancels-flush in voice.ts is the primary defense; this is safety-net headroom for DG dropouts where no interim arrives.
+  silenceSec: 15,
   bargeIn: true,
-  // Voice nav keywords — matched as a whole utterance at end-of-final,
-  // short-circuited BEFORE draft append so they don't ship as messages.
-  // Pipe-separated alternates allowed per field (`previous chat|back chat`).
-  // Empty = disable that command. Keep the word "chat" (or your own
-  // trailing anchor) as a safety to avoid collisions with normal speech.
   navPrev: 'previous chat',
   navNext: 'next chat',
   navPause: 'pause chat',
-  // Reply playback order. When false (FIFO — default), new agent
-  // replies queue if one is currently playing; current finishes then
-  // the queued one plays. When true, new replies interrupt the
-  // current one (classic auto-skip — older behavior). The 'receive'
-  // chime fires on arrival either way; use voice "next chat" or the
-  // pocket-lock button to advance manually when queued.
   autoAdvanceOnNew: false,
-  // Threshold on per-frame mic peak (0..1). Higher = less sensitive. The
-  // UI shows the inverse (sensitivity %) where 100% ≈ threshold 0.0 and
-  // 0% ≈ threshold 0.50; see settings.ts slider wiring for the mapping.
   bargeThreshold: 0.20,
   contentSize: 15,
-  // Click volume for send/receive feedback. 0..1; 0 = silent. 0.5 matches
-  // the original "subtle" level, 1.0 is ~2x louder for noisy environments
-  // (e.g. bike rides). Mapped linearly to gain multiplier in feedback.ts.
   audioFeedbackVolume: 0.5,
   theme: 'dark',
-  // Composer-mic behavior toggles. Two orthogonal flags control the
-  // four modes the unified mic button can run in (call=on/off ×
-  // autoSend=on/off). Gesture (tap vs hold) is detected at press time
-  // — see the mic-button handler in main.ts. Default is the historical
-  // "tap-to-record memo, land in composer" behavior — offline-capable,
-  // gives the user time to review before sending.
-  //
-  //   micCall     false → memo (MediaRecorder → /transcribe batch)
-  //               true  → live WebRTC stream (interim transcripts)
-  //   micAutoSend false → transcript lands in the composer for review
-  //               true  → transcript auto-dispatches (memo: on stop;
-  //                       call: via dictation.ts silence/commit-phrase)
-  //
-  // The four call/autoSend combos:
-  //   call=false autoSend=false → memo into composer
-  //   call=false autoSend=true  → memo, fire-and-forget on stop
-  //   call=true  autoSend=false → live cursor-aware dictation in composer
-  //   call=true  autoSend=true  → live chat-bubble streaming
   micCall: false,
   micAutoSend: false,
-  // Hotkey strings — modifier+key tokens joined by '+' in any order
-  // (case-insensitive). Modifiers: Cmd / Ctrl / Shift / Alt / Meta.
-  // Cmd matches metaKey (Mac convention); the parser also accepts Ctrl
-  // matching ctrlKey for Win/Linux deployments. Keys are KeyboardEvent.key
-  // values: single chars (case-insensitive) or named keys ('Space',
-  // 'Escape', etc.). User-editable via the settings panel.
-  hotkeyCallMode: 'Cmd+Shift+C',     // toggle settings.micCall
-  hotkeyAutoSend: 'Cmd+Shift+S',     // toggle settings.micAutoSend
-  hotkeyToggleMic: 'Cmd+Shift+D',    // start / stop the active voice path
-  // Tool / agent-activity surfacing in the transcript (Phase 3).
-  //   off     — drop tool_call / tool_result events; render nothing.
-  //   summary — single live-updating row per turn ("N tools · 1.2s ✓").
-  //             Click the row to expand to per-tool detail.
-  //   full    — per-tool collapsed rows; expand to see args / result.
-  // Read at render time, not at connect time, so toggling takes effect
-  // on the NEXT tool event (already-rendered rows freeze in place).
+  hotkeyCallMode: 'Cmd+Shift+C',
+  hotkeyAutoSend: 'Cmd+Shift+S',
+  hotkeyToggleMic: 'Cmd+Shift+D',
   agentActivity: 'summary' as 'off' | 'summary' | 'full',
 };
+
+/** Settings whose value is hardware-specific to the browser; stay
+ *  in localStorage rather than yaml. Everything else is yaml-backed. */
+const PER_DEVICE_KEYS = new Set<string>(['micDevice', 'ttsVoiceLocal']);
 
 let current = { ...DEFAULTS };
 
@@ -243,51 +213,104 @@ function audioFeedbackLabel(vol) {
   return vol <= 0 ? 'Off' : `${Math.round(vol * 100)}%`;
 }
 
-export function load() {
+/** Pull the current snapshot from the server (yaml-backed values)
+ *  and merge with localStorage (per-device values). Synchronous
+ *  fallback if the fetch fails. Idempotent — call again on Refresh
+ *  or after the user closes the panel. */
+export async function load() {
+  // Per-device first — these are guaranteed available even if the
+  // proxy is unreachable.
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) current = { ...DEFAULTS, ...JSON.parse(raw) };
+    if (raw) {
+      const stored = JSON.parse(raw) as Record<string, any>;
+      for (const k of PER_DEVICE_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(stored, k)) {
+          (current as any)[k] = stored[k];
+        }
+      }
+    }
   } catch {}
+  // Yaml-backed: fetch flat snapshot from the proxy. The proxy
+  // returns built-in defaults for any key the yaml doesn't define
+  // yet, so partial yamls work.
+  try {
+    const r = await fetch('/api/sidekick/config', { cache: 'no-store' });
+    if (r.ok) {
+      const j = await r.json() as { settings?: Record<string, any> };
+      if (j?.settings) {
+        for (const [k, v] of Object.entries(j.settings)) {
+          if (PER_DEVICE_KEYS.has(k)) continue;
+          (current as any)[k] = v;
+        }
+      }
+    }
+  } catch {
+    // Offline / proxy down — `current` keeps the DEFAULTS or last
+    // server snapshot. The Refresh button will retry.
+  }
   return current;
 }
 
-// Cross-tab sync: when ANOTHER tab calls set() → save() → localStorage,
-// the `storage` event fires here. Refresh the in-memory cache so the
-// next get() call returns the new value, then dispatch a custom event
-// on `window` so hydrate() can re-sync the visible DOM controls in
-// this tab. Without the custom-event step, page B's <select>/<input>
-// elements would still show the OLD value until full reload (the
-// consumers like activityRow.ts read settings.get() per call so they
-// pick up the new value automatically; the settings panel's own
-// controls are the only thing that needs the DOM nudge).
-//
-// Caveats:
-//  - Chip-based settings (keyterms, preferred-models) are NOT
-//    re-synced from this event. Keyterms live in IDB (per-user, not
-//    in localStorage) so the storage event is irrelevant. Preferred-
-//    models live on the server. The custom event re-applies the
-//    `current` snapshot to standard form controls only.
-//  - Visible side-effects of settings (theme class, font size CSS
-//    var, applyTtsEngineVisibility) are re-applied on the cross-tab
-//    path so tab B looks consistent without reload.
+/** Re-fetch yaml-backed settings from the proxy. Same as load() but
+ *  named for clarity in the Refresh-button call site. */
+export async function reload() {
+  return load();
+}
+
+// Cross-tab sync for per-device keys (the yaml-backed ones round-
+// trip through the server, so other tabs see them on their own
+// reload/refresh). Storage event fires only on the OTHER tab when
+// localStorage changes here; we re-pull and broadcast.
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (e) => {
     if (e.key !== STORAGE_KEY) return;
-    load();
-    window.dispatchEvent(new CustomEvent('sidekick:settings-changed'));
+    void load().then(() => {
+      window.dispatchEvent(new CustomEvent('sidekick:settings-changed'));
+    });
   });
 }
 
+/** Persist per-device values to localStorage. Yaml-backed values
+ *  ride through set() → POST and don't touch localStorage. */
 export function save() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(current)); } catch {}
+  try {
+    const slice: Record<string, any> = {};
+    for (const k of PER_DEVICE_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(current, k)) {
+        slice[k] = (current as any)[k];
+      }
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(slice));
+  } catch {}
 }
 
 /** @returns {Readonly<typeof DEFAULTS>} */
 export function get() { return current; }
 
+/** Update one setting. Per-device keys land in localStorage; all
+ *  others POST to the proxy (which writes the yaml). The local
+ *  cache updates synchronously regardless so call sites that read
+ *  settings.get() right after set() see the new value. */
 export function set(key: string, value: any) {
   (current as any)[key] = value;
-  save();
+  if (PER_DEVICE_KEYS.has(key)) {
+    save();
+    return;
+  }
+  // Fire-and-forget POST. On failure, leave the local cache as-is
+  // (user sees their value); next reload() resyncs from yaml.
+  void fetch(`/api/sidekick/config/${encodeURIComponent(key)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ value }),
+  }).then((r) => {
+    if (!r.ok) {
+      console.warn(`[settings] POST /api/sidekick/config/${key} failed: ${r.status}`);
+    }
+  }).catch((e) => {
+    console.warn(`[settings] POST /api/sidekick/config/${key} threw:`, e);
+  });
 }
 
 /** Apply visual settings that need immediate DOM effects. */

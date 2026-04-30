@@ -26,6 +26,14 @@ import { WebSocketServer, WebSocket } from 'ws';
 import YAML from 'yaml';
 import { validators } from './src/cards/validators.ts';
 import * as sidekick from './proxy/sidekick/index.ts';
+import {
+  FRONTEND_SETTINGS,
+  readAllFrontend,
+  coerceValue,
+  writeOne as writeFrontendSetting,
+  persist as persistDeployDoc,
+  type FrontendSettingKey,
+} from './proxy/sidekick/frontend-config.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -690,6 +698,69 @@ async function handleKeytermsGet(_req, res) {
   res.end(body);
 }
 
+/** GET /api/sidekick/config — flat snapshot of every PWA setting
+ *  with its current value (yaml override or built-in default). */
+function handleSidekickConfigGet(_req, res) {
+  const snapshot = readAllFrontend(DEPLOY_CFG);
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+  res.end(JSON.stringify({ settings: snapshot }));
+}
+
+/** POST /api/sidekick/config/<key> — write one setting. Body is
+ *  `{value: <new>}`. Persists to sidekick.config.yaml under
+ *  `frontend.<category>.<key>:`. Returns the updated value. */
+async function handleSidekickConfigSet(req, res, key: string) {
+  if (!Object.prototype.hasOwnProperty.call(FRONTEND_SETTINGS, key)) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: `unknown setting: ${key}` } }));
+    return;
+  }
+  const chunks: Buffer[] = [];
+  for await (const c of req) {
+    chunks.push(c);
+    if (chunks.reduce((n, b) => n + b.length, 0) > 64 * 1024) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'body too large' } }));
+      return;
+    }
+  }
+  let body: any;
+  try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+  catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'invalid json' } }));
+    return;
+  }
+  let value;
+  try { value = coerceValue(key as FrontendSettingKey, body?.value); }
+  catch (e: any) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: e?.message || 'invalid value' } }));
+    return;
+  }
+  if (!CONFIG_PATH) {
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'no sidekick.config.yaml configured (set SIDEKICK_CONFIG)' } }));
+    return;
+  }
+  if (!deployDoc) deployDoc = YAML.parseDocument('frontend: {}\n');
+  try {
+    writeFrontendSetting(deployDoc, key as FrontendSettingKey, value);
+    await persistDeployDoc(deployDoc, CONFIG_PATH);
+    DEPLOY_CFG = cfgAsJS();
+    // Pin the mtime so reloadConfigIfChanged() doesn't double-rebuild
+    // on the next config-touching request.
+    try { lastConfigMtime = fsSync.statSync(CONFIG_PATH).mtimeMs; } catch {}
+  } catch (e: any) {
+    console.error(`[config] write failed for ${key}:`, e?.message);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: e?.message || 'write failed' } }));
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ key, value }));
+}
+
 function handleConfig(_req, res) {
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
   res.end(JSON.stringify({
@@ -823,6 +894,16 @@ const server = http.createServer(async (req, res) => {
       return sidekick.handleSidekickSettingsUpdate(
         req, res, decodeURIComponent(sidekickSettingsUpdate[1]),
       );
+    }
+    // Frontend settings store (yaml-backed PWA settings: theme,
+    // hotkeys, voice phrases, etc.).
+    if (req.method === 'GET' && /^\/api\/sidekick\/config(?:\?.*)?$/.test(req.url)) {
+      return handleSidekickConfigGet(req, res);
+    }
+    const sidekickConfigSet = req.method === 'POST'
+      && req.url.match(/^\/api\/sidekick\/config\/([A-Za-z0-9_]+)(?:\?.*)?$/);
+    if (sidekickConfigSet) {
+      return handleSidekickConfigSet(req, res, sidekickConfigSet[1]);
     }
   }
   if (req.method === 'GET' && req.url === '/config') return handleConfig(req, res);
