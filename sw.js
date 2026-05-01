@@ -2,7 +2,7 @@
  * Service worker — caches the app shell so iOS PWA survives app switches.
  * Strategy: cache-first for app shell assets, network-first for API calls.
  */
-const CACHE_NAME = 'v2.117';
+const CACHE_NAME = 'v2.118';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -139,5 +139,12 @@ self.addEventListener('fetch', (e) => {
 self.addEventListener('message', (e) => {
   if (e.data?.type === 'get-version') {
     e.source?.postMessage({ type: 'version', version: CACHE_NAME });
+  }
+  // Refresh button on the page postMessages us after reg.update() if a
+  // new SW is sitting in 'waiting' state. install() already calls
+  // skipWaiting() defensively, but if a previous SW shipped without it,
+  // honour the message so users can unstick a stale install.
+  if (e.data?.type === 'SKIP_WAITING') {
+    self.skipWaiting();
   }
 });

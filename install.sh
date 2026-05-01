@@ -9,7 +9,7 @@
 #      --experimental-strip-types flag at runtime).
 #   2. Clones the sidekick repo to ~/sidekick if missing, or pulls
 #      latest if already there.
-#   3. Runs `npm install` at root + under `agent/`.
+#   3. Runs `npm install` at root + under `backends/stub/`.
 #   4. Copies `.env.example` to `.env` (idempotent — won't overwrite
 #      an existing .env).
 #   5. Starts the proxy + the in-tree stub agent (echo LLM) via
@@ -55,9 +55,9 @@ cd "$INSTALL_DIR"
 # 3. npm install (root + agent)
 echo "==> installing root dependencies"
 npm install --no-audit --no-fund
-if [ -f "agent/package.json" ]; then
+if [ -f "backends/stub/package.json" ]; then
   echo "==> installing agent dependencies"
-  (cd agent && npm install --no-audit --no-fund)
+  (cd backends/stub && npm install --no-audit --no-fund)
 fi
 
 # 4. .env (idempotent)
@@ -73,10 +73,15 @@ echo ""
 echo "================================================================"
 echo "  Sidekick is starting up."
 echo ""
-echo "  Open http://localhost:3001 in your browser."
+echo "  Defaults: proxy on :3001, stub agent on :4001 — start-all"
+echo "  auto-shifts to :3002/:4002 (etc) if either is busy. The"
+echo "  actual URL is printed below as soon as the proxy binds."
 echo ""
-echo "  The proxy runs on :3001, the stub agent on :4001."
-echo "  Stop both with Ctrl+C."
+echo "  Override with PROXY_PORT / AGENT_PORT, or set"
+echo "  SIDEKICK_PLATFORM_URL=http://host:port to skip the in-tree"
+echo "  stub and proxy to an existing agent."
+echo ""
+echo "  Stop with Ctrl+C."
 echo "================================================================"
 echo ""
 

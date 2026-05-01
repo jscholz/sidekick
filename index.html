@@ -212,18 +212,31 @@
   <h2 class="settings-title">Settings</h2>
   <div class="settings-group" id="settings-group-agent">
     <div class="group-label">Agent</div>
-    <div class="row" id="row-model">
-      <label for="set-model">Model</label>
-      <select id="set-model">
-        <option value="">Loading…</option>
+    <!--
+      Agent-declared settings render here at runtime via
+      src/agentSettings.ts. The agent declares a SettingDef[] over
+      /v1/settings/schema; the renderer injects rows with
+      `data-agent-setting`. Static rows below ("Preferred models")
+      are sidekick-side knobs that don't depend on the agent.
+    -->
+    <!--
+      Static placeholder shown while /v1/settings/schema is in flight
+      (or when the agent doesn't implement the extension yet — e.g.
+      backends/hermes/plugin not restarted with the new routes). Stays visible
+      until a SUCCESSFUL schema response arrives, at which point the
+      injected rows take over. Use `-placeholder` (not
+      `-agent-setting`) so clearInjectedRows() doesn't strip it on
+      null / error responses.
+    -->
+    <div class="row" data-agent-setting-placeholder="model">
+      <label>Model</label>
+      <select disabled>
+        <option>Loading…</option>
       </select>
     </div>
-    <div class="row row-wide">
-      <label>Preferred models</label>
-      <div class="keyterms-chips" id="preferred-models-chips" aria-label="preferred model globs"></div>
-      <input type="text" id="set-preferred-models" placeholder="e.g. anthropic/* + Enter" autocomplete="off" spellcheck="false">
-      <span class="hint">glob patterns that filter the model picker above (e.g. <code>anthropic/*</code>, <code>google/gemini-*</code>). Empty = full openrouter catalog. Saves to models.preferred in sidekick.config.yaml.</span>
-    </div>
+    <!-- "Preferred models" chip input was hardcoded here; now declared
+         by the agent via /v1/settings/schema as a `string-list` setting
+         and rendered by agentSettings.ts. -->
   </div>
 
   <div class="settings-group">

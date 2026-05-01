@@ -9,7 +9,7 @@ saves a multi-hour thrash later.
 1. **`CONTRIBUTING.md`** — dev setup, test commands, code style, and
    the test-layout convention. Read the "Tests" section in full; the
    diagnostic recipes alone will save you hours.
-2. **`server-lib/backends/hermes-gateway/CONTRACT.md`** — if your
+2. **`proxy/backends/hermes-gateway/CONTRACT.md`** — if your
    change touches the proxy or PWA backend client. Documents the
    WebSocket envelope schema, session lifecycle, HTTP+SSE surface,
    and what state lives where (`state.db` vs `sessions.json`).
@@ -46,7 +46,7 @@ saves a multi-hour thrash later.
 - **Hermetic test harness is load-bearing, not premature.** If you're
   adding a feature that touches shared state (state.db, sessions.json,
   IDB), build the mock / scratch path before the feature. The proxy
-  test suite at `server-lib/backends/hermes-gateway/__tests__/` is
+  test suite at `proxy/backends/hermes-gateway/__tests__/` is
   the template.
 
 - **Use the Plan agent for tasks > 30 minutes.** Five minutes of
@@ -68,9 +68,9 @@ npm test           # ~1.4s, 120+ tests
 npm run typecheck  # ~3s
 ```
 
-If your change touches `server-lib/backends/hermes-gateway/*`, also:
+If your change touches `proxy/backends/hermes-gateway/*`, also:
 ```
-npm test -- server-lib/backends/hermes-gateway/__tests__/proxy.test.ts
+npm test -- proxy/backends/hermes-gateway/__tests__/proxy.test.ts
 ```
 to surface failures with proxy-test-only output. The full suite hides
 the per-test detail.
@@ -86,14 +86,14 @@ when you're validating that mock matches reality.
 ## Backend-specific changes
 
 The repo is meant to be modular. Hermes is the default backend but
-not the only one — `src/backends/types.ts` defines the abstraction
-and `src/backends/{hermes-gateway,openai-compat,openclaw}.ts` are the
+not the only one — `src/proxyClientTypes.ts` defines the abstraction
+and `src/{hermes-gateway,openai-compat,openclaw}.ts` are the
 implementations.
 
 If you're changing **only** hermes-specific code: edit under
-`server-lib/backends/hermes-gateway/` (server side) or
-`src/backends/hermes-gateway.ts` (client side). Tests go under
-`server-lib/backends/hermes-gateway/__tests__/`.
+`proxy/backends/hermes-gateway/` (server side) or
+`src/hermes-gateway.ts` (client side). Tests go under
+`proxy/backends/hermes-gateway/__tests__/`.
 
 If you're changing **shared / generic** behavior (composer, drawer,
 chat, voice): edit under `src/`, with tests in `test/`. These must
@@ -115,10 +115,10 @@ plan. Don't add patches without updating that ledger.
 
 **Two long-running services**:
 - `hermes-gateway.service` — hermes-agent (Python, in `~/.hermes/hermes-agent/`)
-- `sidekick.service` — sidekick proxy (`server.ts` + `server-lib/`)
+- `sidekick.service` — sidekick proxy (`server.ts` + `proxy/`)
 
 If you change Python code under `~/.hermes/hermes-agent/`, restart
-hermes-gateway. If you change anything under `server-lib/` or
+hermes-gateway. If you change anything under `proxy/` or
 `server.ts`, **restart sidekick.service**. The PWA bundle
 (`build/*`) is served by the proxy and re-loaded on browser hard-
 reload, so frontend changes don't need a service restart — just

@@ -238,17 +238,28 @@ export function handleSidekickStream(req, res): void {
   // PWA passes its cursor as `?last_event_id=N` instead. Honor either;
   // header wins when both are present. Anything missing or unparseable
   // falls back to "fresh subscriber" — replay the whole ring.
+  //
+  // `?live_only=1` opts OUT of replay entirely — used by the audio
+  // bridge, which opens a fresh subscriber per agent turn and wants
+  // ONLY envelopes broadcast after its connection. Without this the
+  // bridge sees historical envelopes from the same chat (same DB row
+  // every replay), re-feeds them through Aura TTS, and prematurely
+  // breaks on the replayed reply_final before the actual new turn
+  // arrives.
+  const liveOnly = url.searchParams.get('live_only') === '1';
   const headerRaw = req.headers['last-event-id'];
   const queryRaw = url.searchParams.get('last_event_id');
   const cursorRaw = (typeof headerRaw === 'string' && headerRaw)
     || (queryRaw ?? '');
   const lastEventId = cursorRaw ? Number.parseInt(cursorRaw, 10) : NaN;
   const replayFrom = Number.isFinite(lastEventId) ? lastEventId : -1;
-  for (const entry of recent) {
-    if (entry.id <= replayFrom) continue;
-    if (chatId && entry.env.chat_id !== chatId) continue;
-    const evtName = typeof entry.env.type === 'string' ? entry.env.type : 'message';
-    res.write(`id: ${entry.id}\nevent: ${evtName}\ndata: ${JSON.stringify(entry.env)}\n\n`);
+  if (!liveOnly) {
+    for (const entry of recent) {
+      if (entry.id <= replayFrom) continue;
+      if (chatId && entry.env.chat_id !== chatId) continue;
+      const evtName = typeof entry.env.type === 'string' ? entry.env.type : 'message';
+      res.write(`id: ${entry.id}\nevent: ${evtName}\ndata: ${JSON.stringify(entry.env)}\n\n`);
+    }
   }
   const ka = setInterval(() => {
     try { res.write(': ka\n\n'); }

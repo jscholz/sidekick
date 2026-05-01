@@ -877,8 +877,16 @@
     #settings input[type=text],
     #settings textarea,
     #settings select { min-width: 0; max-width: 100%; }
-    #settings .row { gap: 8px; }
-    #settings .row-wide .hint { margin-left: 0; }
+    #settings .row { gap: 8px; flex-wrap: wrap; }
+    /* Hint drops to its own line below the input on phones — the third
+       column has no width to spare for prose, and squeezing it produced
+       one-word-per-line wrapping. Mirrors the .row-wide treatment. */
+    #settings .row .hint {
+      flex-basis: 100%;
+      margin-left: 0;
+      margin-top: 2px;
+      font-size: calc(var(--content-size) - 3px);
+    }
   }
   .settings-title {
     margin: 0 0 14px; font-size: 20px; font-weight: 600;

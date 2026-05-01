@@ -143,13 +143,16 @@ async function populateMicPicker() {
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
 async function boot() {
-  // Hydrate localStorage settings BEFORE any UI wiring reads them. Earlier
+  // Hydrate settings BEFORE any UI wiring reads them. Earlier
   // settings.load() lived ~300 lines down in boot, after toolbar wiring,
   // which made btn-transport's sync() read DEFAULTS instead of the stored
   // value — the toggle would flip in storage but the highlight wouldn't
   // reflect it. Generally: any boot code that calls settings.get() before
   // this line was reading uninitialised defaults.
-  settings.load();
+  // Async now: yaml-backed settings come from /api/sidekick/config; the
+  // remaining per-device keys are read from localStorage in the same
+  // call. Built-in DEFAULTS are the offline / proxy-down fallback.
+  await settings.load();
 
   // Load config from server (keys, gateway info)
   await loadConfig();
@@ -407,8 +410,11 @@ async function boot() {
     });
   }
 
-  // Settings
-  settings.load();
+  // Settings — first load() ran above in boot(); this is a redundant
+  // resync left for safety in case anything mutated `current` between
+  // boot's load and now (e.g. a backend.connect() that called
+  // settings.set()).
+  await settings.load();
   settings.applyVisuals();
   settings.hydrate({
     onThemeChange: () => theme.applyTheme(settings.get().theme),
@@ -1870,7 +1876,12 @@ async function boot() {
     // button means pointermove/pointerup route here even when the
     // finger drifts onto the memo bar. Drag LEFT past the trash
     // bounding rect → discard-armed; release in red → discard.
-    const TAP_THRESHOLD_MS = 200;
+    // 200ms originally — too tight for a deliberate "tap" gesture
+    // (natural finger lift takes ~250ms), so a tap that the user
+    // intended as toggle-mode kept finalizing as PTT instead. 350ms
+    // matches the iOS "long press" threshold range and gives borderline
+    // taps room without making true PTT feel laggy.
+    const TAP_THRESHOLD_MS = 350;
 
     type MicState = 'idle' | 'recording' | 'recording_toggle';
     let micState: MicState = 'idle';
@@ -2425,19 +2436,48 @@ async function boot() {
     }
   }, true);
 
-  // ── Refresh button (full page reload for standalone PWA) ──
-  // Previously did a transport-rebind which had a confusing mental model
-  // ("why didn't it actually refresh?"). Renamed to "Refresh" + now
-  // does a real location.reload() — same as hitting browser-refresh on
-  // desktop. With the SSE-detach proxy fix, server-side agent runs
-  // outlive the reload, so refreshing mid-conversation no longer kills
-  // an in-flight reply (the next request on the same conversation
-  // chains via previous_response_id and picks up the reply).
+  // ── Refresh button ──
+  // Forces a SW update check before reload. iOS PWA suspends the page
+  // aggressively, so the periodic reg.update() polling rarely fires in
+  // practice — devices end up stuck on an old cached SW indefinitely.
+  // This gives the user an explicit escape hatch: hit Refresh and the
+  // browser actually re-fetches sw.js, installs the new SW, then the
+  // controllerchange listener in index.html reloads the page on top of
+  // the new SW. Falls back to a plain reload if there's no SW or the
+  // update check fails.
   const btnRefresh = document.getElementById('btn-refresh');
   if (btnRefresh) {
-    btnRefresh.onclick = () => {
+    btnRefresh.onclick = async () => {
       try { void webrtcControls.closeIfOpen(); } catch {}
       try { player.pause(); player.src = ''; player.load(); } catch {}
+      try {
+        const reg = await navigator.serviceWorker?.getRegistration();
+        if (reg) {
+          await reg.update();
+          reg.waiting?.postMessage({ type: 'SKIP_WAITING' });
+        }
+      } catch (err) {
+        diag(`refresh: SW update failed: ${(err as Error)?.message ?? err}`);
+      }
+      // Pull any new server-seeded keyterms into IDB. Add-only: chips
+      // the user typed are preserved. Without this, edits to
+      // sidekick.config.yaml's stt.keyterms never reach existing
+      // installs because loadOrSeed() short-circuits on a populated
+      // IDB.
+      try {
+        const km = await import('./keyterms.ts');
+        await km.rehydrateFromSeed();
+      } catch (err) {
+        diag(`refresh: keyterms rehydrate failed: ${(err as Error)?.message ?? err}`);
+      }
+      // Re-pull yaml-backed settings (theme, hotkeys, voice phrases,
+      // etc.) so disk edits propagate without depending on the
+      // localStorage-shadowing dance the legacy path relied on.
+      try {
+        await settings.reload();
+      } catch (err) {
+        diag(`refresh: settings reload failed: ${(err as Error)?.message ?? err}`);
+      }
       diag('refresh: location.reload()');
       location.reload();
     };

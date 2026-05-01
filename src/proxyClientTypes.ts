@@ -14,7 +14,7 @@
  *     whose backing feature isn't supported (e.g. hide the model picker
  *     against a backend that doesn't expose one).
  *
- * See src/backends/README.md for the adding-a-backend checklist.
+ * See src/README.md for the adding-a-backend checklist.
  */
 
 // ─── Events the adapter emits upward to the shell ───────────────────────────

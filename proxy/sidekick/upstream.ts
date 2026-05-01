@@ -1,20 +1,20 @@
 // UpstreamAgent — the proxy's contract with whatever's behind it.
 //
-// Today: hermes-plugin (in-process with hermes-agent, exposing /v1/*
-// HTTP endpoints — see hermes-plugin/__init__.py).
+// Today: backends/hermes/plugin (in-process with hermes-agent, exposing /v1/*
+// HTTP endpoints — see backends/hermes/plugin/__init__.py).
 // Tomorrow: a stub agent (echo / gemini / ollama), or any third-party
 // /v1/*-speaking server (OpenAI, Groq, Together, an Ollama OpenAI-compat
 // proxy, the openclaw plugin via api.registerHttpRoute).
 //
 // One interface, one implementation. The PWA-facing routes in
-// server-lib/sidekick/{messages,sessions,history}.ts call into this.
+// proxy/sidekick/{messages,sessions,history}.ts call into this.
 
 // No imports — this module is self-contained so it can be reused
-// across upstreams (hermes-plugin, stub agent, etc.) without dragging
+// across upstreams (backends/hermes/plugin, stub agent, etc.) without dragging
 // in WS-specific machinery. Auth comes from env or constructor opts.
 
 /** Sidekick envelope shape that the proxy's stream multiplexer consumes.
- *  Same shape as the legacy WS protocol — see hermes-plugin/__init__.py
+ *  Same shape as the legacy WS protocol — see backends/hermes/plugin/__init__.py
  *  module docstring for the canonical wire spec. */
 export type SidekickEnvelope =
   | { type: 'reply_delta'; chat_id: string; text: string; message_id: string; edit?: boolean }
@@ -51,6 +51,25 @@ export interface GatewayConversationSummary extends ConversationSummary {
     source: string;
     chat_type: string;
   };
+}
+
+/** Agent-declared user-facing setting — see
+ *  docs/ABSTRACT_AGENT_PROTOCOL.md "Optional settings extension". */
+export interface SettingDef {
+  id: string;
+  label: string;
+  description?: string;
+  category?: string;
+  type: 'enum' | 'slider' | 'toggle' | 'text' | 'string-list';
+  /** Type matches `type`: string for enum/text, number for slider,
+   *  boolean for toggle, string[] for string-list. */
+  value: string | number | boolean | string[];
+  options?: Array<{ value: string; label: string; description?: string }>;
+  min?: number;
+  max?: number;
+  step?: number;
+  /** Hint text inside the input (text + string-list types). */
+  placeholder?: string;
 }
 
 /** Single transcript item, OAI shape (with optional sidekick extension). */
@@ -105,6 +124,31 @@ export interface UpstreamAgent {
 
   /** Liveness check. */
   healthcheck(): Promise<{ ok: boolean }>;
+
+  /** Optional settings extension — agent-declared knobs. Returns null
+   *  when the upstream doesn't implement /v1/settings/* (404); the
+   *  proxy surfaces 404 to the PWA so the "Agent" group hides. */
+  getSettingsSchema(): Promise<SettingDef[] | null>;
+
+  /** Update one setting. Returns the updated def. Throws on 4xx/5xx
+   *  with the upstream's response body included on `.cause` so the
+   *  proxy can pass status + body through to the PWA. */
+  updateSetting(id: string, value: unknown): Promise<SettingDef>;
+}
+
+/** Error thrown by HTTPAgentUpstream when the upstream returns a 4xx
+ *  / 5xx and the proxy needs to forward that status verbatim (not
+ *  collapse to 500). Currently used by updateSetting where the agent
+ *  is the validator — invalid values come back as 400. */
+export class UpstreamHTTPError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+  constructor(status: number, body: unknown, message?: string) {
+    super(message ?? `upstream HTTP ${status}`);
+    this.name = 'UpstreamHTTPError';
+    this.status = status;
+    this.body = body;
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -113,7 +157,7 @@ export interface UpstreamAgent {
 
 const DEFAULT_URL = process.env.UPSTREAM_URL || 'http://127.0.0.1:8645';
 // Fall back to the same shared secret the WS path uses; this lets
-// hermes-plugin auth both transports with one env var.
+// backends/hermes/plugin auth both transports with one env var.
 const DEFAULT_AUTH = (
   process.env.UPSTREAM_TOKEN || process.env.SIDEKICK_PLATFORM_TOKEN || ''
 ).trim();
@@ -198,6 +242,36 @@ export class HTTPAgentUpstream implements UpstreamAgent {
       first_id: j?.first_id ?? null,
       has_more: !!j?.has_more,
     };
+  }
+
+  async getSettingsSchema(): Promise<SettingDef[] | null> {
+    const r = await fetch(`${this.url}/v1/settings/schema`, {
+      headers: this.headers(),
+    });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`upstream getSettingsSchema: HTTP ${r.status}`);
+    const j: any = await r.json();
+    return Array.isArray(j?.data) ? j.data : [];
+  }
+
+  async updateSetting(id: string, value: unknown): Promise<SettingDef> {
+    const r = await fetch(
+      `${this.url}/v1/settings/${encodeURIComponent(id)}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ value }),
+      },
+    );
+    let body: any;
+    try { body = await r.json(); } catch { body = null; }
+    if (!r.ok) {
+      // Pass status + body through so the proxy can mirror the
+      // upstream's error envelope verbatim — particularly the
+      // validation-error message that the PWA surfaces inline.
+      throw new UpstreamHTTPError(r.status, body);
+    }
+    return body as SettingDef;
   }
 
   async deleteConversation(chatId: string): Promise<void> {

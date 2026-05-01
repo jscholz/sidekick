@@ -36,7 +36,7 @@ const TOOL_PROMPT = 'Use web_search to find one fact about the Eiffel Tower.';
 
 const execFileP = promisify(execFile);
 
-// Mirrors server-lib/generic/sql.ts (can't import a .ts file from
+// Mirrors proxy/generic/sql.ts (can't import a .ts file from
 // .mjs without a build step; the helper is two lines).
 async function sqlQuery(db, sql) {
   const { stdout } = await execFileP('sqlite3', ['-json', db, sql], {

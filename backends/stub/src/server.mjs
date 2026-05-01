@@ -43,7 +43,7 @@ export function createServer({ conversations, llm, bearerToken }) {
   /** Out-of-turn event channel state. Stub agent rarely emits these
    *  (no cron, no proactive replies), but the contract requires the
    *  endpoint so proxies can subscribe. We keep a bounded ring +
-   *  per-subscriber queues mirroring the hermes-plugin pattern. */
+   *  per-subscriber queues mirroring the backends/hermes/plugin pattern. */
   const eventSubscribers = new Set();
   let eventIdCounter = 0;
   const eventReplayRing = [];
@@ -74,7 +74,7 @@ export function createServer({ conversations, llm, bearerToken }) {
     try {
       // Both /health and /healthz are common conventions; accept both
       // so existing UpstreamAgent clients (which probe /health to match
-      // the hermes-plugin) work unchanged.
+      // the backends/hermes/plugin) work unchanged.
       if (req.method === 'GET' && (req.url === '/healthz' || req.url === '/health')) {
         return json(res, 200, { status: 'ok', llm: llm.name });
       }
@@ -117,6 +117,29 @@ export function createServer({ conversations, llm, bearerToken }) {
       if (req.method === 'GET' && url.pathname === '/v1/events') {
         if (!checkAuth(req)) return json(res, 401, errorBody('authentication_error', 'invalid bearer token'));
         return handleEvents(req, res, eventSubscribers, eventReplayRing);
+      }
+      // Optional settings extension — see
+      // docs/ABSTRACT_AGENT_PROTOCOL.md "Optional settings extension".
+      // The stub declares its current LLM as a 1-option enum. That's
+      // enough to exercise the schema-renderer end-to-end (verifying
+      // the model dropdown wires up) without giving the user a knob
+      // that does nothing — POST validates against the single option,
+      // so the value can only round-trip back to the same name.
+      // Forks adding more knobs (persona, temperature, ...) extend the
+      // returned array; nothing else needs to change.
+      if (req.method === 'GET' && url.pathname === '/v1/settings/schema') {
+        if (!checkAuth(req)) return json(res, 401, errorBody('authentication_error', 'invalid bearer token'));
+        return json(res, 200, { object: 'list', data: settingsSchema(llm) });
+      }
+      const settingsPostMatch = url.pathname.match(/^\/v1\/settings\/([^/]+)$/);
+      if (req.method === 'POST' && settingsPostMatch) {
+        if (!checkAuth(req)) return json(res, 401, errorBody('authentication_error', 'invalid bearer token'));
+        const id = decodeURIComponent(settingsPostMatch[1]);
+        const raw = await readBody(req);
+        let body;
+        try { body = JSON.parse(raw || '{}'); }
+        catch { return json(res, 400, errorBody('invalid_request_error', 'body is not valid JSON')); }
+        return handleSettingsUpdate(res, llm, id, body?.value);
       }
       if (req.method === 'POST' && url.pathname === '/v1/responses') {
         if (bearerToken) {
@@ -354,6 +377,55 @@ async function handleNonStream(res, { llm, history, conversationId, conversation
     messageId,
     assembled,
   }));
+}
+
+/** Settings the stub agent declares. One entry: a read-locked
+ *  "model" enum reflecting the configured LLM. Listed as an enum
+ *  with a single option so the PWA's generic dropdown renders
+ *  correctly, and POST validates against `llm.name`. Forks add
+ *  more entries here.
+ *
+ * @param {LLM} llm
+ */
+function settingsSchema(llm) {
+  return [
+    {
+      id: 'model',
+      label: 'Model',
+      description: 'LLM the stub is wired to (set via AGENT_LLM env at boot)',
+      category: 'Agent',
+      type: 'enum',
+      value: llm.name,
+      options: [{ value: llm.name, label: llm.name }],
+    },
+  ];
+}
+
+/**
+ * @param {http.ServerResponse} res
+ * @param {LLM} llm
+ * @param {string} id
+ * @param {unknown} value
+ */
+function handleSettingsUpdate(res, llm, id, value) {
+  const def = settingsSchema(llm).find((s) => s.id === id);
+  if (!def) return json(res, 404, errorBody('invalid_request_error', `unknown setting: ${id}`));
+  if (def.type === 'enum') {
+    const ok = (def.options ?? []).some((o) => o.value === value);
+    if (!ok) {
+      return json(
+        res,
+        400,
+        errorBody(
+          'invalid_request_error',
+          `value not in options[]: ${JSON.stringify(value)}`,
+        ),
+      );
+    }
+  }
+  // No-op success: stub LLM is fixed at boot. Returning the def
+  // matches the contract's "return updated SettingDef" rule.
+  return json(res, 200, def);
 }
 
 function buildResponseEnvelope({ id, createdAt, model, messageId, assembled }) {

@@ -1,0 +1,62 @@
+# Sidekick deployment config. Copy to `sidekick.config.yaml` (or
+# anywhere; point at it via `SIDEKICK_CONFIG=/abs/path/.../sidekick.config.yaml`).
+#
+# Two halves:
+#
+#   1. Static deployment tuning — set once when you stand up the
+#      install, requires a service restart to change.
+#   2. Frontend-tunable seeds — chip-UI editors in Settings write
+#      back to these keys. The proxy reloads the yaml on mtime
+#      change, so live edits via the chip UI take effect without
+#      a restart.
+#
+# Secrets (DEEPGRAM_API_KEY, OPENROUTER_API_KEY, SIDEKICK_PLATFORM_TOKEN)
+# stay in `.env` — never in this file.
+
+# ─────────────────────────────────────────────────────────────────────
+# 1. STATIC DEPLOYMENT TUNING (restart required)
+# ─────────────────────────────────────────────────────────────────────
+
+# Branding — shown in the header, manifest, and lockscreen label.
+app:
+  name: SideKick
+  subtitle: Agent Portal
+  agent_label: Clawdian
+  # Optional override for the --primary CSS variable. Any CSS color
+  # (hex / rgb() / hsl()). Empty/null = stylesheet default (sage).
+  theme_primary: ~
+
+# Backend/upstream agent. Sidekick speaks the abstract agent contract
+# (see docs/ABSTRACT_AGENT_PROTOCOL.md); any compliant `/v1/*` server
+# drops in. The token + URL go through env vars in production
+# (SIDEKICK_PLATFORM_URL / SIDEKICK_PLATFORM_TOKEN).
+backend:
+  sidekick_platform:
+    url: http://127.0.0.1:8645
+    # token: read from $SIDEKICK_PLATFORM_TOKEN; never in this file.
+
+# HTTP server.
+server:
+  port: 3001
+  host: ~                 # null = 127.0.0.1; '0.0.0.0' to bind all interfaces
+  disable_screenshot: false  # set true to skip Playwright link-preview cards
+
+# Ambient corner widget — leave null to use browser geolocation.
+weather:
+  lat: ~
+  lon: ~
+
+# ─────────────────────────────────────────────────────────────────────
+# 2. FRONTEND-TUNABLE SEEDS (no restart; chip UI writes here)
+# ─────────────────────────────────────────────────────────────────────
+
+# Deepgram STT vocabulary biasing. Names, project codes, jargon — the
+# stuff Deepgram would otherwise transcribe wrong. The PWA seeds each
+# fresh user's IndexedDB list from here; existing users manage their
+# own list via Settings → STT keyterms (chips). Edits to this list
+# affect future first-launches only — they don't push to existing
+# users' IDB.
+stt:
+  keyterms:
+    - Sidekick
+    - Deepgram

@@ -14,7 +14,7 @@
 //
 // /api/sidekick/stream is served by a real in-process http.Server on
 // an ephemeral 127.0.0.1 port (mirrors the proxy-test harness pattern
-// at server-lib/sidekick/__tests__/proxy-harness.ts).
+// at proxy/sidekick/__tests__/proxy-harness.ts).
 // Playwright forwards the PWA's /api/sidekick/stream request to that
 // local server via `route.continue({ url })`, so the EventSource sees
 // a single long-lived connection — `pushReply` / `pushSessionChanged`
@@ -255,6 +255,69 @@ export async function installMockBackend(page) {
     });
   });
 
+  // /api/sidekick/settings/* — agent-declared settings extension.
+  // Tests configure schema via mock.setSettingsSchema([...]). null
+  // schema = agent doesn't implement extension (route returns 404),
+  // matching the contract for opt-out agents.
+  let settingsSchema = null;            // null | SettingDef[]
+  /** Records the most recent /api/sidekick/settings/{id} POST so
+   *  tests can assert the body shape forwarded matches what they
+   *  expected. */
+  let lastSettingsPost = null;
+  await page.route(/.*\/api\/sidekick\/settings(?:\/.*)?/, async (route) => {
+    const url = new URL(route.request().url());
+    const method = route.request().method();
+    if (method === 'GET' && url.pathname.endsWith('/settings/schema')) {
+      if (settingsSchema === null) {
+        await route.fulfill({
+          status: 404,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'settings not supported' } }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ object: 'list', data: settingsSchema }),
+      });
+      return;
+    }
+    const m = method === 'POST' && url.pathname.match(/\/settings\/([^/]+)$/);
+    if (m) {
+      const id = decodeURIComponent(m[1]);
+      let body;
+      try { body = JSON.parse(route.request().postData() || '{}'); }
+      catch { body = {}; }
+      lastSettingsPost = { id, body };
+      if (settingsSchema === null) {
+        await route.fulfill({ status: 404, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'settings not supported' } }) });
+        return;
+      }
+      const def = settingsSchema.find((s) => s.id === id);
+      if (!def) {
+        await route.fulfill({ status: 404, contentType: 'application/json',
+          body: JSON.stringify({ error: { message: `unknown setting: ${id}` } }) });
+        return;
+      }
+      const value = body?.value;
+      if (def.type === 'enum') {
+        const ok = (def.options ?? []).some((o) => o.value === value);
+        if (!ok) {
+          await route.fulfill({ status: 400, contentType: 'application/json',
+            body: JSON.stringify({ error: { message: `value not in options[]: ${JSON.stringify(value)}` } }) });
+          return;
+        }
+      }
+      def.value = value;
+      await route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify(def) });
+      return;
+    }
+    return route.fallback();
+  });
+
   // GET /api/keyterms — empty list, harmless.
   await page.route('**/api/keyterms', async (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
@@ -297,6 +360,17 @@ export async function installMockBackend(page) {
       if (chat) chat.title = title;
       broadcast({ type: 'session_changed', chat_id: chatId, session_id: sessionId, title });
     },
+    /** Configure the /v1/settings/schema response. Pass null to
+     *  declare the agent doesn't implement the extension (route
+     *  returns 404). The handler also recognizes POST /settings/{id}
+     *  with an enum-validation pass; getLastSettingsPost() returns
+     *  what the PWA most recently sent. */
+    setSettingsSchema(schema) {
+      settingsSchema = schema;
+      lastSettingsPost = null;
+    },
+    getLastSettingsPost() { return lastSettingsPost; },
+
     /** Inspect/snapshot. */
     chatCount() { return chats.size; },
     listChats() { return Array.from(chats.values()); },

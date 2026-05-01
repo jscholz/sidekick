@@ -1,0 +1,64 @@
+# Hermes-side config keys sidekick reads or writes.
+#
+# This file is reference / documentation — sidekick doesn't load it
+# directly. The actual config lives at `~/.hermes/config.yaml` (the
+# hermes-agent install). Use this as a checklist when configuring
+# hermes for sidekick: the keys below are the ones the sidekick
+# plugin (`plugin/__init__.py`) interacts with.
+#
+# Hermes has many other config keys; see hermes-agent's own docs
+# for the full reference.
+
+# ─────────────────────────────────────────────────────────────────────
+# Model — read by sidekick's GET /v1/settings/schema, written by POST
+# /v1/settings/model via hermes_cli.model_switch.switch_model().
+# ─────────────────────────────────────────────────────────────────────
+
+# Scalar form (`model: <id>`) and dict form (`model: {default: <id>, ...}`)
+# are both honored — the plugin handles either. switch_model normalizes
+# to the dict form when it persists.
+model:
+  default: anthropic/claude-opus-4.6
+  provider: openrouter        # provider slug (openrouter / anthropic / openai / ollama / etc.)
+  base_url: ~                 # null = use provider's default endpoint
+
+# Provider auth + endpoints. Sidekick's model picker honors anything
+# declared here (and in `custom_providers:`) when resolving a model
+# the user picks. Sidekick doesn't write these.
+providers:
+  # openrouter:
+  #   api_key_env: OPENROUTER_API_KEY
+  #   ...
+
+# Custom provider definitions (hermes-side schema; not sidekick-specific).
+custom_providers: []
+
+# Fallback chain when the primary provider returns an error. Hermes
+# config; sidekick neither reads nor writes.
+fallback_providers: []
+
+# Plugin loader — must include 'sidekick' for the sidekick plugin to
+# load at hermes-gateway startup.
+plugins:
+  enabled:
+    - sidekick
+
+# ─────────────────────────────────────────────────────────────────────
+# Sidekick env vars hermes itself doesn't care about, but the plugin
+# reads from the gateway's process env (set in ~/.hermes/.env or the
+# systemd unit drop-in):
+# ─────────────────────────────────────────────────────────────────────
+#
+#   SIDEKICK_PLATFORM_TOKEN     — bearer token shared with the sidekick
+#                                 proxy. Required.
+#
+#   SIDEKICK_PREFERRED_MODELS   — optional comma-separated glob list.
+#                                 If set, the plugin pre-filters the
+#                                 openrouter catalog before returning
+#                                 it on /v1/settings/schema. Sidekick's
+#                                 own `models.preferred` (in
+#                                 sidekick.config.yaml) layers an
+#                                 additional filter on top via the
+#                                 proxy — set this for agent-side
+#                                 hard limits, set models.preferred
+#                                 for sidekick-deployment user prefs.

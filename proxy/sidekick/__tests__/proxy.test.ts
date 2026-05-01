@@ -375,6 +375,80 @@ test('SSE — chat_id filter blocks cross-chat envelopes', async () => {
   }
 });
 
+test('SSE — live_only=1 skips ring replay, only forwards live envelopes', async () => {
+  // Used by the audio bridge: it opens a fresh subscriber per turn
+  // and wants ONLY envelopes broadcast after its connection.
+  // Without this opt-out the bridge replays the ring on every turn,
+  // re-feeds Aura TTS, and breaks out on a stale reply_final before
+  // the actual new agent reply arrives.
+  const rig = await startRig({ mode: 'gateway' });
+  try {
+    // Phase 1: push some envelopes WITHOUT a subscriber so they land
+    // in the ring with no live consumer.
+    await new Promise<void>((rs) => setTimeout(rs, 50));
+    rig.fakeAgent.pushOutOfTurnEvent({ type: 'notification', chat_id: 'c', content: 'pre-1' });
+    rig.fakeAgent.pushOutOfTurnEvent({ type: 'notification', chat_id: 'c', content: 'pre-2' });
+    await new Promise<void>((rs) => setTimeout(rs, 100));
+
+    // Phase 2: open subscriber with live_only=1.
+    const seen = await (async () => {
+      const ac = new AbortController();
+      const out: any[] = [];
+      const r = await fetch(
+        `${rig.proxyUrl}/api/sidekick/stream?chat_id=c&live_only=1`,
+        { signal: ac.signal },
+      );
+      assert.equal(r.status, 200);
+      const reader = r.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+
+      // Push a 3rd envelope AFTER the subscriber attaches.
+      await new Promise<void>((rs) => setTimeout(rs, 100));
+      rig.fakeAgent.pushOutOfTurnEvent({
+        type: 'notification', chat_id: 'c', content: 'live-3',
+      });
+
+      const deadline = Date.now() + 500;
+      while (Date.now() < deadline) {
+        const { value, done } = await Promise.race([
+          reader.read(),
+          new Promise<{ value: undefined; done: boolean }>((rs) =>
+            setTimeout(() => rs({ value: undefined, done: false }), 50),
+          ),
+        ]);
+        if (done) break;
+        if (value) buf += dec.decode(value, { stream: true });
+        let sep = buf.indexOf('\n\n');
+        while (sep !== -1) {
+          const frame = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          sep = buf.indexOf('\n\n');
+          let data = '';
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('data:')) data += line.slice(5).trim();
+          }
+          if (!data) continue;
+          try { out.push(JSON.parse(data)); } catch {}
+        }
+      }
+      ac.abort();
+      try { reader.releaseLock(); } catch {}
+      return out;
+    })();
+
+    const contents = seen.map((e) => e.content);
+    assert.ok(!contents.includes('pre-1'),
+      `live_only=1 must NOT replay ring entries (saw ${JSON.stringify(contents)})`);
+    assert.ok(!contents.includes('pre-2'),
+      `live_only=1 must NOT replay ring entries (saw ${JSON.stringify(contents)})`);
+    assert.ok(contents.includes('live-3'),
+      `live_only=1 must still receive live envelopes (saw ${JSON.stringify(contents)})`);
+  } finally {
+    await rig.stop();
+  }
+});
+
 test('SSE — last_event_id query param resumes from the ring (manual reconnect)', async () => {
   const rig = await startRig({ mode: 'gateway' });
   try {
