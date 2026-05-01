@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any, AsyncIterator, Dict, Optional
 
@@ -99,6 +100,63 @@ VAD_HOLD_FRAMES = int(os.environ.get("SIDEKICK_VAD_HOLD_FRAMES", "8"))
 # frames. Lets us see "during this TTS turn, the mic peaked at NNN"
 # without a hot path debug toggle. 50 frames * 20 ms = 1 Hz.
 VAD_OBS_LOG_EVERY = 50
+
+
+class BargeGate:
+    """RMS-VAD-driven barge fire decider — fires once per TTS turn.
+
+    State machine for one peer's TTS-active window:
+      - Each call to `feed(rms)` ingests one 20 ms frame's RMS.
+      - `feed` returns True iff the gate decides to fire NOW: RMS has
+        been ≥ threshold for at least `hold_frames` consecutive frames
+        AND the gate has not already fired in this turn.
+      - `reset_turn()` is called when TTS ends (the inactive→… handoff
+        in `_pcm_iter` runs `gate.reset_turn()` right after the
+        was_active block). Clears hold counter + the fired-this-turn
+        flag so the NEXT TTS turn starts armed.
+
+    Pre-2026-04-30 history: this was an inline `barge_fired_this_turn`
+    boolean. A false-positive consumed the gate for the entire turn
+    and a real user interrupt was ignored. The 2026-04-30 fix added
+    a cooldown re-arm; the 2026-04-30-evening fix made
+    PCMTrack.halt() the structural cure (drops queued frames + flips
+    is_active() False, so the was_active branch fires immediately on
+    the next mic frame, which calls reset_turn() and re-arms the gate
+    for the next turn). With halt() in place, the cooldown is dead
+    code — once-per-turn is the right semantics again.
+    """
+
+    def __init__(
+        self,
+        threshold: int = 300,
+        hold_frames: int = 8,
+    ) -> None:
+        self.threshold = threshold
+        self.hold_frames = hold_frames
+        self._hold = 0
+        self._fired_this_turn = False
+
+    def reset_turn(self) -> None:
+        self._hold = 0
+        self._fired_this_turn = False
+
+    def feed(self, rms: int) -> bool:
+        """Returns True if the gate decides to fire on this frame."""
+        if rms >= self.threshold:
+            self._hold += 1
+        else:
+            self._hold = 0
+        if self._hold < self.hold_frames:
+            return False
+        if self._fired_this_turn:
+            return False
+        self._fired_this_turn = True
+        # Reset hold so a sustained voice doesn't fire on every frame
+        # past the threshold; not strictly needed once `_fired_this_turn`
+        # is set, but keeps the counter honest if something resets the
+        # flag without a full reset_turn().
+        self._hold = 0
+        return True
 
 
 def attach(peer, *, voice_config: VoiceConfig, api_server: Any = None) -> None:
@@ -257,12 +315,17 @@ async def _run_stt(
         # frame (spam) or only at call-start (one-shot, useless for
         # multi-turn calls).
         listening_announced = False
-        # VAD state — counts consecutive over-threshold frames while
-        # TTS is active. Reset on threshold-undershoot and on TTS-end
-        # (so the next turn starts fresh). barge_fired_this_turn lives
-        # on peer.extra so dispatch_to_agent can also see it if needed
-        # later, and so it survives generator restarts in error paths.
-        vad_hold = 0
+        # VAD state — encapsulated in BargeGate which handles the
+        # threshold + hold-frames + once-per-turn logic. Lives in the
+        # closure (per turn) rather than peer.extra so a generator
+        # restart starts from a clean state. Once-per-turn is safe
+        # again now that the fire path calls tts_track.halt(): a
+        # false-positive halt-then-reset_turn cycle re-arms the gate
+        # within the next mic frame (see BargeGate docstring).
+        gate = BargeGate(
+            threshold=VAD_RMS_THRESHOLD,
+            hold_frames=VAD_HOLD_FRAMES,
+        )
         # Observability state — sampled and logged every VAD_OBS_LOG_EVERY
         # frames so we can see what RMS values the mic is actually
         # producing during a TTS turn without flooding the log.
@@ -302,21 +365,36 @@ async def _run_stt(
                 #   1) tts_track is active (we're playing TTS),
                 #   2) RMS exceeds VAD_RMS_THRESHOLD (above ambient),
                 #   3) sustained for VAD_HOLD_FRAMES consecutive frames
-                #      (~160ms hold).
-                # Tunable via SIDEKICK_VAD_RMS_THRESHOLD / SIDEKICK_VAD_HOLD_FRAMES.
-                if not peer.extra.get("barge_fired_this_turn"):
-                    if rms >= VAD_RMS_THRESHOLD:
-                        vad_hold += 1
-                        if vad_hold >= VAD_HOLD_FRAMES:
-                            logger.info(
-                                "[stt-bridge] peer %s: barge fired (rms=%d, hold=%d frames)",
-                                peer.peer_id, rms, vad_hold,
-                            )
-                            peer.extra["barge_fired_this_turn"] = True
-                            _send_data_channel(peer, {"type": "barge"})
-                            vad_hold = 0
-                    else:
-                        vad_hold = 0
+                #      (~160ms hold),
+                #   4) the gate hasn't already fired this TTS turn —
+                #      reset_turn() in the was_active branch below
+                #      re-arms it on TTS-end (which halt() forces
+                #      immediately on barge fire).
+                # Tunable via SIDEKICK_VAD_RMS_THRESHOLD /
+                # SIDEKICK_VAD_HOLD_FRAMES.
+                if gate.feed(rms):
+                    logger.info(
+                        "[stt-bridge] peer %s: barge fired (rms=%d, threshold=%d)",
+                        peer.peer_id, rms, VAD_RMS_THRESHOLD,
+                    )
+                    # Halt bridge-side TTS BEFORE the envelope so the
+                    # next iteration of this loop sees is_active()=False
+                    # and resumes mic→Deepgram. Symmetrizes with the
+                    # PWA's cancelRemotePlayback (which fires on receipt
+                    # of the barge envelope below). Without this, the
+                    # synth task would keep refilling the frame queue
+                    # for up to TTS_TAIL_GRACE_S (1.2s) + however much
+                    # text remained in text_queue, and the user's voice
+                    # would be silently substituted with silence the
+                    # whole time.
+                    try:
+                        tts_track.halt()
+                    except Exception as e:  # pragma: no cover
+                        logger.warning(
+                            "[stt-bridge] peer %s: tts_track.halt() raised: %s",
+                            peer.peer_id, e,
+                        )
+                    _send_data_channel(peer, {"type": "barge"})
                 yield silence_frame
                 # While TTS is active we are NOT listening, so re-arm
                 # the listening announcement for the next user turn.
@@ -328,10 +406,10 @@ async def _run_stt(
                     peer.peer_id, obs_max_rms, obs_above, obs_frames,
                 )
                 was_active = False
-                # TTS turn ended — reset the once-per-turn barge gate
-                # and the hold counter so the NEXT turn can fire again.
-                peer.extra.pop("barge_fired_this_turn", None)
-                vad_hold = 0
+                # TTS turn ended — reset the gate so the NEXT turn
+                # starts with a clean hold counter and re-armed
+                # fire-once flag.
+                gate.reset_turn()
                 obs_frames = 0
                 obs_max_rms = 0
                 obs_above = 0
@@ -341,8 +419,18 @@ async def _run_stt(
             # user-turn — the `listening_announced` flag prevents
             # re-firing on every frame.
             if not listening_announced:
-                listening_announced = True
-                _send_data_channel(peer, {"type": "listening"})
+                # WebRTC audio (SRTP) and data channel (SCTP) negotiate
+                # independently; the first audio frame can arrive before
+                # the DC reaches readyState=='open'. Only set the flag
+                # after a successful send so a too-early attempt doesn't
+                # consume the once-per-turn announcement and leave the
+                # PWA without its "your turn" listening chime.
+                if _send_data_channel(peer, {"type": "listening"}):
+                    listening_announced = True
+                    logger.info(
+                        "[stt-bridge] peer %s: announced listening (dc open)",
+                        peer.peer_id,
+                    )
             yield chunk
 
     try:
@@ -393,26 +481,89 @@ def _frame_rms(pcm: bytes) -> int:
     return int(math.isqrt(mean_sq))
 
 
-def _send_data_channel(peer, payload: dict) -> None:
+# Match XML/HTML-style tags <foo …> and </foo>. Conservative — won't
+# match angle brackets used as math/comparison ("a < b") because those
+# don't form valid tag-name shapes.
+_TAG_RE = re.compile(r"<[^>]{1,200}>")
+# Markdown image syntax `![alt](url)`. Drop entirely — the URL is
+# noise to TTS.
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
+# Markdown link syntax `[label](url)`. Keep the label, drop the URL.
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+# Code fences — drop the fence delimiters but keep what's inside as a
+# placeholder; ` ``` ` reads as "back tick back tick back tick" otherwise.
+_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
+_CODE_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*\n?")
+# Markdown emphasis: `**bold**` and `*italic*` / `_italic_`. Without
+# stripping these the agent's reply reads as "star star bold star star".
+# Canonical regex set lives in `test/tts-clean.test.ts`; keep in sync.
+_MD_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_MD_ITALIC_STAR_RE = re.compile(r"(^|[\s(])\*([^*\n]+)\*(?=[\s.,!?)]|$)")
+_MD_ITALIC_UNDER_RE = re.compile(r"(^|[\s(])_([^_\n]+)_(?=[\s.,!?)]|$)")
+_MD_HEADER_RE = re.compile(r"^#+\s+", re.MULTILINE)
+_MD_LIST_RE = re.compile(r"^[\s]*[-*•]\s+", re.MULTILINE)
+# URLs that survived the link-syntax strip (bare https://… in text).
+_BARE_URL_RE = re.compile(r"https?://[^\s<)\]\"']+")
+# Emoji: Aura reads "🤖" as silence but reads "✓" as a literal phrase
+# ("check mark"). Strip the wide ranges that the test set covers.
+_EMOJI_RE = re.compile(
+    r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE00-\uFE0F\u200D\u20E3]"
+)
+
+
+def _sanitize_for_tts(text: str) -> str:
+    """Strip markup that TTS shouldn't pronounce. Catches markdown
+    bold/italic/headers/lists/code-blocks/links/images, raw HTML tags,
+    bare URLs, and a wide emoji range. Without this Aura reads the
+    asterisks of `**bold**` as "star star" out loud. Canonical regex
+    set lives in test/tts-clean.test.ts (keep both in sync). Idempotent
+    — running twice is a no-op."""
+    if not text:
+        return text
+    out = _TAG_RE.sub("", text)
+    out = _CODE_BLOCK_RE.sub("[code block]", out)
+    out = _MD_IMAGE_RE.sub(r"\1", out)
+    out = _MD_LINK_RE.sub(r"\1", out)
+    out = _CODE_FENCE_RE.sub("", out)
+    out = out.replace("`", "")
+    out = _MD_BOLD_RE.sub(r"\1", out)
+    out = _MD_ITALIC_STAR_RE.sub(r"\1\2", out)
+    out = _MD_ITALIC_UNDER_RE.sub(r"\1\2", out)
+    out = _MD_HEADER_RE.sub("", out)
+    out = _MD_LIST_RE.sub("", out)
+    out = _BARE_URL_RE.sub("(link in canvas)", out)
+    out = _EMOJI_RE.sub("", out)
+    # Trailing pass: drop any stray asterisks the patterns above didn't
+    # catch (e.g. `*foo` with no closer, or `**` at line ends).
+    out = out.replace("*", "")
+    return out
+
+
+def _send_data_channel(peer, payload: dict) -> bool:
     """Best-effort send of a JSON envelope over the peer's data channel.
 
-    A closed / not-yet-opened channel silently no-ops — the channel is a
-    parallel telemetry path; the agent run continues regardless.
+    Returns True if the bytes left the bridge, False if the channel was
+    closed / not-yet-opened. Caller can use the return value to decide
+    whether to retry on the next opportunity (e.g. listening_announced
+    only flips True after a successful send so a too-early send doesn't
+    consume the once-per-turn flag).
     """
     dc = peer.data_channel
     if dc is None:
-        return
+        return False
     try:
         # aiortc tracks ready-state; sending while not 'open' raises.
         if getattr(dc, "readyState", "open") != "open":
-            return
+            return False
         import json as _json
         dc.send(_json.dumps(payload, ensure_ascii=False))
+        return True
     except Exception as e:  # pragma: no cover
         logger.debug(
             "[stt-bridge] peer %s data-channel send failed: %s",
             peer.peer_id, e,
         )
+        return False
 
 
 async def _handle_transcript(peer, tx: Transcript) -> None:
@@ -521,7 +672,7 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
     #   responses        — response.output_text.delta (per-token delta) /
     #                      response.completed (terminal)
     #   sidekick-platform — reply_delta (cumulative text) / reply_final
-    #                       (terminal). See hermes-plugin/sidekick_platform.py.
+    #                       (terminal). See backends/hermes/plugin/sidekick_platform.py.
     #
     # For the cumulative-text path we diff against the previously-seen
     # text so the data-channel envelope to the PWA stays per-token (the
@@ -529,13 +680,18 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
     # text-queue gets only the new tokens.
     current_event: Optional[str] = None
     prev_cumulative: str = ""
+    # Stripped mirror of prev_cumulative — what the TTS queue has
+    # actually consumed so far. Diffing against this rather than the
+    # raw cumulative lets us push only the SPEAKABLE delta (HTML/
+    # markdown/etc. dropped) without splitting tags mid-token.
+    prev_stripped_for_tts: str = ""
 
     # Inline SSE parser: consumes one frame at a time from `content_iter`,
     # feeds delta tokens into the TTS queue + on_transcript hook + data
     # channel envelope. Returns True when a terminal event arrives
     # (response.completed / reply_final), so the caller breaks out.
     async def _process_sse_frame(line_bytes) -> bool:
-        nonlocal current_event, prev_cumulative
+        nonlocal current_event, prev_cumulative, prev_stripped_for_tts
         line = line_bytes.rstrip(b"\r\n")
         if not line:
             current_event = None
@@ -585,9 +741,25 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
             prev_cumulative = cumulative
             if not delta:
                 return False
-            if text_queue is not None:
-                try: text_queue.put_nowait(delta)
+            # TTS path: feed the SPEAKABLE delta only. Strip XML/HTML
+            # tags + markdown link/image syntax from the cumulative
+            # text, diff against prev_stripped_for_tts to compute the
+            # new audible portion. Keeps Aura from pronouncing
+            # `<audio src="speech_…mp3">` literally when the agent
+            # leaks markup into its output (gemma-4 sometimes hallucinates
+            # an audio embed; gpt-oss leaks Harmony channel tokens).
+            new_stripped = _sanitize_for_tts(cumulative)
+            if new_stripped.startswith(prev_stripped_for_tts):
+                tts_delta = new_stripped[len(prev_stripped_for_tts):]
+            else:
+                tts_delta = new_stripped
+            prev_stripped_for_tts = new_stripped
+            if tts_delta and text_queue is not None:
+                try: text_queue.put_nowait(tts_delta)
                 except asyncio.QueueFull: pass
+            # PWA-side surfaces (data channel + on_transcript) get the
+            # raw delta — the chat-bubble renderer handles its own
+            # display cleanup.
             if peer.on_transcript is not None:
                 try: await peer.on_transcript(delta, False)
                 except Exception: pass
@@ -609,7 +781,16 @@ async def _dispatch_to_agent(peer, utterance: str) -> None:
                 # FIRST so we don't race the agent's first reply_delta,
                 # then dispatch the message, then drain the stream until
                 # reply_final.
-                stream_url = f"{proxy_url}/api/sidekick/stream?chat_id={chat_id}"
+                # `live_only=1` opts out of the proxy's replay-ring
+                # catch-up. The bridge opens a fresh subscriber PER
+                # turn and only wants envelopes broadcast after this
+                # connection — historical envelopes from prior turns
+                # in the same chat would re-feed Aura TTS and cause
+                # the bridge to break out on a replayed reply_final
+                # before the actual new agent reply arrives. The PWA
+                # path keeps its long-lived subscriber + Last-Event-ID
+                # cursor; only the bridge needs this opt-out.
+                stream_url = f"{proxy_url}/api/sidekick/stream?chat_id={chat_id}&live_only=1"
                 async with sess.get(stream_url, timeout=aiohttp.ClientTimeout(total=None)) as stream_resp:
                     if stream_resp.status != 200:
                         err = (await stream_resp.text())[:200]

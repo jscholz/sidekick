@@ -1,18 +1,48 @@
 /**
  * @fileoverview Subtle audio feedback sounds — tiny clicks for send/receive.
  * Generated programmatically via AudioContext (no external files).
+ *
+ * Phase 2.3 (2026-05-01): switched from owning a private AudioContext
+ * to using the platform-shared one. Reason: the private ctx was lazily
+ * created on first chime call, which on iOS often happens OUTSIDE a
+ * user gesture (after an SSE reply, after listening event from bridge,
+ * etc.). iOS leaves outside-gesture contexts in 'suspended' and
+ * scheduled oscillators don't fire — likely cause of the missing
+ * 'listening' chime + 'send' chime users reported on iOS.
+ *
+ * Falls back to a private ctx on desktop browsers when the platform
+ * hasn't been primed (no user gesture yet). Desktop doesn't enforce
+ * the gesture requirement so the fallback works.
  */
 
 import * as settings from '../settings.ts';
+// Imports the AudioContext SOURCE directly (the implementation file
+// audio-unlock.ts) instead of the platform shim — feedback.ts is a
+// "leaf" of the audio dependency graph and must not import from
+// platform.ts because platform.ts re-exports playFeedback as
+// playChime, which would create a circular import. Module-load
+// order in cyclic dependency graphs is non-deterministic in esbuild
+// (one of the cycle's exports is briefly undefined during load),
+// which presented as the settings-agent-schema smoke flake on
+// 2026-05-01 Phase 2.6. The platform shim is the single point for
+// CONSUMERS; feedback.ts itself is one of the implementations the
+// shim delegates to.
+import { getAudioCtx } from '../ios/audio-unlock.ts';
 
-let audioCtx = null;
+let fallbackCtx = null;
 
 function getCtx() {
-  if (!audioCtx) {
+  // Prefer the shared, gesture-primed AudioContext from audio-unlock.
+  // On iOS this is the only context that can actually play audio
+  // (others stay 'suspended' if created outside a user gesture).
+  const shared = getAudioCtx();
+  if (shared) return shared;
+  // Desktop fallback — no gesture-binding requirement, lazy-create OK.
+  if (!fallbackCtx) {
     const Ctx = window.AudioContext || /** @type {any} */ (window).webkitAudioContext;
-    audioCtx = new Ctx();
+    fallbackCtx = new Ctx();
   }
-  return audioCtx;
+  return fallbackCtx;
 }
 
 /**
@@ -52,6 +82,17 @@ function getCtx() {
  *              is the gentler "you can talk now" cue.
  */
 export function playFeedback(type) {
+  // Test instrumentation hook — Playwright smokes use this to assert
+  // chime invariants ("'send' fires exactly once per assistant turn",
+  // etc.) without needing to actually decode audio. The hook is no-op
+  // unless the page-context test setup explicitly initializes the
+  // array. Production never sees it.
+  try {
+    const w = (typeof window !== 'undefined') ? window : null;
+    const log = w && (w as any).__TEST_FEEDBACK_LOG__;
+    if (Array.isArray(log)) log.push({ type, t: Date.now() });
+  } catch { /* best-effort */ }
+
   // Volume is 0..1; 0.25 now matches the legacy "subtle" level after
   // the 2×→4× scale bump (gain headroom was underused, max was too
   // quiet for wind / traffic). 1.0 is ~4x louder than legacy; all

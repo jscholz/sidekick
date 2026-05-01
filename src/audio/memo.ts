@@ -9,19 +9,18 @@
 
 import { log } from '../util/log.ts';
 import * as audioSession from './session.ts';
-import * as capture from './capture.ts';
-import { getAudioCtx } from '../ios/audio-unlock.ts';
+import * as audioPlatform from './platform.ts';
 import { playFeedback } from './feedback.ts';
 
 let analyser = null;
 let mediaStream = null;
-// AudioContext is the SHARED one from unlock.ts now. Streaming + TTS use
-// the same context; iOS permits ~4 live contexts and we were creating/closing
-// a fresh one per memo. Using the shared ctx avoids that pressure and
-// simplifies state (auto-resume on visibilitychange is already handled by
-// unlock.ts). We hold a module-local ref for convenience but never close it.
+// AudioContext is the SHARED one from the platform shim. Streaming + TTS
+// use the same context; iOS permits ~4 live contexts and we were
+// creating/closing a fresh one per memo. Using the shared ctx avoids
+// that pressure and simplifies state (auto-resume on visibilitychange
+// is already handled by audio-unlock.ts under the platform shim). We
+// hold a module-local ref for convenience but never close it.
 let audioCtx = null;
-let audioSource = null;
 let mediaRecorder = null;
 let audioChunks = [];
 let animFrame = null;
@@ -43,14 +42,15 @@ export function isSupported() { return typeof MediaRecorder !== 'undefined'; }
  * @param {() => void} opts.onCancel
  */
 export async function start(opts) {
-  // Use the shared AudioContext from unlock.ts — created in a prior user
-  // gesture (unlock(player) is called by main.ts's memo onclick right before
-  // this) so it's already 'running' by the time we get here. No need to
-  // create our own context; no need to kick off a new resume (unlock handles
-  // resume + visibilitychange auto-resume).
-  audioCtx = getAudioCtx();
+  // Use the shared AudioContext via the platform shim — created in a
+  // prior user gesture (primeAudio(player) is called by main.ts's memo
+  // onclick right before this) so it's already 'running' by the time
+  // we get here. No need to create our own context; no need to kick off
+  // a new resume (the platform handles resume + visibilitychange
+  // auto-resume).
+  audioCtx = audioPlatform.getSharedAudioCtx();
   if (!audioCtx) {
-    log('memo: no shared AudioContext — was unlock() skipped?');
+    log('memo: no shared AudioContext — was primeAudio() skipped?');
     if (opts.onCancel) opts.onCancel();
     return false;
   }
@@ -71,11 +71,12 @@ export async function start(opts) {
   drawWaveform();
 
   try {
-    // Centralized capture: handles iOS AVAudioSession prep + getUserMedia +
-    // single-owner mutual exclusion. Throws if another subscriber (streaming)
-    // still holds the stream — callers (main.ts's memo button) guarantee that
-    // state is released before calling start().
-    mediaStream = await capture.acquire('memo');
+    // Centralized capture via platform shim — handles iOS AVAudioSession
+    // prep + getUserMedia + single-owner mutual exclusion. Throws if
+    // another subscriber (streaming) still holds the stream — callers
+    // (main.ts's memo button) guarantee that state is released before
+    // calling start().
+    mediaStream = await audioPlatform.getMicStream('memo');
   } catch (e) {
     log('memo: mic error:', e.message);
     cleanup();
@@ -85,10 +86,14 @@ export async function start(opts) {
 
   if (resumePromise) { try { await resumePromise; } catch {} }
   log('memo: audioCtx state=', audioCtx.state);
-  audioSource = audioCtx.createMediaStreamSource(mediaStream);
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 256;
-  audioSource.connect(analyser);
+  // Build the analyser via the platform shim — same path fakeLock uses,
+  // single source of truth for "wire an analyser to a mic stream."
+  // MediaRecorder consumes the MediaStream directly below; the analyser
+  // is purely for the visual waveform.
+  analyser = audioPlatform.getMicAnalyser(mediaStream, 256);
+  if (!analyser) {
+    log('memo: getMicAnalyser returned null — visual waveform disabled');
+  }
 
   // MediaRecorder captures audio as a blob — the only thing that matters for send
   audioChunks = [];
@@ -159,10 +164,11 @@ function cleanup() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') { try { mediaRecorder.stop(); } catch {} }
   mediaRecorder = null;
   audioChunks = [];
-  // MediaStream ownership lives in capture.ts — release through there so
-  // mutual-exclusion state stays consistent. Null our local ref too since
-  // other functions in this module check it during teardown.
-  capture.release('memo');
+  // MediaStream ownership lives in the platform shim (delegating to
+  // capture.ts) — release through there so mutual-exclusion state stays
+  // consistent. Null our local ref too since other functions in this
+  // module check it during teardown.
+  audioPlatform.releaseMicStream('memo');
   mediaStream = null;
   // AudioContext is shared — DO NOT close it (would kill streaming + TTS).
   // Just drop our reference. The analyser/source nodes we created will be
@@ -171,7 +177,6 @@ function cleanup() {
   if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
   if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
   analyser = null;
-  audioSource = null;
   if (barEl) { barEl.remove(); barEl = null; }
   timerEl = null;
   canvasEl = null;

@@ -19,7 +19,7 @@
 import * as backend from './backend.ts';
 import * as sessionDrawer from './sessionDrawer.ts';
 import { parseQuery, applyFilter } from './sessionFilter.ts';
-import type { SearchMessageHit as ServerMessageHit } from './backends/types.ts';
+import type { SearchMessageHit as ServerMessageHit } from './proxyClientTypes.ts';
 import { diag } from './util/log.ts';
 
 type SessionHit = {

@@ -93,7 +93,7 @@ when delivering replies via `sendText`) and lose streaming. Don't.
 The plugin mounts `/v1/responses`, `/v1/conversations`,
 `/v1/conversations/{id}/items`, `DELETE /v1/conversations/{id}` as
 plain HTTP routes on openclaw's HTTP server. The proxy treats the
-plugin identically to hermes-plugin or the stub agent — same
+plugin identically to backends/hermes/plugin or the stub agent — same
 `HTTPAgentUpstream` impl, just a different `UPSTREAM_URL`.
 
 **Openclaw is a gateway, not a single channel.** The openclaw web
@@ -137,7 +137,7 @@ gateway extension".
 └──────────────────────────────────┘
 ```
 
-The sidekick proxy doesn't change between hermes-plugin and
+The sidekick proxy doesn't change between backends/hermes/plugin and
 openclaw-plugin upstreams — it just points at a different `UPSTREAM_URL`.
 
 ---
@@ -176,7 +176,7 @@ Three possibilities:
    import path. Pragmatic; works in-process (since the plugin shares
    the gateway's process); fragile to openclaw refactors.
 3. **No API at all** — plugin reads openclaw's storage (sqlite or
-   filesystem) directly, same fallback hermes-plugin uses today.
+   filesystem) directly, same fallback backends/hermes/plugin uses today.
    Encapsulated by virtue of being in-process; ugly but functional.
 
 The `accountId / sessionKey / sessionId` scope hints in the channel-
@@ -222,7 +222,7 @@ for the round-trip (file issue, contribute, wait for release).
   hermes-gateway refactor. The plugin (running in openclaw's process)
   is the seam; it owns the storage access. Proxy talks pure HTTP.
 - **Don't add openclaw-specific code to the sidekick proxy's
-  `server-lib/agents/`.** The whole point of the refactor is that
+  `proxy/agents/`.** The whole point of the refactor is that
   `HTTPAgentUpstream` is one impl, agent-agnostic. If openclaw
   forces per-agent code on the proxy side, that's a sign we did
   something wrong.

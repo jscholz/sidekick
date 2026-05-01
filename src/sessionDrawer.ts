@@ -21,6 +21,7 @@ import * as sessionCache from './sessionCache.ts';
 import { log, diag } from './util/log.ts';
 import { parseQuery, applyFilter } from './sessionFilter.ts';
 import { getFilter as getStoredFilter, putFilter as putStoredFilter, clearFilter as clearStoredFilter } from './util/filterStore.ts';
+import { deleteSelected as bulkDeleteSelected } from './multiSelect.ts';
 
 let onResumeCb: ((id: string, messages: any[], pagination?: { firstId: number | null; hasMore: boolean }) => void) | null = null;
 
@@ -215,8 +216,102 @@ function installSelectionKeyboardListener(): void {
       if (extendSelectionByKey(direction)) {
         e.preventDefault();
       }
+      return;
+    }
+    // Plain ArrowUp / ArrowDown — navigate sessions. Same input-
+    // focus exclusions as the shift+arrow path. Also skip when the
+    // user has any modifier we don't handle (alt, ctrl, meta) to
+    // leave room for browser shortcuts. Multi-select active = no
+    // navigation; the user's mid-selection and arrow keys with
+    // shift extend the range.
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown')
+        && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toUpperCase() || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable) return;
+      if (multiSelect.size > 0) return;
+      const direction: -1 | 1 = e.key === 'ArrowUp' ? -1 : 1;
+      if (navigateByKey(direction)) {
+        e.preventDefault();
+      }
+      return;
+    }
+    // Cmd/Ctrl + Backspace (Mac convention) or Cmd/Ctrl + Delete —
+    // delete the active session, OR bulk-delete the multi-selection
+    // when one is active. Mirrors the row menu's Delete action and
+    // the panel's bulk-delete button — same confirm dialog, same
+    // backend.deleteSession path. Skip in inputs (composer Backspace
+    // with cmd held is "delete word" on some browsers).
+    if ((e.key === 'Backspace' || e.key === 'Delete')
+        && (e.metaKey || e.ctrlKey)
+        && !e.shiftKey && !e.altKey) {
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toUpperCase() || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable) return;
+      if (multiSelect.size > 0) {
+        // Bulk path — runs the same confirm + serial-delete the
+        // panel button uses. clearMultiSelect happens inside via
+        // the onClearCb wiring in main.ts.
+        e.preventDefault();
+        void bulkDeleteSelected(Array.from(multiSelect));
+        return;
+      }
+      // Single-active path — delete whichever chat the user is
+      // viewing right now. Same prompt + DELETE call the row's
+      // overflow menu fires.
+      const activeId = optimisticActiveId || viewedSessionId;
+      if (!activeId) return;
+      const row = cachedSessions.find((s) => s.id === activeId)
+        || mergePending([]).find((s) => s.id === activeId);
+      if (!row) return;
+      e.preventDefault();
+      void promptDelete(row);
     }
   });
+}
+
+/** ArrowUp / ArrowDown — navigate to the prev/next session in the
+ *  drawer. Mirrors what a row click does (synchronous .active flip
+ *  for instant feedback + async resume), but driven from the
+ *  keyboard. Anchored on the currently-active session; clamps at
+ *  list boundaries (no wrap — wrapping makes "I'm at the top, hit
+ *  up" feel like a drawer-cleared accident).
+ *
+ *  Returns true if the navigation happened (so the caller can
+ *  preventDefault on the keypress event). */
+function navigateByKey(direction: -1 | 1): boolean {
+  if (visibleRowIds.length === 0) return false;
+  const anchor = optimisticActiveId || viewedSessionId;
+  const cur = anchor ? visibleRowIds.indexOf(anchor) : -1;
+  // No active session yet — seed at the first/last row instead of
+  // doing nothing. Up = last (most-recent-but-not-active is awkward;
+  // first row is where the user expects "go to top of list" to land
+  // — actually the first visible IS the most-recent so it's fine).
+  // Simpler: ArrowDown from no-anchor → first row; ArrowUp from
+  // no-anchor → last row.
+  let next: number;
+  if (cur < 0) {
+    next = direction === 1 ? 0 : visibleRowIds.length - 1;
+  } else {
+    next = cur + direction;
+    if (next < 0 || next >= visibleRowIds.length) return false;
+  }
+  const targetId = visibleRowIds[next];
+  // Synchronous .active flip — instant feedback (matches the click
+  // handler's optimistic paint).
+  const listEl = document.getElementById('sessions-list');
+  if (listEl) {
+    listEl.querySelectorAll('li.active').forEach(el => el.classList.remove('active'));
+    const targetLi = listEl.querySelector(`li[data-chat-id="${CSS.escape(targetId)}"]`);
+    if (targetLi) targetLi.classList.add('active');
+  }
+  // Async resume — fetch transcript + render. Same path the click
+  // handler uses, so behavior (chat.clear + replay + drawer refresh)
+  // is identical to a click.
+  resume(targetId).catch((e: any) => {
+    diag(`sessionDrawer: arrow-nav resume failed: ${e?.message || e}`);
+  });
+  return true;
 }
 
 /** Fired with the leaving chat id at the moment a row click triggers a
@@ -250,7 +345,15 @@ let cachedSessions: any[] = [];
  *  refresh() cycles (which would otherwise wipe them when cachedSessions
  *  is replaced by the server fetch) so the row stays visible even when
  *  the user switches to a different session mid-flight. Drained when the
- *  server's listSessions catches up (id appears in cachedSessions). */
+ *  server's listSessions catches up (id appears in cachedSessions) OR
+ *  when the entry has been absent from the server response for longer
+ *  than PENDING_TTL_MS (catches "chat deleted from another device"
+ *  cross-device-stale-pending bug — Jonathan reported 2026-05-01).
+ *
+ *  Each entry also carries `_addedAt` (client wall-clock at insertion)
+ *  so we can age out stale entries without depending on the server-
+ *  side started_at timestamp, which can be hours in the past. */
+const PENDING_TTL_MS = 60_000;  // 1 min — listSessions polls every 5s
 const pendingSessions = new Map<string, any>();
 
 /** Merge pending sessions into a base list, prepended, deduped by id.
@@ -385,11 +488,31 @@ export async function refresh() {
     const sessions = await backend.listSessions(50);
     await sessionCache.putListCache(sessions);
     cachedSessions = sessions;
-    // Drain pending sessions whose ids the server now knows about.
-    // Persisted server row supersedes the synthesized one.
+    // Drain pending sessions:
+    //   1. Server now knows about the id — confirmed; drop the
+    //      synthesized row, the persisted row supersedes it.
+    //   2. Server doesn't know about the id AND the pending entry has
+    //      been here longer than PENDING_TTL_MS — drop it. This
+    //      catches "chat deleted from another device" + "agent never
+    //      persisted the announced session" cases. Without this drain,
+    //      pendingSessions grew unboundedly across cross-device
+    //      delete cycles and the local drawer kept showing rows the
+    //      server explicitly did not return.
     if (pendingSessions.size) {
-      for (const id of Array.from(pendingSessions.keys())) {
-        if (sessions.some(s => s.id === id)) pendingSessions.delete(id);
+      const now = Date.now();
+      // Test override — Playwright smokes set window.__TEST_PENDING_TTL_MS__
+      // to a small value to verify the aging path without waiting 60s
+      // of wall-clock. Production never sees it (no setter in app code).
+      const ttl = (typeof window !== 'undefined' && typeof (window as any).__TEST_PENDING_TTL_MS__ === 'number')
+        ? (window as any).__TEST_PENDING_TTL_MS__
+        : PENDING_TTL_MS;
+      for (const [id, row] of Array.from(pendingSessions.entries())) {
+        if (sessions.some(s => s.id === id)) {
+          pendingSessions.delete(id);
+        } else if (typeof row?._addedAt === 'number' && now - row._addedAt > ttl) {
+          diag(`sessionDrawer: pending ${id} aged out (${now - row._addedAt}ms, server still doesn't know)`);
+          pendingSessions.delete(id);
+        }
       }
     }
     renderListFiltered(listEl, active);
@@ -1083,6 +1206,10 @@ export function handleSessionAnnounced(ev: { id?: string; snippet?: string; sour
     source: ev.source || 'api_server',
     messageCount: 1,
     lastMessageAt: startedSec,
+    // Client wall-clock at insertion — drives TTL aging in refresh().
+    // started_at can be hours in the past for SSE replays from the
+    // ring; this is when *this client* first heard about the row.
+    _addedAt: Date.now(),
   });
   const listEl = document.getElementById('sessions-list');
   if (!listEl) return;
@@ -1124,9 +1251,9 @@ export function applyCapabilities() {
 //
 // Cross-platform sessions (telegram, slack, etc.) don't fire a sidekick-
 // targeted `session_changed` envelope when they get activity — only
-// chats hermes-plugin owns (Platform.SIDEKICK) do. To get sub-1s lag
+// chats backends/hermes/plugin owns (Platform.SIDEKICK) do. To get sub-1s lag
 // for "telegram chat just got a new message" → drawer reflects it,
-// we'd need a hermes-plugin extension that emits cross-platform
+// we'd need a backends/hermes/plugin extension that emits cross-platform
 // session_activity envelopes. Pragmatic v1: poll listSessions every
 // few seconds while the tab is foregrounded. ~3-5s lag for non-
 // sidekick chats; sidekick chats already update live via the existing

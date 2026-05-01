@@ -25,11 +25,15 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import YAML from 'yaml';
 import { validators } from './src/cards/validators.ts';
+import * as sidekick from './proxy/sidekick/index.ts';
 import {
-  rebuildPreferredModels,
-  PREFERRED_MODELS_RAW,
-} from './server-lib/preferred-models.ts';
-import * as sidekick from './server-lib/sidekick/index.ts';
+  FRONTEND_SETTINGS,
+  readAllFrontend,
+  coerceValue,
+  writeOne as writeFrontendSetting,
+  persist as persistDeployDoc,
+  type FrontendSettingKey,
+} from './proxy/sidekick/frontend-config.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -90,14 +94,6 @@ function reloadConfigIfChanged(): boolean {
     lastConfigMtime = m;
     deployDoc = loadDeployConfigDoc();
     DEPLOY_CFG = cfgAsJS();
-    // Re-derive any runtime state that captured config values at startup.
-    const cfg = DEPLOY_CFG?.models?.preferred;
-    if (Array.isArray(cfg)) {
-      rebuildPreferredModels(cfg.map((s: any) => String(s).trim()).filter(Boolean));
-    } else {
-      rebuildPreferredModels([]);
-    }
-    console.log('[config] reloaded — preferred globs:', PREFERRED_MODELS_RAW);
     return true;
   } catch (e: any) {
     console.warn('[config] reload failed:', e.message);
@@ -662,36 +658,31 @@ async function handleTranscribe(req, res) {
 // (app name, default coords) can be set without a rebuild.
 const GW_TOKEN = process.env.GW_TOKEN || '';
 
-// Default STT keyterm seed file. Read-only at runtime: the PWA fetches
-// it ONCE on first boot to seed each user's IndexedDB-backed list, then
-// reads/writes only IDB thereafter. Forks editing this file affect new
-// users only — existing installs keep their per-user IDB list. One term
-// per line; '#' comments and blank lines are ignored. Lives next to
-// server.ts so it ships with the repo.
-const DEFAULT_KEYTERMS_SEED_PATH = path.join(__dirname, 'default_stt_keyterms.txt');
-
-// Final fallback when the seed file is missing or unreadable. Minimal so
-// forks don't inherit unrelated vocabulary biases.
+// STT keyterm seed list. Read from sidekick.config.yaml's `stt.keyterms`
+// (a YAML list); the PWA fetches this ONCE on first boot to seed each
+// user's IndexedDB-backed list, then reads/writes only IDB thereafter.
+// Edits to the yaml affect new users only — existing installs keep
+// their per-user IDB list. Falls back to FALLBACK_KEYTERMS if the yaml
+// is missing the section (or sidekick is running without a config).
 const FALLBACK_KEYTERMS: string[] = ['Sidekick', 'Deepgram'];
 
-/** Read + parse the keyterm seed file. Strips '#' comments, splits on
- *  newlines and commas (matches the chip-UI parser). Falls back to
- *  FALLBACK_KEYTERMS if the file is missing/unreadable. */
+/** Resolve the keyterm seed list from sidekick.config.yaml. Strings
+ *  are trimmed + deduped (case-insensitive). Anything non-string in
+ *  the array is dropped silently. Reads via the live DEPLOY_CFG so a
+ *  yaml mtime-triggered reload picks up edits without a restart. */
 function readSeedKeyterms(): string[] {
-  let raw = '';
-  try {
-    raw = fsSync.readFileSync(DEFAULT_KEYTERMS_SEED_PATH, 'utf8');
-  } catch {
-    return [...FALLBACK_KEYTERMS];
-  }
+  const raw = DEPLOY_CFG?.stt?.keyterms;
+  if (!Array.isArray(raw)) return [...FALLBACK_KEYTERMS];
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const line of raw.split('\n')) {
-    const nocomment = line.replace(/#.*$/, '');
-    for (const part of nocomment.split(',')) {
-      const t = part.trim();
-      if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out.push(t); }
-    }
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const t = entry.trim();
+    if (!t) continue;
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
   }
   return out.length ? out : [...FALLBACK_KEYTERMS];
 }
@@ -707,47 +698,67 @@ async function handleKeytermsGet(_req, res) {
   res.end(body);
 }
 
-/** Serve the current preferred-model globs. Newline-separated for the
- *  chip-input UI. Sourced from models.preferred in the yaml, falling
- *  through to the SIDEKICK_PREFERRED_MODELS env var (comma-sep) for
- *  deployments that haven't switched to the yaml yet. */
-async function handlePreferredModelsGet(_req, res) {
-  res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-cache' });
-  res.end(PREFERRED_MODELS_RAW.join('\n') + (PREFERRED_MODELS_RAW.length ? '\n' : ''));
+/** GET /api/sidekick/config — flat snapshot of every PWA setting
+ *  with its current value (yaml override or built-in default). */
+function handleSidekickConfigGet(_req, res) {
+  const snapshot = readAllFrontend(DEPLOY_CFG);
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+  res.end(JSON.stringify({ settings: snapshot }));
 }
 
-/** Write the request body (newline- or comma-separated globs) to the
- *  yaml's models.preferred list and re-derive the runtime matcher so
- *  the next picker fetch partitions correctly without a server
- *  restart. */
-async function handlePreferredModelsPost(req, res) {
+/** POST /api/sidekick/config/<key> — write one setting. Body is
+ *  `{value: <new>}`. Persists to sidekick.config.yaml under
+ *  `frontend.<category>.<key>:`. Returns the updated value. */
+async function handleSidekickConfigSet(req, res, key: string) {
+  if (!Object.prototype.hasOwnProperty.call(FRONTEND_SETTINGS, key)) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: `unknown setting: ${key}` } }));
+    return;
+  }
   const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c);
-  const body = Buffer.concat(chunks).toString('utf8');
-  const seen = new Set<string>();
-  const globs: string[] = [];
-  for (const line of body.split('\n')) {
-    const nocomment = line.replace(/#.*$/, '');
-    for (const part of nocomment.split(',')) {
-      const t = part.trim();
-      if (t && !seen.has(t)) { seen.add(t); globs.push(t); }
+  for await (const c of req) {
+    chunks.push(c);
+    if (chunks.reduce((n, b) => n + b.length, 0) > 64 * 1024) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'body too large' } }));
+      return;
     }
   }
-  try {
-    const target = CONFIG_PATH || path.join(__dirname, 'sidekick.config.yaml');
-    if (!deployDoc) deployDoc = YAML.parseDocument('models:\n  preferred: []\n');
-    deployDoc.setIn(['models', 'preferred'], globs);
-    await fs.writeFile(target, deployDoc.toString(), 'utf8');
-    DEPLOY_CFG = cfgAsJS();
-    // Re-derive the live matcher. PREFERRED_MODELS_RAW/GLOBS are module
-    // consts, so swap them via reassignment through let if needed.
-    rebuildPreferredModels(globs);
-    res.writeHead(204); res.end();
-  } catch (e: any) {
-    console.error('preferred-models write failed:', e.message);
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end(`write failed: ${e.message}`);
+  let body: any;
+  try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+  catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'invalid json' } }));
+    return;
   }
+  let value;
+  try { value = coerceValue(key as FrontendSettingKey, body?.value); }
+  catch (e: any) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: e?.message || 'invalid value' } }));
+    return;
+  }
+  if (!CONFIG_PATH) {
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'no sidekick.config.yaml configured (set SIDEKICK_CONFIG)' } }));
+    return;
+  }
+  if (!deployDoc) deployDoc = YAML.parseDocument('frontend: {}\n');
+  try {
+    writeFrontendSetting(deployDoc, key as FrontendSettingKey, value);
+    await persistDeployDoc(deployDoc, CONFIG_PATH);
+    DEPLOY_CFG = cfgAsJS();
+    // Pin the mtime so reloadConfigIfChanged() doesn't double-rebuild
+    // on the next config-touching request.
+    try { lastConfigMtime = fsSync.statSync(CONFIG_PATH).mtimeMs; } catch {}
+  } catch (e: any) {
+    console.error(`[config] write failed for ${key}:`, e?.message);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: e?.message || 'write failed' } }));
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ key, value }));
 }
 
 function handleConfig(_req, res) {
@@ -787,42 +798,15 @@ const HOME = os.homedir();
 // ─── Sidekick agent contract ────────────────────────────────────────────
 // The proxy talks to ANY upstream that speaks the abstract agent
 // contract (HTTP+SSE — see docs/ABSTRACT_AGENT_PROTOCOL.md).
-// hermes-plugin is the typical upstream; the stub agent under
-// `agent/` is a hermes-free reference. With no token configured the
-// proxy connects in open mode (no Authorization header) — that's
-// what the stub agent expects. Hermes-plugin requires a real token.
+// backends/hermes/plugin is the typical upstream; the stub agent under
+// `agent/` is a hermes-free reference. With no token configured,
+// `/api/sidekick/*` endpoints return 503.
 sidekick.init({
   token: process.env.SIDEKICK_PLATFORM_TOKEN
     || (cfgVal('SIDEKICK_PLATFORM_TOKEN', 'backend.sidekick_platform.token', '') as string),
-  // Default to the in-tree stub agent's port (boots alongside the
-  // proxy via `npm start` → `scripts/start-all.mjs`). Hermes-plugin
-  // users override via `SIDEKICK_PLATFORM_URL=http://127.0.0.1:8645`
-  // in `.env`.
   url: cfgVal('SIDEKICK_PLATFORM_URL', 'backend.sidekick_platform.url',
-    'http://127.0.0.1:4001') as string,
+    'http://127.0.0.1:8645') as string,
 });
-
-// Cold-start initialization of the preferred-models matcher. Without
-// this, PREFERRED_MODELS_RAW stays at its module-default `[]` until
-// the first config-mtime change picks up the yaml value via
-// reloadConfigIfChanged() — which never happens on a stable deployment
-// where the yaml hasn't been edited since boot.
-//
-// Falls back to SIDEKICK_PREFERRED_MODELS env var (comma-sep) for
-// deployments that haven't switched to the yaml yet.
-(() => {
-  const cfg = DEPLOY_CFG?.models?.preferred;
-  if (Array.isArray(cfg)) {
-    rebuildPreferredModels(cfg.map((s: any) => String(s).trim()).filter(Boolean));
-    return;
-  }
-  const env = process.env.SIDEKICK_PREFERRED_MODELS;
-  if (env) {
-    rebuildPreferredModels(env.split(',').map(s => s.trim()).filter(Boolean));
-    return;
-  }
-  rebuildPreferredModels([]);
-})();
 
 // ── WebRTC voice transport proxy: /api/rtc/* → audio-bridge /v1/rtc/* ────────
 // The audio bridge (~/code/sidekick/audio-bridge/) is a standalone Python
@@ -901,11 +885,29 @@ const server = http.createServer(async (req, res) => {
     if (sidekickDelete) {
       return sidekick.handleSidekickSessionDelete(req, res, decodeURIComponent(sidekickDelete[1]));
     }
+    if (req.method === 'GET' && /^\/api\/sidekick\/settings\/schema(?:\?.*)?$/.test(req.url)) {
+      return sidekick.handleSidekickSettingsSchema(req, res);
+    }
+    const sidekickSettingsUpdate = req.method === 'POST'
+      && req.url.match(/^\/api\/sidekick\/settings\/([^/?]+)(?:\?.*)?$/);
+    if (sidekickSettingsUpdate) {
+      return sidekick.handleSidekickSettingsUpdate(
+        req, res, decodeURIComponent(sidekickSettingsUpdate[1]),
+      );
+    }
+    // Frontend settings store (yaml-backed PWA settings: theme,
+    // hotkeys, voice phrases, etc.).
+    if (req.method === 'GET' && /^\/api\/sidekick\/config(?:\?.*)?$/.test(req.url)) {
+      return handleSidekickConfigGet(req, res);
+    }
+    const sidekickConfigSet = req.method === 'POST'
+      && req.url.match(/^\/api\/sidekick\/config\/([A-Za-z0-9_]+)(?:\?.*)?$/);
+    if (sidekickConfigSet) {
+      return handleSidekickConfigSet(req, res, sidekickConfigSet[1]);
+    }
   }
   if (req.method === 'GET' && req.url === '/config') return handleConfig(req, res);
   if (req.method === 'GET' && req.url === '/api/keyterms') return handleKeytermsGet(req, res);
-  if (req.method === 'GET' && req.url === '/api/preferred-models') return handlePreferredModelsGet(req, res);
-  if (req.method === 'POST' && req.url === '/api/preferred-models') return handlePreferredModelsPost(req, res);
   if (req.method === 'POST' && req.url.startsWith('/tts')) return handleTts(req, res);
   if (req.method === 'POST' && req.url.startsWith('/gen-image')) return handleGenImage(req, res);
   if (req.method === 'POST' && req.url === '/canvas/show') return handleCanvasShow(req, res);

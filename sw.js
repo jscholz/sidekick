@@ -1,8 +1,25 @@
 /**
  * Service worker — caches the app shell so iOS PWA survives app switches.
- * Strategy: cache-first for app shell assets, network-first for API calls.
+ * Strategy: cache-first for app shell assets, network-first for /build/*.
+ *
+ * Install resilience (2026-05-01): switched cache-add from `addAll` (atomic
+ * — ANY 404 fails the entire install, leaves the new SW redundant, leaves
+ * the OLD SW in control indefinitely) to `Promise.allSettled` over
+ * individual `cache.add` calls. A drifted APP_SHELL list (e.g. a refactor
+ * renames a module) no longer locks PWAs on the old version. The cost is
+ * we may pre-cache fewer modules than intended — but `/build/*` is
+ * network-first, so first-load pulls anything missed and caches on the
+ * way through.
  */
-const CACHE_NAME = 'v2.117';
+const CACHE_NAME = 'v0.335';
+
+// Minimum viable shell for offline boot. Bundle JS modules used to be
+// listed here too — that was the source of the 2026-05-01 cache.addAll
+// failure (refactor renamed /build/canvas → /build/cards, removed
+// /build/backends/*, removed /build/gateway.mjs; addAll on the stale
+// list 404'd every install). With network-first on /build/*, listing
+// JS here is redundant: a first online load primes the cache for every
+// module the page actually imports. Keep this list narrow + load-bearing.
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -11,68 +28,31 @@ const APP_SHELL = [
   '/assets/icon.png',
   '/assets/icon.svg',
   '/assets/icon-chevron.svg',
-  '/build/main.mjs',
-  '/build/config.mjs',
-  '/build/status.mjs',
-  '/build/chat.mjs',
-  '/build/bgTrace.mjs',
-  '/build/gateway.mjs',
-  '/build/backend.mjs',
-  '/build/backends/types.mjs',
-  '/build/backends/openclaw.mjs',
-  '/build/backends/openai-compat.mjs',
-  '/build/backends/hermes-gateway.mjs',
-  '/build/conversations.mjs',
-  '/build/settings.mjs',
-  '/build/theme.mjs',
-  '/build/wakeLock.mjs',
-  '/build/util/log.mjs',
-  '/build/util/dom.mjs',
-  '/build/util/markdown.mjs',
-  '/build/util/filterStore.mjs',
-  '/build/sessionFilter.mjs',
-  '/build/cmdkPalette.mjs',
-  '/build/ios/audio-unlock.mjs',
-  '/build/audio/micMeter.mjs',
-  '/build/audio/session.mjs',
-  '/build/audio/ios-specific.mjs',
-  '/build/audio/feedback.mjs',
-  '/build/audio/memo.mjs',
+  // Audio worklet — loaded out-of-band by the AudioContext, not via
+  // import; pre-cache so the talk-mode pipeline boots offline.
   '/build/audio/audio-processor.js',
-  '/build/pipelines/types.mjs',
-  '/build/pipelines/webrtc/connection.mjs',
-  '/build/pipelines/webrtc/controls.mjs',
-  '/build/pipelines/webrtc/dictation.mjs',
-  '/build/pipelines/webrtc/dictate.mjs',
-  '/build/pipelines/webrtc/suppress.mjs',
-  '/build/pipelines/conversational/index.mjs',
-  '/build/queue.mjs',
-  '/build/voiceMemos.mjs',
-  '/build/memoCard.mjs',
-  '/build/attachments.mjs',
-  '/build/draft.mjs',
-  '/build/composer.mjs',
-  '/build/settings/mobile-bottomsheet.mjs',
-  '/build/ios/fakeLock.mjs',
-  '/build/ambient.mjs',
-  '/build/canvas/attach.mjs',
-  '/build/canvas/registry.mjs',
-  '/build/canvas/validate.mjs',
-  '/build/canvas/validators.mjs',
-  '/build/canvas/fallback.mjs',
-  '/build/canvas/cards/image.mjs',
-  '/build/canvas/cards/youtube.mjs',
-  '/build/canvas/cards/spotify.mjs',
-  '/build/canvas/cards/links.mjs',
-  '/build/canvas/cards/markdown.mjs',
-  '/build/canvas/cards/loading.mjs',
 ];
 
 self.addEventListener('install', (e) => {
+  // Per-entry add with Promise.allSettled so a single 404 doesn't fail
+  // the whole install. Any rejection is logged but does not block
+  // skipWaiting → activate → controllerchange → page reload. The
+  // network-first /build/* handler will fill in any module misses on
+  // first request.
   e.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(APP_SHELL))
-      .then(() => self.skipWaiting())
+      .then(async cache => {
+        const results = await Promise.allSettled(
+          APP_SHELL.map(url => cache.add(url)),
+        );
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          if (r.status === 'rejected') {
+            console.warn(`[sw] install: skipping ${APP_SHELL[i]}: ${r.reason}`);
+          }
+        }
+      })
+      .then(() => self.skipWaiting()),
   );
 });
 
@@ -139,5 +119,12 @@ self.addEventListener('fetch', (e) => {
 self.addEventListener('message', (e) => {
   if (e.data?.type === 'get-version') {
     e.source?.postMessage({ type: 'version', version: CACHE_NAME });
+  }
+  // Refresh button on the page postMessages us after reg.update() if a
+  // new SW is sitting in 'waiting' state. install() already calls
+  // skipWaiting() defensively, but if a previous SW shipped without it,
+  // honour the message so users can unstick a stale install.
+  if (e.data?.type === 'SKIP_WAITING') {
+    self.skipWaiting();
   }
 });

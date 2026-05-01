@@ -6,13 +6,13 @@ Talks to any agent that speaks the abstract agent contract
 (OpenAI-Responses-shaped HTTP+SSE — see
 `docs/ABSTRACT_AGENT_PROTOCOL.md`). Ships with:
 
-- **Hermes plugin** (`hermes-plugin/`) — turns a hermes-agent install
+- **Hermes plugin** (`backends/hermes/plugin/`) — turns a hermes-agent install
   into a sidekick-compatible upstream. Supports cross-platform
   drawer (telegram, slack, whatsapp sessions surface alongside
   sidekick) via the `/v1/gateway/conversations` extension.
-- **Stub agent** (`agent/`) — standalone TypeScript reference
+- **Stub agent** (`backends/stub/`) — standalone TypeScript reference
   implementation with echo / Gemini / Ollama LLM adapters. Run it
-  on `localhost:4001` with `cd agent && npm start` for
+  on `localhost:4001` with `cd backends/stub && npm start` for
   hermes-free demos and tests.
 
 **Features**
@@ -27,52 +27,55 @@ Talks to any agent that speaks the abstract agent contract
 - Ambient clock + weather widget in the corner; tap to expand into a HUD
 - Attachments: camera + image picker, with model-capability gating
 
-## Install
-
-**One command, one URL.** Mac or Linux, Node 22+:
+## Run it
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jscholz/sidekick/master/install.sh | bash
-```
-
-Then open <http://localhost:3001>.
-
-That clones to `~/sidekick`, installs deps for the proxy + the in-tree stub agent, copies `.env.example` → `.env`, and starts everything. First-run uses an echo agent on port 4001 — no API keys, no Python, no hermes. To swap the LLM, edit `agent/src/llm/` (Gemini and Ollama adapters included). To point at a real agent (hermes-plugin or any `/v1/*`-speaking server), edit `~/sidekick/.env` → `SIDEKICK_PLATFORM_URL` + `SIDEKICK_PLATFORM_TOKEN` and restart.
-
-Install as a PWA from the browser menu for full lockscreen / background-audio support on mobile.
-
-### Manual install
-
-If you'd rather not pipe a remote script:
-
-```bash
-git clone https://github.com/jscholz/sidekick.git
-cd sidekick
+cp .env.example .env       # fill in DEEPGRAM_API_KEY at minimum
 npm install
-(cd agent && npm install)
-cp .env.example .env
 npm start
 ```
 
+Then open `http://localhost:3001` (install as a PWA from the browser menu for full lockscreen / background-audio support).
+
+The default backend is Hermes. See [Backend setup](#backend-setup) below.
+
 ### Configuration
 
-Two layers, both optional:
+Sidekick configuration spans **two surfaces**:
 
-- **`.env`** (gitignored) — secrets + per-deployment overrides. Copy from `.env.example`. Precedence: env vars > config file > built-in default.
-- **`sidekick.config.yaml`** (optional, gitignored) — non-secret deployment tuning. Copy `example.config.yaml` → `sidekick.config.yaml` to customize app name, theme, preferred-model filter, etc. Every key can be overridden by the matching env var — handy for Docker/CI.
+**1. Static on-disk** (set at deploy time, requires service restart to change)
+
+- **`.env`** (gitignored) — secrets only: API keys, bearer tokens.
+- **`sidekick.config.yaml`** (optional, gitignored) — non-secret deployment tuning: app name, theme, backend choice, preferred-models filter defaults, server port, etc. Every key here can be overridden by an env var of the matching name — handy for Docker/CI. Point sidekick at it via `SIDEKICK_CONFIG=/path/to/sidekick.config.yaml`.
+
+Precedence: env vars > yaml > built-in default. See `.env.example` for the full annotated env var list and `example.sidekick.config.yaml` for the YAML schema.
+
+**2. Tunable from the frontend** (live, no restart)
+
+The Settings panel (gear icon, bottom-left of the sidebar) edits three categories of state, each stored in a different place:
+
+| Category | Examples | Stored where |
+|---|---|---|
+| **Sidekick-owned, per-user** | theme, hotkeys, text size, mic device, TTS voice, audio feedback level, barge-in | browser `localStorage` (`sidekick.settings.v2`) — per-tab, syncs across tabs in the same browser |
+| **Sidekick-owned, server-side** | STT keyterms | `sidekick.config.yaml` — `stt.keyterms` is the first-launch seed; per-user chips then live in IDB and the Refresh button merges new yaml entries in additively. |
+| **Agent-owned** | model picker, preferred-models filter, anything else the agent declares via `/v1/settings/schema` | upstream agent's persistence (e.g. backends/hermes/plugin writes back to `~/.hermes/config.yaml` under the `sidekick:` namespace). See [Agent settings](#agent-settings-v1settings) below. |
+
+The split mirrors the architecture: settings the agent doesn't care about (theme, mic device) stay client-side; settings the agent owns (model, persona) round-trip through the agent contract; settings sidekick-the-deployment cares about (preferred-models filter, keyterms) live on the proxy.
 
 The essentials:
 
-| Variable | What |
-|---|---|
-| `SIDEKICK_PLATFORM_URL` | Upstream agent URL (default `http://127.0.0.1:4001` — the in-tree stub). Point at hermes-plugin's HTTP server or any `/v1/*`-speaking server to swap. |
-| `SIDEKICK_PLATFORM_TOKEN` | Bearer token shared with the upstream. Empty for the stub (open mode). For hermes: matches `SIDEKICK_PLATFORM_TOKEN` in your `~/.hermes/.env`. |
-| `DEEPGRAM_API_KEY` | Optional — enables voice (mic STT + Aura TTS). Without it, sidekick is text-only. |
-| `GOOGLE_API_KEY` | Optional — enables `/gen-image` (Gemini image gen). |
-| `MAPS_EMBED_KEY` | Optional — Google Maps Embed key for map cards. |
-| `OPENROUTER_API_KEY` | Optional — Settings → Model picker (currently dormant; queued). |
-| `SIDEKICK_APP_NAME` / `SIDEKICK_AGENT_LABEL` / `SIDEKICK_THEME_PRIMARY` | Branding overrides. |
-| `PORT` | Proxy port (default 3001). |
+| Variable | Required | What |
+|---|---|---|
+| `DEEPGRAM_API_KEY` | yes | Deepgram key — powers STT (audio-bridge: live + batch via `/transcribe`) and Aura TTS (`/tts`) |
+| `SIDEKICK_PLATFORM_URL` | yes | Upstream agent URL (default `http://127.0.0.1:8645`). Hermes-plugin's HTTP server, the stub agent, or any `/v1/responses`-speaking server. |
+| `SIDEKICK_PLATFORM_TOKEN` | yes | Bearer token shared with the upstream — matches `SIDEKICK_PLATFORM_TOKEN` in your `~/.hermes/.env` (hermes path) or your stub-agent invocation. |
+| `GOOGLE_API_KEY` | no | Enables `/gen-image` (Gemini image gen) |
+| `MAPS_EMBED_KEY` | no | Google Maps Embed API key for map cards |
+| `OPENROUTER_API_KEY` | no | Populates the model picker (hermes) |
+| `SIDEKICK_APP_NAME` | no | Display name (default `SideKick`) |
+| `SIDEKICK_AGENT_LABEL` | no | Speaker label for agent bubbles / lockscreen |
+| `SIDEKICK_THEME_PRIMARY` | no | Override the sage `--primary` CSS variable with any color |
+| `PORT` | no | Defaults to 3001 |
 
 ## Backend setup
 
@@ -81,28 +84,29 @@ The essentials:
 Install Hermes via its [official guide](https://github.com/NousResearch/hermes-agent), then drop the bundled plugin in:
 
 ```bash
-ln -s "$(pwd)/hermes-plugin" ~/.hermes/plugins/sidekick
+ln -s "$(pwd)/backends/hermes/plugin" ~/.hermes/plugins/sidekick
 echo "SIDEKICK_PLATFORM_TOKEN=$(openssl rand -hex 32)" >> ~/.hermes/.env
 ```
 
 Apply the one-time hermes-core patch (registers `Platform.SIDEKICK`):
 ```bash
 cd <your hermes-agent install>
-patch -p1 < <sidekick-repo>/hermes-plugin/0001-add-sidekick-platform.patch
+patch -p1 < <sidekick-repo>/backends/hermes/plugin/0001-add-sidekick-platform.patch
 ```
 
 Restart hermes-gateway. Sidekick's drawer, replay, delete, attachments, and cross-platform views (telegram/slack/whatsapp sessions surface alongside sidekick) all work out of the box.
 
-See `hermes-plugin/README.md` for full install + the agent contract.
+See `backends/hermes/README.md` for full install instructions, hermes-side config keys (`backends/hermes/config.example.yaml`), and a description of which contract pieces this backend implements.
 
 ### Stub agent (no hermes required)
 
-Useful for development and demos:
+Useful for development and demos. Full install + LLM-adapter docs in
+`backends/stub/README.md`. tl;dr:
 
 ```bash
-cd agent && npm start
+cd backends/stub && npm start
 # port 4001, echo LLM by default
-# Set GEMINI_API_KEY / OLLAMA_URL to swap LLM backends
+# Set AGENT_LLM=gemini + GEMINI_API_KEY (or AGENT_LLM=ollama) to swap
 ```
 
 Then point sidekick at it:
@@ -115,22 +119,56 @@ npm start
 
 ### Any `/v1/responses`-speaking server
 
-Sidekick consumes the abstract agent contract (`docs/ABSTRACT_AGENT_PROTOCOL.md`). Any server that implements `POST /v1/responses` (streaming SSE), `GET /v1/conversations*`, `DELETE /v1/conversations/{id}`, and `GET /v1/events` drops in. The optional `/v1/gateway/conversations` extension unlocks the cross-platform drawer.
+Sidekick consumes the abstract agent contract (`docs/ABSTRACT_AGENT_PROTOCOL.md`). Any server that implements `POST /v1/responses` (streaming SSE), `GET /v1/conversations*`, `DELETE /v1/conversations/{id}`, and `GET /v1/events` drops in. Two optional extensions add features without changing the core contract:
+
+- `/v1/gateway/conversations` — cross-platform drawer (sessions from telegram/slack/whatsapp surface alongside sidekick).
+- `/v1/settings/*` — agent-declared user-facing knobs (model picker, persona, temperature, etc.). See below.
+
+### Agent settings (`/v1/settings/*`)
+
+Agents can declare their own user-facing settings and have sidekick render them generically in the **Settings → Agent** group. The agent owns both the catalog of options and the validation logic; the PWA just renders.
+
+Two endpoints, both optional:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/settings/schema` | List of `SettingDef` the agent supports. 404 = "doesn't implement extension" — sidekick hides the agent group. |
+| `POST /v1/settings/{id}` | Update one setting (`{value: <new>}`). Returns the updated def. 400 propagates to a UI revert + error message. |
+
+`SettingDef` shape (full spec in `docs/ABSTRACT_AGENT_PROTOCOL.md`):
+
+```json
+{
+  "id": "model",
+  "label": "Model",
+  "description": "LLM used for replies",
+  "category": "Agent",
+  "type": "enum",          // | "slider" | "toggle" | "text"
+  "value": "anthropic/claude-opus-4-6",
+  "options": [             // enum only
+    { "value": "anthropic/claude-opus-4-6", "label": "Claude Opus 4.6" }
+  ]
+}
+```
+
+The backends/hermes/plugin upstream declares the model picker as one entry that wraps `~/.hermes/config.yaml` + the openrouter catalog (filtered by `SIDEKICK_PREFERRED_MODELS` env). Adding more knobs (persona, default provider, max-tokens) is purely additive in `backends/hermes/plugin/__init__.py:_build_settings_schema`.
+
+The in-tree stub agent (`backends/stub/src/server.mjs`) declares one `model` enum reflecting the configured LLM — a minimal reference impl for forks. Settings the PWA owns (theme, hotkeys, mic, TTS voice) stay in their original groups; the schema is for **agent-owned** settings only.
+
+The settings panel re-fetches the schema on **open and close** so changes from parallel clients (CLI, sibling tab) surface without an explicit refresh.
 
 ## Deepgram keyterm biasing
 
 Custom vocabulary — names, project codes, product terms — is stored **per user** in the browser's IndexedDB. Manage via **Settings → STT keyterms** in the UI (type-Enter chips). Changes take effect on the next mic-stream start.
 
-For multi-user / fork deployments, the seed list in `default_stt_keyterms.txt` (repo root) is copied into each user's IDB on first boot. Edit that file to change defaults for fresh installs; existing users keep whatever they've curated.
-
-> **Legacy note:** earlier versions stored keyterms in `keyterms.txt` and then `sidekick.config.yaml` under `stt.keyterms`. Both of those server-side stores are gone — the chip UI now writes to IndexedDB. Existing yaml entries are ignored; re-add them via the chip UI on first launch.
+For multi-user / fork deployments, the seed list lives in `sidekick.config.yaml` under `stt.keyterms` (a YAML list). The PWA fetches it on first boot to seed each user's IDB; edits to the yaml affect future first-launches only — existing users keep whatever they've curated.
 
 ## Architecture
 
 Sidekick is a **four-process system**: a browser PWA, a Node proxy,
 a Python audio bridge, and a separate agent upstream. The PWA, proxy,
 and bridge are sidekick code. The agent is whatever you point
-upstream at (hermes-plugin, the in-tree stub, or any third-party
+upstream at (backends/hermes/plugin, the in-tree stub, or any third-party
 `/v1/*`-speaking server).
 
 The PWA only ever talks to the proxy and the audio bridge — never to
@@ -177,12 +215,12 @@ the agent directly. The bridge only ever talks to the proxy.
               ┌──────────────────────────┐
               │ Upstream agent            │
               │   any /v1/*-speaking      │
-              │   server:                 │
-              │   - hermes-plugin         │
-              │     (in-process w/        │
+              │   server, e.g. one of:    │
+              │   - backends/hermes/      │
+              │     (Python plugin into   │
               │     hermes-agent)         │
-              │   - stub agent (in-tree,  │
-              │     agent/, echo /        │
+              │   - backends/stub/        │
+              │     (in-tree TS, echo /   │
               │     gemini / ollama)      │
               │   - any 3rd-party         │
               │     OpenAI-compat         │
@@ -273,7 +311,7 @@ For the refactor history that landed the current architecture, see
 ## Build + test
 
 Authoring is **TypeScript-only**, both for the PWA (`src/**/*.ts`)
-and for the proxy (`server.ts`, `server-lib/**/*.ts`). There's no
+and for the proxy (`server.ts`, `proxy/**/*.ts`). There's no
 separate transpile step at runtime — the proxy runs under Node 22's
 `--experimental-strip-types` flag, which strips type annotations on
 the fly with zero overhead. The PWA needs a real bundle (browsers
@@ -299,17 +337,45 @@ cards. One headless Chromium binary, two consumers.
 
 ## Modules
 
+Top-level layout:
+
+```
+sidekick/
+├── server.ts                 proxy entry point
+├── proxy/                    proxy-side TS (handlers, upstream client)
+│   ├── sidekick/                /api/sidekick/* PWA-facing routes
+│   ├── preferred-models.ts       chip-list filter (yaml-backed)
+│   └── generic/                  shared utilities
+├── src/                      PWA (browser) code; see breakdown below
+├── audio-bridge/             Python WebRTC bridge (STT + TTS + barge-in)
+├── backends/                 each subdirectory = one /v1/*-speaking agent
+│   ├── README.md                "what's here, how to add a backend"
+│   ├── stub/                    in-tree TS reference impl (echo / gemini / ollama)
+│   └── hermes/
+│       ├── plugin/                Python plugin loaded into hermes-agent
+│       ├── README.md              install + which contract pieces it implements
+│       └── config.example.yaml    annotated subset of ~/.hermes/config.yaml
+├── scripts/                  build + smoke runner + start-all
+├── docs/                     ABSTRACT_AGENT_PROTOCOL, FRONTEND_ARCHITECTURE, ...
+├── styles/                   app.css + manifest
+├── sw.js                     service worker (PWA app-shell cache)
+├── install.sh                one-command Mac/Linux installer (curl-pipe-bash)
+└── example.sidekick.config.yaml   copy to sidekick.config.yaml + fill in
+```
+
+PWA breakdown:
+
 ```
 src/
 ├── main.ts              entry — boots modules, wires cross-module callbacks
 ├── config.ts            runtime config loaded from /config, applies skinning
 ├── backend.ts           adapter loader — single proxy-client path
-├── backends/
-│   ├── types.ts             BackendAdapter contract
-│   └── hermes-gateway.ts    proxy client — calls /api/sidekick/* on the
-│                            local Node proxy. Name is historical (will
-│                            rename to proxy-client.ts later); the file
-│                            itself is fully agent-agnostic.
+├── proxyClient.ts       calls /api/sidekick/* on the local Node proxy.
+│                        Fully agent-agnostic; the proxy translates to
+│                        /v1/* on its end.
+├── proxyClientTypes.ts  BackendAdapter contract types
+├── agentSettings.ts     generic SettingDef[] renderer for the agent's
+│                        /v1/settings/* contract (model picker etc.)
 ├── chat.ts              transcript rendering + sessionStorage persistence
 ├── sessionDrawer.ts     past-conversations list, rename/delete, IDB cache
 ├── sessionCache.ts      IndexedDB cache for instant tap-to-resume

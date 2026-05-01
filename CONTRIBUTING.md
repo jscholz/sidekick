@@ -14,11 +14,30 @@ npm start
 
 Open `http://localhost:3001`. If you don't have an agent backend running, most of the UI still loads — the backend-status pill just stays red.
 
+### System deps
+
+The hermes sidekick plugin (`backends/hermes/plugin/`) shells out to
+`pdftoppm` (poppler-utils) when a PDF attachment arrives, so the
+hermes host needs poppler installed. Without it the plugin logs an
+error and drops the PDF; the rest of the turn proceeds.
+
+```bash
+# Debian / Ubuntu / Raspberry Pi OS
+sudo apt install poppler-utils
+# macOS
+brew install poppler
+```
+
+Knobs (`~/.hermes/.env`): `SIDEKICK_PDF_DPI` (150),
+`SIDEKICK_PDF_MAX_PAGES` (50), `SIDEKICK_PDF_RASTERIZE_TIMEOUT_S` (30),
+`SIDEKICK_PDF_MAX_BYTES` (20 MiB). See
+`docs/PDF_RASTERIZATION_PROPOSAL.md` for design notes.
+
 ## Tests
 
 Keep `npm test` green before every commit:
 ```
-npm test           # all *.test.ts under test/, src/, server-lib/
+npm test           # all *.test.ts under test/, src/, proxy/
 npm run typecheck  # tsc --noEmit over TypeScript sources
 ```
 
@@ -33,10 +52,10 @@ Generic / backend-agnostic tests live in `test/`:
 - `tts-clean.test.ts`, `fallback.test.ts`, `sessionFilter.test.ts`
 
 Backend-specific tests are co-located with the backend under
-`server-lib/backends/<name>/__tests__/`. Today this is just hermes-gateway
-(`server-lib/backends/hermes-gateway/__tests__/proxy.test.ts` + harness),
+`proxy/backends/<name>/__tests__/`. Today this is just hermes-gateway
+(`proxy/backends/hermes-gateway/__tests__/proxy.test.ts` + harness),
 but the convention scales: a fork swapping hermes for another backend
-deletes `server-lib/backends/hermes-gateway/` + `hermes-plugin/` and
+deletes `proxy/backends/hermes-gateway/` + `backends/hermes/plugin/` and
 loses no tests elsewhere.
 
 UX tests (browser-DOM scenarios) belong in `test/` because they test the
@@ -52,7 +71,7 @@ Tier 1/2/3 test plan and which seams are worth pinning.
   delete) so any future regression has a name.
 - **Hermetic by default.** Tests for the proxy or any backend
   abstraction MUST run without a live hermes / network / LLM. The
-  `server-lib/backends/hermes-gateway/__tests__/proxy-harness.ts`
+  `proxy/backends/hermes-gateway/__tests__/proxy-harness.ts`
   pattern (FakePlugin WS + scratch state.db) is the template — copy
   it for new backends.
 - **UX tests should never depend on a specific backend.** If a UX test
@@ -64,12 +83,12 @@ Tier 1/2/3 test plan and which seams are worth pinning.
 ### When extending the proxy contract
 
 The proxy contract is documented at
-`server-lib/backends/hermes-gateway/CONTRACT.md`. If you change any of
+`proxy/backends/hermes-gateway/CONTRACT.md`. If you change any of
 the `/api/sidekick/*` HTTP+SSE surface or the WS envelope schema:
 1. Update CONTRACT.md.
 2. Add a contract test under `__tests__/proxy.test.ts` that pins the
    new behavior.
-3. Run the suite (`npm test -- server-lib/backends/hermes-gateway/__tests__/proxy.test.ts`)
+3. Run the suite (`npm test -- proxy/backends/hermes-gateway/__tests__/proxy.test.ts`)
    before committing.
 
 ### Diagnostic recipes (when a UX bug repros)
@@ -94,7 +113,7 @@ curl -X POST http://127.0.0.1:3001/api/sidekick/messages \
   -d '{"chat_id":"test-cli","text":"hi"}'
 
 # Run the proxy contract suite
-npm test -- server-lib/backends/hermes-gateway/__tests__/proxy.test.ts
+npm test -- proxy/backends/hermes-gateway/__tests__/proxy.test.ts
 ```
 
 ### Smoke tests (Playwright)
@@ -135,9 +154,52 @@ Please include:
 ## Scope
 
 Sidekick is a voice-first PWA for agent backends. New backends plug in via the
-adapter interface — see `src/backends/types.ts` and the existing adapters in
-`src/backends/`. Per-provider quirks (e.g. Deepgram wedge detection) stay in
+adapter interface — see `src/proxyClientTypes.ts` and the existing adapters in
+`src/`. Per-provider quirks (e.g. Deepgram wedge detection) stay in
 their provider modules.
+
+## Audio platform — single point rule
+
+All consumer-side audio interactions go through `src/audio/platform.ts`. Do
+NOT reach for `new AudioContext`, `navigator.mediaDevices.getUserMedia`,
+`createMediaStreamSource`, or `AudioContext.decodeAudioData` directly from
+feature code. iOS Safari quirks (gesture-bound context creation, route-stale
+rebuild on devicechange, suspended-context behavior, MediaStream exclusivity)
+all live in `platform.ts`. New iOS fixes land in ONE function there, not
+scattered across modules.
+
+The shim's API:
+- `primeAudio(player)` — gesture-bound prime (was iOS audio-unlock); call
+  inside a click/touchstart handler.
+- `isPrimed()`, `getSharedAudioCtx()`, `onRouteChange(fn)`, `resetAudioCtx()`
+- `getMicStream(owner, constraints)`, `releaseMicStream(owner)` — shared
+  capture with single-owner mutual exclusion.
+- `getMicAnalyser(stream, fftSize)` — analyser node, returns null if the
+  platform/stream combo can't yield frames.
+- `playChime(name)` — feedback chime playback.
+- `decodeAudioBlob(blob)` — one-shot non-realtime decode.
+
+Documented exceptions (audited 2026-05-01):
+1. `src/audio/feedback.ts` — implementation file; imports `getAudioCtx`
+   directly from `src/ios/audio-unlock.ts` to avoid a circular import with
+   the shim. Consumers still use `playChime` from the shim.
+2. `src/audio/capture.ts`, `src/ios/audio-unlock.ts` — implementation files
+   the shim delegates to. They own the only raw `getUserMedia` /
+   `AudioContext` constructions in `src/`.
+
+Grep audit (run before adding new audio code):
+```bash
+grep -rnE 'new (window\.)?AudioContext|navigator\.mediaDevices\.getUserMedia|createMediaStreamSource' src/ --include='*.ts' \
+  | grep -vE 'src/audio/(platform|feedback|capture)\.ts|src/ios/audio-unlock\.ts|src/types/'
+```
+Should return ZERO hits. Any hit is a regression — route through the
+platform shim instead.
+
+Mic-stream owner tags currently in use: `'memo'` (voice memo recording,
+browser AEC on), `'webrtc'` (WebRTC peer for talk/stream mode, browser
+AEC off — bridge handles AEC server-side). Single-owner: `getMicStream`
+throws if another owner currently holds the stream; callers coordinate
+via `releaseCaptureIfActive` in `main.ts`.
 
 ## License
 

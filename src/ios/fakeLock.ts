@@ -9,7 +9,8 @@
  */
 
 import { log } from '../util/log.ts';
-import { getAudioCtx } from './audio-unlock.ts';
+import * as audioPlatform from '../audio/platform.ts';
+import * as webrtc from '../pipelines/webrtc/connection.ts';
 // Classic pipeline gone: getActiveStream + tts imports removed. Pocket-lock
 // keeps the cover overlay + status text + idle meter; per-turn player UI
 // is hidden via display:none in CSS while the WebRTC call surface owns
@@ -43,7 +44,6 @@ let dimTimer = null;
 let statusTimer = null;
 
 let analyser = null;
-let audioSourceNode = null;
 let animFrame = null;
 
 /** @type {() => { listening: boolean, speaking: boolean, modelLabel: string }} */
@@ -218,20 +218,67 @@ function tickStatus() {
 }
 
 // ── Mic meter ────────────────────────────────────────────────────────
+/** Polling token for the call-pending wait — cancelled when the
+ *  overlay closes so we don't keep hunting for a mic stream that
+ *  was never opened. */
+let micPollHandle: ReturnType<typeof setTimeout> | null = null;
+
 function startMeter() {
   if (analyser || !canvasEl) return;
-  // With the classic mic stream gone, the lock-screen meter no longer has
-  // a direct handle to the active mic — WebRTC owns its capture inside
-  // connection.ts. Draw an idle waveform so the UI isn't blank; live
-  // metering during a call can be added later via a connection-level
-  // accessor if needed.
+  // Pull the live mic stream from the WebRTC peer. When pocket-lock
+  // opens before a call is connected, the stream is null — poll a
+  // few times so a call started AFTER lock still gets metering.
+  // Idle pattern is the visual fallback while polling.
   drawIdle();
+  attachMicAnalyserWhenReady(0);
+}
+
+/** Try to grab the WebRTC mic stream + wire an analyser. Polls
+ *  every 250ms up to ~30s — covers the "user opens pocket-lock then
+ *  starts a call" path. Long window because on iOS the user may lock
+ *  first and call later.
+ *
+ *  Refactored 2026-05-01 (Phase 2.2): all the iOS-specific quirks
+ *  (suspended-context resume, fallback meterCtx, route-stale handling)
+ *  moved into `audioPlatform.getMicAnalyser()`. fakeLock owns ONLY the
+ *  polling loop + the visual meter — the audio quirks are platform's
+ *  job. Future iOS fixes land in `src/audio/platform.ts:getMicAnalyser`,
+ *  not here. */
+function attachMicAnalyserWhenReady(attempt: number): void {
+  if (!active || !canvasEl || analyser) return;
+  const stream = webrtc.getMicStream();
+  log(`[fakeLock] meter probe attempt=${attempt} stream=${stream ? 'present' : 'null'} tracks=${stream ? stream.getAudioTracks().length : 0}`);
+  if (stream && stream.getAudioTracks().length > 0) {
+    const a = audioPlatform.getMicAnalyser(stream, 256);
+    if (a) {
+      analyser = a;
+      log('[fakeLock] mic meter wired via audioPlatform.getMicAnalyser');
+      animFrame = requestAnimationFrame(drawMeter);
+      return;
+    }
+    // Platform couldn't produce an analyser (no shared ctx, or
+    // platform-specific stream-exclusivity issue). Fall through to
+    // the polling loop — context may become available shortly (e.g.
+    // user about to tap something that primes audio).
+    log('[fakeLock] meter probe got stream but platform returned no analyser; polling');
+  }
+  if (attempt >= 120) return;  // ~30s of polling at 250ms cadence
+  micPollHandle = setTimeout(() => {
+    micPollHandle = null;
+    attachMicAnalyserWhenReady(attempt + 1);
+  }, 250);
 }
 
 function stopMeter() {
+  if (micPollHandle) { clearTimeout(micPollHandle); micPollHandle = null; }
   if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+  // Disconnect the analyser. The upstream MediaStreamSource node is
+  // owned by audioPlatform.getMicAnalyser; disconnecting the analyser
+  // here is enough — the source has no other consumers and will be
+  // GC'd when its strong ref (the closure inside getMicAnalyser) is
+  // released. Future revision could expose a release callback if the
+  // platform shim starts tracking source-node lifetimes.
   if (analyser) { try { analyser.disconnect(); } catch {} analyser = null; }
-  if (audioSourceNode) { try { audioSourceNode.disconnect(); } catch {} audioSourceNode = null; }
 }
 
 const BARS = 32;

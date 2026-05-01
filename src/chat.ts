@@ -281,6 +281,7 @@ function formatTime(ts) {
  * @param {number|Date|string} [opts.timestamp] Message timestamp; defaults to now.
  * @param {Array<{dataUrl: string, mimeType: string, fileName?: string}>} [opts.attachments] Image thumbnails rendered under the line.
  * @param {string} [opts.replyId] TTS reply id for agent lines — links bubble to playback events (loading/playback bar + play icon wiring).
+ * @param {string} [opts.messageId] Adapter-side message id (e.g. SSE `message_id`). Stored as `data-message-id` so handlers can dedup an envelope arriving for a message a parallel render path (history fetch) has already surfaced.
  */
 export function addLine(speaker: string, text: string, cls = '', opts: {
   source?: 'voice' | 'text' | 'sent';
@@ -288,6 +289,7 @@ export function addLine(speaker: string, text: string, cls = '', opts: {
   timestamp?: number | Date | string;
   attachments?: Array<{ dataUrl: string; mimeType: string; fileName?: string }>;
   replyId?: string;
+  messageId?: string;
   /** Insert at the top of the transcript instead of appending. Used by
    *  lazy-loaded history. */
   prepend?: boolean;
@@ -303,6 +305,7 @@ export function addLine(speaker: string, text: string, cls = '', opts: {
   const div = document.createElement('div');
   div.className = `line ${cls}${opts.pending ? ' pending' : ''}`;
   if (opts.replyId) div.dataset.replyId = opts.replyId;
+  if (opts.messageId) div.dataset.messageId = String(opts.messageId);
   if (cls.includes('agent')) div.dataset.text = text;  // replyPlayer uses this for replay
 
   // Source icon: minimal line-style indicator of voice vs typed

@@ -129,8 +129,19 @@ async def _run_tts(peer, voice_config: VoiceConfig, text_queue, track) -> None:
                         yield chunk
 
             buf = bytearray()
+            halted = False
             try:
                 async for pcm in tts.synth(_iter_with_first()):
+                    # Halt signal — server-side barge or future
+                    # explicit interrupt has been raised. Bail out of
+                    # the current TTS reply ASAP so new frames don't
+                    # refill the queue that halt() just drained.
+                    # We do NOT raise: the halt is cooperative, the
+                    # outer loop should keep running for the next
+                    # reply round.
+                    if track.halt_event.is_set():
+                        halted = True
+                        break
                     if not pcm:
                         continue
                     buf.extend(pcm)
@@ -149,6 +160,29 @@ async def _run_tts(peer, voice_config: VoiceConfig, text_queue, track) -> None:
                             await track.feed_async(frame_bytes)
                         except Exception as e:  # pragma: no cover
                             logger.warning("[tts-bridge] track.feed_async failed: %s", e)
+                if halted:
+                    # Drop any partial buffer — don't flush halted
+                    # audio to the now-empty queue. Drain text_queue
+                    # up to and including the reply's terminator
+                    # (None) so leftover deltas from the halted reply
+                    # don't bleed into the next round. Then clear the
+                    # event so the next reply's synth loop runs free.
+                    buf.clear()
+                    drained = 0
+                    while True:
+                        try:
+                            item = text_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        drained += 1
+                        if item is None:
+                            break
+                    logger.info(
+                        "[tts-bridge] peer %s halted; drained %d text-queue items",
+                        peer.peer_id, drained,
+                    )
+                    track.halt_event.clear()
+                    continue
                 # Flush tail (zero-pad to frame boundary so the encoder
                 # gets a clean last frame).
                 if buf:
@@ -222,6 +256,13 @@ class PCMTrack(MediaStreamTrack):  # type: ignore[misc]
         # gate inbound transcription during TTS playback (kills the
         # iOS speakerphone echo loop deterministically).
         self._last_nonsilent_at: Optional[float] = None
+        # Halt signal: set by halt() to tell the synthesis loop in
+        # _run_tts to bail out of the current TTS reply ASAP. The
+        # synth loop polls this between provider chunks (Option A —
+        # see halt() docstring for why over a generation token).
+        # Cleared by _run_tts itself after it has drained the leftover
+        # text_queue and is ready for a fresh reply round.
+        self.halt_event: asyncio.Event = asyncio.Event()
 
     def feed(self, pcm_bytes: bytes) -> None:
         """Synchronous push, kept for any non-async caller.
@@ -322,6 +363,39 @@ class PCMTrack(MediaStreamTrack):  # type: ignore[misc]
             return False
         g = grace_s if grace_s is not None else PCMTrack.TTS_TAIL_GRACE_S
         return (time.monotonic() - self._last_nonsilent_at) < g
+
+    def halt(self) -> None:
+        """Drop queued frames + mark inactive immediately. Symmetrizes
+        the bridge-side TTS state with the PWA-side <audio> pause on
+        barge.
+
+        Two effects, both required for a clean stop:
+
+        1. Drain `_frame_queue` so the next ~MAX_PCM_FRAME_QUEUE recv()
+           calls fall back to silence rather than emitting buffered
+           TTS audio that the PWA has already paused — without this,
+           recv() keeps `_last_nonsilent_at` fresh and `is_active()`
+           stays true.
+
+        2. Reset `_last_nonsilent_at` to None so `is_active()` flips
+           false on the very next call. The STT bridge polls
+           `is_active()` per inbound frame; a False return immediately
+           reopens the mic→Deepgram path.
+
+        Halt synthesis-in-flight via `halt_event`: the `_run_tts` loop
+        polls this between provider chunks and bails out of the current
+        TTS reply, so new frames don't refill the queue right after
+        we drained it.
+
+        Idempotent: safe to call multiple times. Safe to call from
+        a sync context (no awaits)."""
+        self.halt_event.set()
+        while not self._frame_queue.empty():
+            try:
+                self._frame_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self._last_nonsilent_at = None
 
     def stop(self) -> None:  # pragma: no cover — aiortc lifecycle
         self._closed = True

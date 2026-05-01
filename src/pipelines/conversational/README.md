@@ -48,7 +48,7 @@ Recommended order of operations:
 1. Write a 200-line standalone Gemini Live client as a sanity check —
    pure WS, pure audio in/out, no app integration. Validate the
    protocol shape in isolation.
-2. Add a `src/backends/geminilive.ts` adapter with `capabilities.
+2. Add a `src/geminilive.ts` adapter with `capabilities.
    conversationalVoice: true`. Standard chat methods can no-op or
    throw — the shell never calls them because it'll take the
    conversational dispatch branch.

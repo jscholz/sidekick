@@ -33,6 +33,7 @@
 
 import { log, diag } from '../../util/log.ts';
 import { playFeedback } from '../../audio/feedback.ts';
+import * as audioPlatform from '../../audio/platform.ts';
 import type {
   STTProvider,
   TranscriptEvent as STTTranscriptEvent,
@@ -162,13 +163,19 @@ export function getMicStream(): MediaStream | null {
   return active?.micStream ?? null;
 }
 
-/** Cancel local TTS playback by pausing + clearing the audio
- *  element. Idempotent and safe when no call is open. Called by
- *  main.ts when the bridge sends a server-side `barge` envelope. */
+/** No-op kept for call-site compatibility. The bridge's
+ *  tts_track.halt() (audio-bridge/tts_bridge.py:367) already drains
+ *  the outbound PCM queue and falls back to silence frames within one
+ *  20ms tick of the barge fire — the PWA does NOT need to cancel
+ *  anything client-side. The previous implementation paused the
+ *  <audio> element AND nulled its srcObject, which permanently
+ *  unbound it from the peer track: any subsequent reply's TTS frames
+ *  reached the peer connection but had nowhere to play, so one false
+ *  barge silenced TTS for the rest of the call. The WebRTC jitter
+ *  buffer holds 100-300 ms of TTS audio at barge time — that's the
+ *  audible tail you'll hear, vs. a permanently-dead playback path. */
 export function cancelRemotePlayback(): void {
-  if (!active?.remoteAudio) return;
-  try { active.remoteAudio.pause(); } catch { /* ignore */ }
-  try { active.remoteAudio.srcObject = null; } catch { /* ignore */ }
+  /* intentionally empty — see docstring */
 }
 
 export function dispatch(text: string): boolean {
@@ -216,12 +223,10 @@ export async function open(
     // Net: trust the bridge to handle echo via server-side gating,
     // get clean unprocessed audio over the wire. Matches Pipecat /
     // LiveKit production WebRTC voice patterns.
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
+    micStream = await audioPlatform.getMicStream('webrtc', {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
     });
   } catch (e: any) {
     diag('[webrtc] getUserMedia failed', e?.message);
@@ -475,11 +480,12 @@ export async function close(): Promise<void> {
   setState('closing');
   const session = active;
   active = null;
-  try {
-    for (const t of session.micStream.getTracks()) {
-      try { t.stop(); } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
+  // Release the mic stream through the platform shim — capture.ts owns
+  // track-stop + wakeLock release + active-stream nullification, all
+  // keyed on the 'webrtc' owner tag we acquired with above. Without
+  // this release, capture.ts would still think 'webrtc' holds the
+  // stream and the next memo/webrtc acquire would throw.
+  try { audioPlatform.releaseMicStream('webrtc'); } catch { /* ignore */ }
   if (session.dataChannel) {
     try { session.dataChannel.close(); } catch { /* ignore */ }
   }

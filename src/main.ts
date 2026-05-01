@@ -11,12 +11,16 @@ import * as settings from './settings.ts';
 import * as theme from './theme.ts';
 import * as wakeLock from './wakeLock.ts';
 import * as chat from './chat.ts';
+import * as renderedMessages from './renderedMessages.ts';
 import * as backend from './backend.ts';
 import * as sessionDrawer from './sessionDrawer.ts';
 import * as cmdkPalette from './cmdkPalette.ts';
 import * as sidebarResize from './sidebarResize.ts';
 import * as multiSelect from './multiSelect.ts';
-import { unlock, getAudioCtx } from './ios/audio-unlock.ts';
+import * as agentSettingsMod from './agentSettings.ts';
+import { MODEL_MODALITIES } from './data/modelModalities.ts';
+import { primeAudio, getSharedAudioCtx } from './audio/platform.ts';
+import { playReplyTts, cancelReplyTts } from './audio/text-tts.ts';
 import * as audioSession from './audio/session.ts';
 import * as capture from './audio/capture.ts';
 import * as fakeLock from './ios/fakeLock.ts';
@@ -143,13 +147,16 @@ async function populateMicPicker() {
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
 async function boot() {
-  // Hydrate localStorage settings BEFORE any UI wiring reads them. Earlier
+  // Hydrate settings BEFORE any UI wiring reads them. Earlier
   // settings.load() lived ~300 lines down in boot, after toolbar wiring,
   // which made btn-transport's sync() read DEFAULTS instead of the stored
   // value — the toggle would flip in storage but the highlight wouldn't
   // reflect it. Generally: any boot code that calls settings.get() before
   // this line was reading uninitialised defaults.
-  settings.load();
+  // Async now: yaml-backed settings come from /api/sidekick/config; the
+  // remaining per-device keys are read from localStorage in the same
+  // call. Built-in DEFAULTS are the offline / proxy-down fallback.
+  await settings.load();
 
   // Load config from server (keys, gateway info)
   await loadConfig();
@@ -191,7 +198,7 @@ async function boot() {
   // eager construction.
   bgTrace.install({
     getStream: () => capture.getActiveStream(),
-    getAudioCtx: () => getAudioCtx(),
+    getAudioCtx: () => getSharedAudioCtx(),
     getKeepaliveEl: () => audioSession.getKeepaliveEl(),
   });
   // Expose dump() globally when tracing is enabled so the bench-test
@@ -257,7 +264,18 @@ async function boot() {
     onNext: () => {},
   });
   const btnLock = document.getElementById('btn-lock');
-  if (btnLock) btnLock.onclick = () => fakeLock.show();
+  if (btnLock) btnLock.onclick = () => {
+    // iOS pocketlock waveform fix (2026-05-01): force the audio prime
+    // INSIDE the lock-button click gesture so the shared AudioContext
+    // is created + resumed while the gesture is still live. fakeLock's
+    // mic-meter wiring (attachMicAnalyserWhenReady → getMicAnalyser)
+    // needs getSharedAudioCtx() to be non-null — without primeAudio
+    // here, the shared context stays null on iOS until some other
+    // gesture (memo/send) touches audio. Idempotent: primeAudio no-ops
+    // if already primed + route is fresh.
+    try { primeAudio(player); } catch { /* defensive */ }
+    fakeLock.show();
+  };
 
   // Sidebar — always visible (48px rail), expands on hamburger. Holds
   // new-chat, sessions list (if backend supports it), and info/settings
@@ -361,7 +379,7 @@ async function boot() {
     // chat surface so they can keep going.
     onSessionGone: () => {
       diag('reset history: viewed session disappeared from server');
-      chat.clear();
+      renderedMessages.clear();
       activityRow.clearAll();
       draft.dismiss();
       voiceMemos.clearAll().catch(() => {});
@@ -407,8 +425,11 @@ async function boot() {
     });
   }
 
-  // Settings
-  settings.load();
+  // Settings — first load() ran above in boot(); this is a redundant
+  // resync left for safety in case anything mutated `current` between
+  // boot's load and now (e.g. a backend.connect() that called
+  // settings.set()).
+  await settings.load();
   settings.applyVisuals();
   settings.hydrate({
     onThemeChange: () => theme.applyTheme(settings.get().theme),
@@ -744,6 +765,15 @@ async function boot() {
         }
         await flushOutbox();
         if (settings.refreshModels) settings.refreshModels().catch(() => {});
+        // Eager schema fetch so consumers depending on agent settings
+        // (currently the composer attach-button vision-gate) have data
+        // from page load — without this, agentSettings.getCurrentValue
+        // ('model') returns undefined until the user opens the Settings
+        // panel, leaving image-upload UI greyed even on vision-capable
+        // models. Fires the agent-schema-loaded event the gate listens
+        // for. Errors silently — the existing on-panel-open path still
+        // re-tries.
+        agentSettingsMod.load().catch(() => {});
       } else {
         status.setStatus('Gateway: disconnected');
       }
@@ -846,7 +876,7 @@ async function boot() {
   // (silence timer + commit-phrase) via webrtcDictation. The user
   // bubble renders once per dispatch (one utterance = one bubble), set
   // up below via setUserBubbleHandler.
-  let dcAssistantStreamingId: string | null = null;
+
   // Streaming user bubble for live dictation. Created on first interim
   // of a new utterance; updated as interims/finals arrive; finalized
   // on dispatch (drop streaming class, set text to dispatched utterance).
@@ -911,7 +941,6 @@ async function boot() {
     }
     dcUserStreamingId = null;
     dcUserBufferedFinals = '';
-    dcAssistantStreamingId = null;
   });
   webrtcConnection.setDataChannelListener((ev) => {
     if (ev.type === 'barge') {
@@ -930,6 +959,7 @@ async function boot() {
       // again in a multi-turn call). Plays the soft two-tone "your
       // turn" cue. Single source of truth: don't fire this anywhere
       // else on the client.
+      log('[bubble-diag] listening envelope received from bridge');
       try { playFeedback('listening'); } catch { /* ignore */ }
       // Visual pulse — adds the .listening class to the mic button so
       // the user can distinguish "we got your touch" (red filled, no
@@ -967,60 +997,15 @@ async function boot() {
       webrtcDictation.handleUserFinal(ev.text);
       return;
     }
-    if (ev.role === 'assistant') {
-      // Assistant deltas: per-chunk over the data channel. Concatenate
-      // into a single streaming bubble per assistant turn. The server
-      // sends a final empty `is_final: true` envelope when the agent
-      // run completes — that's the signal to drop the streaming class
-      // (and its thinking-cursor) so the bubble stops blinking once
-      // the reply is actually done.
-      //
-      // Suppression hooks: notify webrtcSuppress so it drops user
-      // transcripts during the reply (kills iOS speakerphone-feedback
-      // re-transcription). Barge-in is server-side now — the bridge
-      // sends {type:'barge'} when its VAD detects user voice during
-      // TTS; the data-channel handler above clears suppression.
-      if (ev.is_final) {
-        if (dcAssistantStreamingId) {
-          const el = document.querySelector(
-            `.line.agent[data-reply-id="${CSS.escape(dcAssistantStreamingId)}"]`,
-          ) as HTMLElement | null;
-          if (el) el.classList.remove('streaming', 'pending');
-        }
-        dcAssistantStreamingId = null;
-        webrtcSuppress.onAssistantFinal();
-        return;
-      }
-      webrtcSuppress.onAssistantDelta();
-      if (!dcAssistantStreamingId) {
-        // First delta of an assistant turn — the agent received our
-        // dispatch and is now replying. Fires the 'send' chime here
-        // (NOT at dispatch time in dictation.ts) so the user hears a
-        // real time gap between 'commit' (over detected, local) and
-        // 'send' (agent is replying, server-acknowledged). In WebRTC
-        // mode the local dispatch is synchronous, so colocating the
-        // two chimes there merged them into one tone.
-        try { playFeedback('send'); } catch { /* feedback is best-effort */ }
-        dcAssistantStreamingId = `dc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        chat.addLine(getAgentLabel(), ev.text, 'agent streaming', {
-          markdown: true,
-          replyId: dcAssistantStreamingId,
-        });
-        return;
-      }
-      const el = document.querySelector(
-        `.line.agent[data-reply-id="${CSS.escape(dcAssistantStreamingId)}"]`,
-      ) as HTMLElement | null;
-      if (!el) {
-        dcAssistantStreamingId = null;
-        return;
-      }
-      const prev = el.dataset.text || '';
-      const next = prev + ev.text;
-      el.dataset.text = next;
-      const textSpan = el.querySelector('.text') as HTMLElement | null;
-      if (textSpan) textSpan.innerHTML = miniMarkdown(next);
-    }
+    // ev.role === 'assistant' branch removed in Phase 1.2 of the audio
+    // refactor (2026-05-01). Bubble rendering, chime triggers, and
+    // suppress state-machine calls all migrated to the SSE
+    // handleReplyDelta / handleReplyFinal path so assistant content has
+    // a single render origin regardless of how the user initiated the
+    // turn (text, voice, telegram, etc). The bridge still emits these
+    // envelopes (it has no way to know the PWA also subscribes to the
+    // SSE) but the PWA ignores them — they're a transport duplicate of
+    // content the SSE already delivers.
   });
 
   // Populate the mic picker once on boot. It needs prior getUserMedia
@@ -1097,7 +1082,7 @@ async function boot() {
       if (/^\/(reset|new|clear)\b/i.test(text)) {
         diag('reset history: slash command');
         releaseCaptureIfActive();
-        chat.clear();
+        renderedMessages.clear();
         activityRow.clearAll();
         draft.dismiss();
         voiceMemos.clearAll().catch(() => {});
@@ -1246,6 +1231,74 @@ async function boot() {
     };
   }
 
+  // Image-upload UI is gated on the selected model's vision capability.
+  // Heuristic match against known multimodal model name patterns —
+  // structurally the right place for this is per-model metadata in the
+  // agent settings schema (so a forked deploy can declare its own
+  // model→vision mapping), but the heuristic covers every multimodal
+  // model in common use today and keeps the UI honest until that
+  // schema extension lands. Buttons start disabled in HTML; this
+  // function flips them on/off as the agent's model setting changes.
+  function isVisionCapableModel(modelId: string): boolean {
+    if (!modelId) return false;
+    // Source of truth: src/data/modelModalities.ts (OpenRouter
+    // catalog snapshot, refresh via scripts/fetch-openrouter-capabilities.mjs).
+    // The catalog covers everything routed through OpenRouter, which is
+    // the vast majority of options[] in practice. Local-only models
+    // (gemma served by llama.cpp on hermes etc.) won't be in the
+    // catalog — fall back to the regex below for those.
+    const cap = MODEL_MODALITIES[modelId];
+    if (cap) return cap.includes('image');
+    // Fallback regex for local-only models. Liberal-leaning: false
+    // positives just mean the model gets an image it ignores; false
+    // negatives lock the user out of attaching at all.
+    const id = modelId.split('/').pop() || modelId;
+    return /^(gpt-(4o|4-turbo|4-vision|5)|claude-(3|sonnet|opus|haiku)|gemini-|gemma-(3|4)-|llava-|llama-3\.2-(11b|90b)-vision|pixtral-|qwen[23](\.\d+)?-?(vl-)?|qwen3-|internvl-|minimax-m[23]|mimo-)/i
+      .test(id);
+  }
+  function updateAttachButtonsState(): void {
+    const modelId = String(agentSettingsMod.getCurrentValue('model') ?? '');
+    const enabled = isVisionCapableModel(modelId);
+    if (btnAttach) {
+      btnAttach.disabled = !enabled;
+      btnAttach.title = enabled
+        ? 'Attach image'
+        : `Image upload — selected model (${modelId || 'none'}) doesn't support vision`;
+    }
+    if (btnCamera) {
+      btnCamera.disabled = !enabled;
+      btnCamera.title = enabled
+        ? 'Take photo'
+        : `Camera — selected model (${modelId || 'none'}) doesn't support vision`;
+    }
+  }
+  // Run once whenever the schema loads + on every setting change. The
+  // schema-loaded event fires from agentSettings.load after a successful
+  // /v1/settings/schema response; the setting-changed event fires after
+  // a successful POST /v1/settings/{id} round-trip.
+  window.addEventListener('agent-schema-loaded', updateAttachButtonsState);
+  window.addEventListener('agent-setting-changed', updateAttachButtonsState);
+  // Initial pass — settings panel may already have populated by the
+  // time main.ts wiring completes (race between async settings load
+  // and this synchronous setup). No-op if schema hasn't loaded yet.
+  updateAttachButtonsState();
+
+  // Surface a system line in the live chat when the model changes via
+  // the settings panel — same pattern as the cli's `/model` confirmation.
+  // Lists declared input modalities so the user knows whether image /
+  // pdf / audio inputs will work without trial-and-error.
+  window.addEventListener('agent-setting-changed', (e: Event) => {
+    const detail = (e as CustomEvent).detail || {};
+    if (detail.id !== 'model') return;
+    const modelId = String(detail.value || '');
+    if (!modelId) return;
+    const mods = MODEL_MODALITIES[modelId];
+    const inputs = mods && mods.length
+      ? mods.join(', ')
+      : (isVisionCapableModel(modelId) ? 'text, image (heuristic)' : 'text');
+    chat.addSystemLine(`Model: ${modelId} — accepts ${inputs}`);
+  });
+
   // New-chat button — lives in the sidebar now (#sb-new-chat). Works for
   // every backend, regardless of whether it supports session browsing,
   // since newSession is just a conversation-name rotation. /new slash
@@ -1280,7 +1333,7 @@ async function boot() {
       // stays open if open). If memo has an in-flight blob queued in the
       // outbox, it'll send against the NEW session. That's a conscious
       // trade: user asked for a fresh thread, they get one.
-      chat.clear();
+      renderedMessages.clear();
       activityRow.clearAll();
       draft.dismiss();
       voiceMemos.clearAll().catch(() => {});
@@ -1690,7 +1743,7 @@ async function boot() {
     if (dictateActive) await webrtcDictate.stop();
     if (webrtcControls.isOpen()) await webrtcControls.closeIfOpen();
     // iOS AVAudioSession prep: prepareForCapture before getUserMedia.
-    unlock(player);
+    primeAudio(player);
     audioSession.prepareForCapture();
     memoActive = true;
     log('[mic-diag] memoActive=true (startMemo)');
@@ -1745,7 +1798,7 @@ async function boot() {
       await startMemo(false);
       return;
     }
-    unlock(player);
+    primeAudio(player);
     audioSession.prepareForCapture();
     try {
       await webrtcDictate.start({
@@ -1770,6 +1823,18 @@ async function boot() {
     if (memoActive) return;
     if (dictateActive) await webrtcDictate.stop();
     if (webrtcControls.isOpen()) return;
+    // Prime audio inside the gesture (pointerdown → startVoice →
+    // startCallStream) — without this the shared AudioContext stays
+    // null on iOS and feedback.ts falls back to a suspended private
+    // ctx. Result: the bridge's first {type:'listening'} envelope
+    // arrives but playFeedback('listening') silently no-ops on iOS.
+    // Symmetric with startMemo/startDictate which already prime.
+    primeAudio(player);
+    // Stop any text-mode TTS playback before the WebRTC peer track
+    // takes over the speaker — otherwise the two compete on the
+    // same audio output.
+    cancelReplyTts();
+    audioSession.prepareForCapture();
     // openCall picks the mode per the user's settings.tts preference at
     // open time — same behavior as the old toolbar mic, just invoked
     // from the composer.
@@ -1870,7 +1935,12 @@ async function boot() {
     // button means pointermove/pointerup route here even when the
     // finger drifts onto the memo bar. Drag LEFT past the trash
     // bounding rect → discard-armed; release in red → discard.
-    const TAP_THRESHOLD_MS = 200;
+    // 200ms originally — too tight for a deliberate "tap" gesture
+    // (natural finger lift takes ~250ms), so a tap that the user
+    // intended as toggle-mode kept finalizing as PTT instead. 350ms
+    // matches the iOS "long press" threshold range and gives borderline
+    // taps room without making true PTT feel laggy.
+    const TAP_THRESHOLD_MS = 350;
 
     type MicState = 'idle' | 'recording' | 'recording_toggle';
     let micState: MicState = 'idle';
@@ -2238,6 +2308,10 @@ async function boot() {
     if (key === 'micCall' && !next && voiceActive()) {
       void stopVoice();
     }
+    // Toggling speak-replies OFF stops any in-flight text-mode TTS so
+    // the user gets immediate silence (otherwise an active mp3 keeps
+    // playing through to its end).
+    if (key === 'tts' && !next) cancelReplyTts();
     // Speak-replies flip during an OPEN call cycles the WebRTC connection
     // into the new mode (talk = TTS audio; stream = STT only) so the user
     // sees the change immediately rather than "next call only". Brief
@@ -2425,69 +2499,220 @@ async function boot() {
     }
   }, true);
 
-  // ── Refresh button (full page reload for standalone PWA) ──
-  // Previously did a transport-rebind which had a confusing mental model
-  // ("why didn't it actually refresh?"). Renamed to "Refresh" + now
-  // does a real location.reload() — same as hitting browser-refresh on
-  // desktop. With the SSE-detach proxy fix, server-side agent runs
-  // outlive the reload, so refreshing mid-conversation no longer kills
-  // an in-flight reply (the next request on the same conversation
-  // chains via previous_response_id and picks up the reply).
+  // ── Refresh button ──
+  // Forces a SW update check + WAITS for the new SW to install before
+  // reloading. iOS PWA suspends the page aggressively, so the periodic
+  // reg.update() polling rarely fires in practice — devices end up stuck
+  // on an old cached SW indefinitely.
+  //
+  // Bug fix 2026-05-01: the previous version called `await reg.update()`
+  // (which resolves on update CHECK initiated, NOT install complete),
+  // then immediately tried `reg.waiting?.postMessage(SKIP_WAITING)` —
+  // but `reg.waiting` is null at that point because the new SW is still
+  // in `installing` state. Then `location.reload()` fired, the page
+  // reloaded under the OLD SW, and the new install (if it succeeded at
+  // all) didn't take over until a SECOND refresh click. With APP_SHELL
+  // drift causing install to fail outright (cache.addAll atomic 404),
+  // it never took over at all — PWA permanently stuck on the last
+  // version with a clean install.
+  //
+  // New flow: update → wait for installing→installed → SKIP_WAITING →
+  // wait for controllerchange (which reloads via the index.html listener)
+  // → fall through to manual reload only if no update happened.
   const btnRefresh = document.getElementById('btn-refresh');
   if (btnRefresh) {
-    btnRefresh.onclick = () => {
+    btnRefresh.onclick = async () => {
       try { void webrtcControls.closeIfOpen(); } catch {}
       try { player.pause(); player.src = ''; player.load(); } catch {}
-      diag('refresh: location.reload()');
-      location.reload();
+
+      // Run keyterms + settings rehydrate in parallel with the SW
+      // update flow — independent work, no need to serialize.
+      const sideEffects = Promise.all([
+        (async () => {
+          try {
+            const km = await import('./keyterms.ts');
+            await km.rehydrateFromSeed();
+          } catch (err) {
+            diag(`refresh: keyterms rehydrate failed: ${(err as Error)?.message ?? err}`);
+          }
+        })(),
+        (async () => {
+          try { await settings.reload(); }
+          catch (err) {
+            diag(`refresh: settings reload failed: ${(err as Error)?.message ?? err}`);
+          }
+        })(),
+      ]);
+
+      let willControllerChangeReload = false;
+      try {
+        const reg = await navigator.serviceWorker?.getRegistration();
+        if (reg) {
+          // Kick off update check. Resolves when the check completes —
+          // a new worker (if any) is now in reg.installing.
+          await reg.update();
+          const newWorker = reg.installing || reg.waiting;
+          if (newWorker && newWorker !== reg.active) {
+            diag(`refresh: new SW detected, state=${newWorker.state}`);
+            willControllerChangeReload = await waitForSwActivation(newWorker, 8000);
+            if (!willControllerChangeReload) {
+              diag('refresh: SW activation timed out — falling back to plain reload');
+            }
+          } else {
+            diag('refresh: no new SW (already on latest)');
+          }
+        }
+      } catch (err) {
+        diag(`refresh: SW update failed: ${(err as Error)?.message ?? err}`);
+      }
+
+      await sideEffects;
+
+      // If a SW activation is in flight, the index.html `controllerchange`
+      // listener will reload us. Don't double-reload (causes a visible
+      // flash). If no activation is happening, manual reload to pick up
+      // keyterms / settings refresh.
+      if (!willControllerChangeReload) {
+        diag('refresh: location.reload()');
+        location.reload();
+      } else {
+        diag('refresh: awaiting controllerchange auto-reload');
+      }
     };
+  }
+
+  // Passive update detector: when the browser's periodic update check
+  // (or the visibilitychange one in index.html) finds a new SW and it
+  // installs into a `waiting` state instead of auto-activating (e.g.
+  // because the OLD SW didn't call clients.claim or skipWaiting), flag
+  // it in the version label so the user knows clicking Refresh will
+  // jump them forward. Without this the only signal is the version
+  // string — and if the user hasn't memorized the latest, they can't
+  // tell they're stale.
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistration().then((reg) => {
+      if (!reg) return;
+      const checkUpdateAvailable = () => {
+        if (reg.waiting && reg.active) {
+          markUpdateAvailable();
+        }
+      };
+      // Initial check: a previous SW may already be sitting in
+      // `waiting` state from a prior visibility-change update tick.
+      checkUpdateAvailable();
+      // updatefound fires whenever reg.installing is set (an update
+      // begins). Track it through to `installed`.
+      reg.addEventListener('updatefound', () => {
+        const installing = reg.installing;
+        if (!installing) return;
+        installing.addEventListener('statechange', () => {
+          if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+            markUpdateAvailable();
+          }
+        });
+      });
+    }).catch(() => {});
   }
 
   log('page loaded, UA:', navigator.userAgent);
 }
 
+/** Wait for a newly-detected SW to install + activate (signaled by a
+ *  `controllerchange` event on the registration). Posts SKIP_WAITING
+ *  on the new worker once it reaches the `installed` state — handles
+ *  the race where the new SW's own install handler may or may not
+ *  call self.skipWaiting() depending on its version.
+ *
+ *  Returns true if controllerchange fired (caller should NOT manually
+ *  reload — index.html's controllerchange listener will), false on
+ *  timeout (caller should reload manually).
+ */
+async function waitForSwActivation(newWorker: ServiceWorker, timeoutMs: number): Promise<boolean> {
+  const postSkipWaitingIfReady = () => {
+    // Only the SW in `waiting` state honors SKIP_WAITING. `installing`
+    // becomes `installed` becomes `waiting` (or `activating` if claim
+    // is in flight). Send to whichever is non-null.
+    if (newWorker.state === 'installed') {
+      newWorker.postMessage({ type: 'SKIP_WAITING' });
+    }
+  };
+  postSkipWaitingIfReady();  // in case it's already installed
+
+  const stateChangeP = new Promise<void>((resolve) => {
+    const onChange = () => {
+      postSkipWaitingIfReady();
+      if (newWorker.state === 'redundant') {
+        // Install failed entirely (rare with the resilient install
+        // handler but possible). Give up gracefully.
+        newWorker.removeEventListener('statechange', onChange);
+        resolve();
+      }
+    };
+    newWorker.addEventListener('statechange', onChange);
+  });
+
+  const controllerChangeP = new Promise<boolean>((resolve) => {
+    const onChange = () => {
+      navigator.serviceWorker.removeEventListener('controllerchange', onChange);
+      resolve(true);
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', onChange);
+  });
+
+  const timeoutP = new Promise<boolean>((resolve) => {
+    setTimeout(() => resolve(false), timeoutMs);
+  });
+
+  // Race controllerchange against the timeout. stateChangeP is just
+  // there to keep firing skip-waiting attempts as the worker progresses.
+  void stateChangeP;
+  return Promise.race([controllerChangeP, timeoutP]);
+}
+
+/** Surface a "new version available" hint in the version label. The
+ *  user clicks Refresh to apply (which triggers the
+ *  installed→activated flip). Idempotent. */
+function markUpdateAvailable(): void {
+  const el = document.getElementById('app-version');
+  if (!el) return;
+  if (el.dataset.updateAvailable === '1') return;
+  el.dataset.updateAvailable = '1';
+  // Append a small hint after the existing version text rather than
+  // overwriting — that way the user can still see which version they're
+  // on AND that an update is waiting.
+  const hint = document.createElement('span');
+  hint.className = 'version-update-hint';
+  hint.textContent = ' · update ready';
+  hint.title = 'Click Refresh to apply';
+  el.appendChild(hint);
+  diag('refresh: update available — added hint to version label');
+}
+
 // ─── Session resume (drawer tap) ────────────────────────────────────────────
 
 /** Replay a transcript into the chat UI after the adapter resumes a session.
- *  Clears current chat, re-renders the messages, and marks history as
- *  loaded so backfillHistory doesn't double-append. */
-/** Fingerprint of the last successful replay. Compared on every call;
- *  if (id × message-count × first/last message ids) is unchanged AND
- *  the same id is already on screen, the transcript already shows this
- *  exact state — skip the chat.clear() + N renderHistoryMessage rebuild
- *  to avoid the flicker that drove drawer-no-flicker phase 2 over
- *  budget. resume() can fire onResumeCb multiple times for the same id
- *  (cache-cb + server-cb when results match; same-id click after a
- *  prior dedup window expires); without this short-circuit the user
- *  sees the transcript blank-and-repaint on every redundant call. */
-let lastReplayFingerprint: string | null = null;
-
-function replayFingerprint(id: string, messages: any[]): string {
-  if (messages.length === 0) return `${id}::0`;
-  const first = messages[0];
-  const last = messages[messages.length - 1];
-  return `${id}::${messages.length}::${first?.id ?? ''}::${last?.id ?? ''}::${last?.content?.length ?? 0}`;
-}
-
+ *  Clears current chat (on a real session switch), re-renders the
+ *  messages, and marks history as loaded so backfillHistory doesn't
+ *  double-append. resume() can fire onResumeCb multiple times for the
+ *  same id (cache-cb + server-cb when results match); when the viewed
+ *  id is unchanged we skip the clear so renderedMessages.upsert can
+ *  reconcile in place without the blank-and-repaint flicker. */
 function replaySessionMessages(
   id: string,
   messages: any[],
   pagination?: { firstId: number | null; hasMore: boolean }
 ) {
-  // Fast path: if the same id is already on-screen with the same
-  // message tuple, skip the rebuild. Catches "click same chat 5x"
-  // and "cache-cb followed by matching server-cb" without dropping
-  // any legitimate update (any change to id, count, or boundary
-  // message ids invalidates the fingerprint).
-  const fingerprint = replayFingerprint(id, messages);
-  if (sessionDrawer.getViewed() === id && fingerprint === lastReplayFingerprint) {
-    return;
+  const viewed = sessionDrawer.getViewed();
+  const sameSession = viewed === id;
+  if (!sameSession) {
+    renderedMessages.clear();
+    // Activity rows belong to the previous chat's transcript; only
+    // clear when actually switching sessions. A same-session resume
+    // (visibility flip, SSE reconnect, post-turn drawer refresh)
+    // would otherwise wipe the just-rendered tool-call summary,
+    // leaving no record of what the agent did.
+    activityRow.clearAll();
   }
-  lastReplayFingerprint = fingerprint;
-  chat.clear();
-  // Tool activity rows are turn-scoped + chat-scoped; resuming a session
-  // wipes the on-screen turn surface, so wipe activity state too.
-  activityRow.clearAll();
   historyLoaded = true;  // we just populated history ourselves; skip backfill
   // Tell the drawer which session is ACTUALLY on screen — covers edge
   // cases where the adapter's conversationName diverges from what the
@@ -2536,11 +2761,48 @@ function renderHistoryMessage(m: any, label: string, mode: 'append' | 'prepend' 
   const rawTs = m.timestamp || m.created_at || m.at;
   const ts = typeof rawTs === 'number' && rawTs < 1e12 ? rawTs * 1000 : rawTs;
   const prepend = mode === 'prepend';
+  // Stamp data-message-id on history-rendered bubbles so a subsequent
+  // SSE re-delivery for the same message can be deduped at the handler
+  // level (see handleReplyDelta / handleReplyFinal). Hermes' /messages
+  // returns `id` matching the SSE envelope `message_id` (see
+  // proxy/sidekick/history.ts → it.id and proxy/sidekick/upstream.ts).
+  const messageId = m.id != null ? String(m.id) : undefined;
   if (m.role === 'assistant') {
     if (NO_REPLY_RE.test(text)) return;
-    chat.addLine(label, text, 'agent', { markdown: true, timestamp: ts, prepend, batch: prepend });
+    if (messageId) {
+      renderedMessages.upsert(messageId, {
+        role: 'assistant',
+        text,
+        status: 'finalized',
+        speaker: label,
+        cls: 'agent',
+        markdown: true,
+        timestamp: ts,
+        prepend,
+        batch: prepend,
+      });
+    } else {
+      chat.addLine(label, text, 'agent', {
+        markdown: true, timestamp: ts, prepend, batch: prepend,
+      });
+    }
   } else if (m.role === 'user') {
-    chat.addLine('You', text, 's0', { timestamp: ts, prepend, batch: prepend });
+    if (messageId) {
+      renderedMessages.upsert(messageId, {
+        role: 'user',
+        text,
+        status: 'finalized',
+        speaker: 'You',
+        cls: 's0',
+        timestamp: ts,
+        prepend,
+        batch: prepend,
+      });
+    } else {
+      chat.addLine('You', text, 's0', {
+        timestamp: ts, prepend, batch: prepend,
+      });
+    }
   }
   // Tool role / system role: skip for now; UI has no slot for them.
 }
@@ -2641,13 +2903,19 @@ async function backfillHistory() {
 
 // ─── Streaming indicator — shows partial text while agent is thinking ────────
 
-let streamingEl = null;
 let streamingIdleTimer = null;
 
 /** Max time we'll leave a "thinking…" / streaming box on screen with no new
  *  events before assuming the reply is stuck. 90s is generous — tool calls
  *  (calendar scans, web fetches) can run long before any text arrives. */
 const STREAMING_IDLE_TIMEOUT_MS = 90_000;
+
+/** Synthetic key under which a pending-thinking bubble is registered in
+ *  the renderedMessages map before any real message_id is known.
+ *  Migrated to the real id on the first reply_delta carrying one. The
+ *  in-flight bubble itself is recovered via renderedMessages.getStreaming()
+ *  — no module-level ref needed. */
+let pendingStreamingKey: string | null = null;
 
 /** Create a tentative "the agent is working on it" bubble. Fired the instant
  *  the user sends a message, BEFORE any backend events arrive. Prevents the
@@ -2662,30 +2930,30 @@ const STREAMING_IDLE_TIMEOUT_MS = 90_000;
 function showThinking() {
   const transcriptEl = document.getElementById('transcript');
   if (!transcriptEl) return;
-  // Defensive: if streamingEl ref got orphaned (DOM wiped by a clear()
-  // elsewhere, or we somehow held a stale reference), drop it before
-  // the guard check so the user still sees a fresh indicator on their
-  // next send.
-  if (streamingEl && !streamingEl.isConnected) streamingEl = null;
-  if (streamingEl) return;  // already showing; don't stack
-  // Also sweep any orphan streaming bubbles that escaped finalization —
-  // rare but observed when an interrupt aborts a stream mid-flight,
-  // leaving the prior bubble in the DOM while streamingEl got nulled by
-  // the subsequent flow. Invariant: at most one streaming bubble visible.
+  if (renderedMessages.getStreaming()) return;  // already showing; don't stack
+  // Sweep any orphan streaming bubbles that escaped the map (e.g. an
+  // interrupt aborted a stream mid-flight without going through
+  // finalize). Invariant: at most one streaming bubble visible.
   transcriptEl.querySelectorAll('.line.streaming').forEach(el => el.remove());
   // Use a temporary replyId so the bubble has a data-reply-id from the
-  // start (needed for dedup / DOM lookup); will be swapped out by the
+  // start (needed for TTS / DOM lookup); will be swapped out by the
   // adapter's real id on first delta.
   const tempId = `r-pending-${Date.now()}`;
-  streamingEl = chat.addLine(getAgentLabel(), '', 'agent streaming pending', {
+  pendingStreamingKey = `pending:${tempId}`;
+  const el = renderedMessages.upsert(pendingStreamingKey, {
+    role: 'assistant',
+    text: '',
+    status: 'streaming',
+    speaker: getAgentLabel(),
+    cls: 'agent streaming pending',
     markdown: true,
     replyId: tempId,
   });
-  if (streamingEl) {
+  if (el) {
     const dots = document.createElement('span');
     dots.className = 'thinking-dots';
     dots.textContent = 'sending…';
-    streamingEl.appendChild(dots);
+    el.appendChild(dots);
   }
   chat.autoScroll();
   if (streamingIdleTimer) clearTimeout(streamingIdleTimer);
@@ -2697,7 +2965,7 @@ function showThinking() {
  *  thinking bubble from "sending…" (optimistic, .pending class) to
  *  "thinking…" / "using <tool>…" (confirmed, bright dots). Fires on
  *  every incremental activity event; we just update the label, the
- *  streamingEl / replyId swap happens in showStreamingIndicator. */
+ *  replyId swap happens in showStreamingIndicator. */
 function handleActivity({ working, detail, conversation }: any) {
   // Drop only for an explicitly DIFFERENT viewed session — null gets
   // through (covers fresh-chat / first-message / boot races).
@@ -2706,9 +2974,10 @@ function handleActivity({ working, detail, conversation }: any) {
   // Q1: typing/working envelope is the agent's first ack — finalize
   // the oldest pending user bubble for this chat.
   if (working) finalizeOldestPending(conversation);
-  if (!streamingEl) return;
-  streamingEl.classList.remove('pending');
-  const dots = streamingEl.querySelector('.thinking-dots');
+  const el = renderedMessages.getStreaming();
+  if (!el) return;
+  el.classList.remove('pending');
+  const dots = el.querySelector('.thinking-dots');
   if (!dots || !working) return;
   if (dots.classList.contains('hidden')) return;  // text already populated
   // Friendly labels for common tools; generic "using X" for anything else.
@@ -2726,41 +2995,66 @@ function handleActivity({ working, detail, conversation }: any) {
 
 /** Show or update the in-flight agent bubble. Called on onDelta events.
  *  If showThinking() already created a tentative bubble, this upgrades it
- *  in place — adopts the real replyId + populates text. Otherwise creates
- *  a fresh bubble (e.g. agent-initiated messages where there was no user
- *  send to trigger the thinking bubble). */
-function showStreamingIndicator(partialText, replyId) {
+ *  in place — migrates the map key to the real message_id, adopts the
+ *  real replyId + populates text. Otherwise creates a fresh bubble
+ *  (e.g. agent-initiated messages where there was no user send to
+ *  trigger the thinking bubble).
+ */
+function showStreamingIndicator(partialText, replyId, messageId?: string | null) {
   const transcriptEl = document.getElementById('transcript');
   if (!transcriptEl) return;
 
-  // Drop the ref if it got orphaned from the DOM (see showThinking).
-  if (streamingEl && !streamingEl.isConnected) streamingEl = null;
+  let el = renderedMessages.getStreaming();
+  // Resolve the renderedMessages key. Prefer the real message_id; fall
+  // back to the pending key if showThinking already minted one and the
+  // adapter hasn't surfaced a message_id yet.
+  const key = messageId || pendingStreamingKey || `live:${replyId}`;
 
-  if (!streamingEl) {
+  if (!el) {
     // Sweep any stragglers before creating a new bubble — one streaming
     // indicator at a time, no exceptions.
-    transcriptEl.querySelectorAll('.line.streaming').forEach(el => el.remove());
-    streamingEl = chat.addLine(getAgentLabel(), partialText || '', 'agent streaming', {
+    transcriptEl.querySelectorAll('.line.streaming').forEach(elt => elt.remove());
+    el = renderedMessages.upsert(key, {
+      role: 'assistant',
+      text: partialText || '',
+      status: 'streaming',
+      speaker: getAgentLabel(),
+      cls: 'agent streaming',
       markdown: true,
       replyId,
     });
-    if (streamingEl) {
+    if (el) {
       const dots = document.createElement('span');
       dots.className = 'thinking-dots';
       dots.textContent = 'thinking…';
       if (partialText) dots.classList.add('hidden');
-      streamingEl.appendChild(dots);
+      el.appendChild(dots);
     }
   } else {
-    // Pending-thinking bubble exists — adopt real id + strip pending class.
-    streamingEl.classList.remove('pending');
-    streamingEl.dataset.replyId = replyId;
+    // Pending-thinking bubble exists — promote it: migrate the map key
+    // to the real message_id, adopt the real reply id, populate text.
+    if (pendingStreamingKey && messageId && pendingStreamingKey !== messageId) {
+      renderedMessages.migrate(pendingStreamingKey, messageId);
+      pendingStreamingKey = null;
+    }
+    el.classList.remove('pending');
     if (partialText) {
-      const textSpan = streamingEl.querySelector('.text');
-      if (textSpan) textSpan.innerHTML = miniMarkdown(partialText);
-      streamingEl.dataset.text = partialText;
-      const dots = streamingEl.querySelector('.thinking-dots');
+      renderedMessages.upsert(key, {
+        role: 'assistant',
+        text: partialText,
+        status: 'streaming',
+        speaker: getAgentLabel(),
+        cls: 'agent streaming',
+        markdown: true,
+        replyId,
+      });
+      const dots = el.querySelector('.thinking-dots');
       if (dots) dots.classList.add('hidden');
+    } else {
+      // No text yet — still update replyId/messageId on the existing
+      // bubble so downstream lookups work.
+      el.dataset.replyId = replyId;
+      if (messageId) el.dataset.messageId = messageId;
     }
   }
   chat.autoScroll();
@@ -2774,26 +3068,54 @@ function showStreamingIndicator(partialText, replyId) {
  *  thinking dots, strip the .streaming class, open links in new tabs.
  *  Returns the bubble element (already in the DOM) or null if no
  *  streaming bubble existed. */
-function finalizeStreamingBubble(finalText) {
+function finalizeStreamingBubble(finalText, messageId?: string | null) {
   if (streamingIdleTimer) { clearTimeout(streamingIdleTimer); streamingIdleTimer = null; }
-  if (!streamingEl) return null;
-  const textSpan = streamingEl.querySelector('.text');
-  if (textSpan) textSpan.innerHTML = miniMarkdown(finalText);
-  streamingEl.dataset.text = finalText;
-  const dots = streamingEl.querySelector('.thinking-dots');
-  if (dots) dots.remove();
-  streamingEl.classList.remove('streaming');
-  streamingEl.querySelectorAll('a').forEach(a => { a.target = '_blank'; a.rel = 'noopener'; });
-  const el = streamingEl;
-  streamingEl = null;
+  const el = renderedMessages.getStreaming();
+  if (!el) return null;
+  // Resolve the map key for this bubble. messageId wins if known; else
+  // fall back to whatever synthetic key the streaming bubble was
+  // registered under.
+  const key = messageId
+    || el.dataset.messageId
+    || pendingStreamingKey
+    || (el.dataset.replyId ? `live:${el.dataset.replyId}` : null);
+  if (key) {
+    if (pendingStreamingKey && messageId && pendingStreamingKey !== messageId) {
+      renderedMessages.migrate(pendingStreamingKey, messageId);
+    }
+    renderedMessages.upsert(key, {
+      role: 'assistant',
+      text: finalText,
+      status: 'finalized',
+      speaker: getAgentLabel(),
+      cls: 'agent',
+      markdown: true,
+      replyId: el.dataset.replyId,
+    });
+  } else {
+    // Defensive fallback: bubble somehow not in the map. Mirror the
+    // original in-place finalize so behavior matches pre-refactor.
+    const textSpan = el.querySelector('.text');
+    if (textSpan) textSpan.innerHTML = miniMarkdown(finalText);
+    el.dataset.text = finalText;
+    const dots = el.querySelector('.thinking-dots');
+    if (dots) dots.remove();
+    el.classList.remove('streaming');
+    el.querySelectorAll('a').forEach(a => { a.target = '_blank'; (a as HTMLAnchorElement).rel = 'noopener'; });
+  }
+  pendingStreamingKey = null;
   return el;
 }
 
 function clearStreamingIndicator() {
   if (streamingIdleTimer) { clearTimeout(streamingIdleTimer); streamingIdleTimer = null; }
-  if (streamingEl) {
-    streamingEl.remove();
-    streamingEl = null;
+  const el = renderedMessages.getStreaming();
+  if (!el) return;
+  if (pendingStreamingKey) {
+    renderedMessages.remove(pendingStreamingKey);
+    pendingStreamingKey = null;
+  } else {
+    el.remove();
   }
 }
 
@@ -2806,7 +3128,7 @@ function attachCardToLatestAgentBubble(card) {
   const bubbles = Array.from(
     el.querySelectorAll('.line.agent[data-reply-id]:not(.streaming)')
   ) as HTMLElement[];
-  const target = bubbles[bubbles.length - 1] || streamingEl;
+  const target = bubbles[bubbles.length - 1] || renderedMessages.getStreaming();
   if (!target) {
     log('attachCard: no agent bubble to attach to — dropping card', card.kind);
     return;
@@ -2839,7 +3161,7 @@ function finalizeOldestPending(conversation: string | null | undefined): void {
   chat.markBubbleFinalized(bubble);
 }
 
-function handleReplyDelta({ replyId, cumulativeText, conversation }: any) {
+function handleReplyDelta({ replyId, cumulativeText, conversation, messageId }: any) {
   if (!cumulativeText) return;
   // Drop deltas only for explicitly off-screen conversations: getViewed()
   // pinned to a DIFFERENT id. When getViewed() is null (boot before
@@ -2850,14 +3172,32 @@ function handleReplyDelta({ replyId, cumulativeText, conversation }: any) {
   // user has no idea they're racing against.
   const viewed = sessionDrawer.getViewed();
   if (viewed && conversation && conversation !== viewed) return;
+  // First-delta-of-turn signal: fire 'send' chime + open the suppress
+  // envelope (drop user transcripts during agent reply). Detected via
+  // renderedMessages.has(messageId) BEFORE upsert runs — first delta
+  // is the one where the map doesn't yet have the id. Replaces the
+  // duplicate path that lived in the data-channel ev.role==='assistant'
+  // branch (now dead). SSE is the single source of assistant events.
+  const isFirstDelta = !!messageId && !renderedMessages.has(messageId);
+  if (isFirstDelta) {
+    try { playFeedback('send'); } catch { /* feedback is best-effort */ }
+  }
+  // Suppress envelope is idempotent — calling onAssistantDelta on every
+  // delta is fine; first call flips state, subsequent calls extend the
+  // tail. See src/pipelines/webrtc/suppress.ts.
+  webrtcSuppress.onAssistantDelta();
   // Q1: agent ack for our optimistic bubble — flip pending → finalized.
   finalizeOldestPending(conversation);
-  showStreamingIndicator(cumulativeText, replyId);
+  // renderedMessages.upsert (called inside showStreamingIndicator) is
+  // idempotent on message_id, so re-delivery from the SSE replay ring
+  // for a message history already rendered just updates the same
+  // bubble in place rather than creating a duplicate.
+  showStreamingIndicator(cumulativeText, replyId, messageId);
 }
 
 /** Complete reply. `content` (if present) is the raw block array used to
  *  pull out image attachments. */
-function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
+function handleReplyFinal({ replyId, text, content = [], conversation, messageId }: any) {
   // A completed turn means hermes has persisted this response to
   // response_store.db (+ state.db/sessions gets the derived entry). If
   // this was the first turn of a brand-new session, the drawer's
@@ -2879,6 +3219,16 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
     return;
   }
 
+  // No bubble-id dedup needed: renderedMessages.upsert is idempotent
+  // on message_id, so a re-delivery for an already-rendered message
+  // updates the same bubble in place rather than creating a duplicate.
+
+  // Suppress envelope close — schedules grace-period drop of user-
+  // transcript suppression. Idempotent (no-op if not currently
+  // suppressing). Mirrors handleReplyDelta's onAssistantDelta call.
+  // Replaces the duplicate path in the data-channel listener.
+  webrtcSuppress.onAssistantFinal();
+
   const imageBlocks = extractImageBlocks(content);
 
   if (NO_REPLY_RE.test(text)) {
@@ -2897,15 +3247,41 @@ function handleReplyFinal({ replyId, text, content = [], conversation }: any) {
   // often empty even when the bubble has streamed content visible
   // on screen — fall back to the streaming bubble's accumulated
   // text in that case.
-  const accumulated = (streamingEl && streamingEl.dataset.text) || '';
+  const streamingBubble = renderedMessages.getStreaming();
+  const accumulated = (streamingBubble && streamingBubble.dataset.text) || '';
   const finalText = text || accumulated;
 
   if (finalText) {
-    let bubble = finalizeStreamingBubble(finalText);
+    let bubble = finalizeStreamingBubble(finalText, messageId);
     if (!bubble) {
-      bubble = chat.addLine(getAgentLabel(), finalText, 'agent', { markdown: true, replyId });
+      // No streaming bubble in flight — adapter sent reply_final
+      // without a preceding delta. Mint a finalized bubble directly
+      // through the rendered-messages map so the same id can dedup
+      // on a subsequent re-delivery.
+      const key = messageId || `live:${replyId}`;
+      bubble = renderedMessages.upsert(key, {
+        role: 'assistant',
+        text: finalText,
+        status: 'finalized',
+        speaker: getAgentLabel(),
+        cls: 'agent',
+        markdown: true,
+        replyId,
+      });
+    } else if (messageId && !bubble.dataset.messageId) {
+      // Streaming bubble was finalized but the messageId wasn't set
+      // earlier (e.g. delta arrived without one, final has it).
+      bubble.dataset.messageId = messageId;
     }
     playFeedback('receive');
+
+    // Speak-replies: when the toggle is on AND we're not in a WebRTC
+    // call (call mode owns audio via its own peer-track TTS), synth
+    // the reply through Deepgram Aura via /tts. Best-effort —
+    // failures log + drop, never blocking bubble rendering.
+    if (settings.get().tts && !webrtcControls.isOpen()) {
+      void playReplyTts(finalText, settings.get().voice);
+    }
 
     try {
       const cards = parseCardsFromText(finalText);

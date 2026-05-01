@@ -119,6 +119,15 @@ async function runBulkDelete(ids: string[]): Promise<void> {
   onClearCb?.();
 }
 
+/** Public entry point for keyboard-triggered bulk delete (cmd/ctrl
+ *  + Backspace from the drawer). Same confirm-then-serial-delete
+ *  semantics as the panel button. No-op if no callback wired or
+ *  ids empty. */
+export function deleteSelected(ids: string[]): Promise<void> {
+  if (ids.length === 0) return Promise.resolve();
+  return runBulkDelete(ids);
+}
+
 function fmtTs(unixSec: number): string {
   // last_active_at on the cached session shape is ISO sometimes,
   // unix-seconds other times depending on which path filled it.

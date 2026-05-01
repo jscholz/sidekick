@@ -53,10 +53,10 @@
  *
  * @property {() => Promise<void>} stopListening
  *
- * @property {(ev: import('../backends/types.js').DeltaEvent) => void} [onBackendDelta]
+ * @property {(ev: import('../proxyClientTypes.js').DeltaEvent) => void} [onBackendDelta]
  *   Classic: feed cumulative text to chunked TTS. Conversational: no-op.
  *
- * @property {(ev: import('../backends/types.js').FinalEvent) => void} [onBackendFinal]
+ * @property {(ev: import('../proxyClientTypes.js').FinalEvent) => void} [onBackendFinal]
  *   Classic: finalize TTS synthesis + cache. Conversational: no-op (the
  *   audio stream IS the reply).
  *

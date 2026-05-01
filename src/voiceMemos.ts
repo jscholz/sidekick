@@ -4,6 +4,8 @@
  * can play back their memos in the chat history.
  */
 
+import { decodeAudioBlob } from './audio/platform.ts';
+
 const DB_NAME = 'sidekick-voice-memos';
 const STORE = 'memos';
 const DB_VERSION = 1;
@@ -95,28 +97,21 @@ export async function clearSent() {
 /** Extract a ~nBars amplitude envelope from an audio blob. Times out after 5s. */
 export async function extractWaveform(blob: Blob, nBars = 40): Promise<Float32Array> {
   const extract = async (): Promise<Float32Array> => {
-    const arrayBuffer = await blob.arrayBuffer();
-    const Ctx = window.AudioContext || (window as any).webkitAudioContext;
-    const ctx = new Ctx();
-    try {
-      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-      const channel = audioBuffer.getChannelData(0);
-      const bucketSize = Math.max(1, Math.floor(channel.length / nBars));
-      const bars = new Float32Array(nBars);
-      for (let i = 0; i < nBars; i++) {
-        let max = 0;
-        const start = i * bucketSize;
-        const end = Math.min(start + bucketSize, channel.length);
-        for (let j = start; j < end; j++) {
-          const v = Math.abs(channel[j]);
-          if (v > max) max = v;
-        }
-        bars[i] = max;
+    const audioBuffer = await decodeAudioBlob(blob);
+    const channel = audioBuffer.getChannelData(0);
+    const bucketSize = Math.max(1, Math.floor(channel.length / nBars));
+    const bars = new Float32Array(nBars);
+    for (let i = 0; i < nBars; i++) {
+      let max = 0;
+      const start = i * bucketSize;
+      const end = Math.min(start + bucketSize, channel.length);
+      for (let j = start; j < end; j++) {
+        const v = Math.abs(channel[j]);
+        if (v > max) max = v;
       }
-      return bars;
-    } finally {
-      try { ctx.close(); } catch {}
+      bars[i] = max;
     }
+    return bars;
   };
   // Race against timeout — decodeAudioData can hang on some browsers/states
   return Promise.race([

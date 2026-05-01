@@ -19,7 +19,7 @@
  */
 
 import { diag } from './util/log.ts';
-import { getAudioCtx } from './ios/audio-unlock.ts';
+import { getSharedAudioCtx } from './audio/platform.ts';
 
 // autoScroll is wired via init(opts.onScroll) so draft doesn't depend
 // on the chat module directly. Keeping the boundary clean lets tests
@@ -59,7 +59,7 @@ let segments = [];
  *  only ever type (no ctxTime → segments are all stamped at 0 →
  *  backfill splice treats them all as equally-recent, appends at end). */
 function nowCtxTime() {
-  return getAudioCtx()?.currentTime ?? 0;
+  return getSharedAudioCtx()?.currentTime ?? 0;
 }
 
 export function init(opts) {

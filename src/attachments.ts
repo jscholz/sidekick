@@ -56,15 +56,18 @@ export function clear() {
 
 export async function add(file) {
   if (!file) return;
-  // Accept images + videos. The gateway currently bundles both as
-  // `{ type: 'image', ... }` which some multimodal models (Gemini,
-  // some Gemma variants) will happily decode as video frames; others
-  // will reject. We keep the client permissive — if the gateway or
-  // model rejects, the user sees it in the reply.
+  // Accept images + videos + PDFs. The gateway currently bundles
+  // images and videos as `{ type: 'image', ... }`; PDFs are rasterized
+  // server-side by the hermes sidekick plugin (per-page PNGs), so by
+  // the time the agent sees them they're back to image content blocks.
+  // Some multimodal models (Gemini, some Gemma variants) decode video
+  // frames; others reject. We keep the client permissive — if the
+  // gateway or model rejects, the user sees it in the reply.
   const isImage = file.type.startsWith('image/');
   const isVideo = file.type.startsWith('video/');
-  if (!isImage && !isVideo) {
-    status.setStatus('Only image and video attachments are supported', 'err');
+  const isPdf = file.type === 'application/pdf';
+  if (!isImage && !isVideo && !isPdf) {
+    status.setStatus('Only image, video, and PDF attachments are supported', 'err');
     return;
   }
   if (file.size > MAX_BYTES) {
@@ -73,11 +76,14 @@ export async function add(file) {
   }
   try {
     const dataUrl = await readAsDataUrl(file);
-    const ext = (file.type.split('/')[1] || (isVideo ? 'mp4' : 'jpg')).split(';')[0];
+    const kindLabel = isVideo ? 'video' : (isPdf ? 'document' : 'image');
+    const ext = isPdf
+      ? 'pdf'
+      : (file.type.split('/')[1] || (isVideo ? 'mp4' : 'jpg')).split(';')[0];
     pending.push({
       dataUrl,
       mimeType: file.type,
-      fileName: file.name || `${isVideo ? 'video' : 'image'}-${Date.now()}.${ext}`,
+      fileName: file.name || `${kindLabel}-${Date.now()}.${ext}`,
       size: file.size,
     });
     renderChips();
@@ -109,8 +115,10 @@ function renderChips() {
     const chip = document.createElement('div');
     chip.className = 'attachment-chip';
     // Video chips show a small silent <video> poster (iOS may not
-    // auto-render frame 1 unless muted+preload=metadata). Image chips
-    // stay as <img>.
+    // auto-render frame 1 unless muted+preload=metadata). PDFs render
+    // as a labelled placeholder — we can't easily preview the first
+    // page client-side without pulling pdf.js, and rasterization
+    // happens server-side anyway. Image chips stay as <img>.
     if (att.mimeType?.startsWith('video/')) {
       const vid = document.createElement('video');
       vid.src = att.dataUrl;
@@ -120,6 +128,13 @@ function renderChips() {
       vid.title = att.fileName;
       chip.appendChild(vid);
       chip.classList.add('chip-video');
+    } else if (att.mimeType === 'application/pdf') {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'chip-pdf-label';
+      placeholder.title = att.fileName;
+      placeholder.textContent = 'PDF';
+      chip.appendChild(placeholder);
+      chip.classList.add('chip-pdf');
     } else {
       const img = document.createElement('img');
       img.src = att.dataUrl;
