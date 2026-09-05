@@ -18,6 +18,7 @@
 		A1B2C3D40000000000000001 /* WebViewDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000002 /* WebViewDelegate.swift */; };
 		A1B2C3D40000000000000003 /* AudioSessionPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000004 /* AudioSessionPlugin.swift */; };
 		A1B2C3D40000000000000005 /* SpeechRecognizerPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000006 /* SpeechRecognizerPlugin.swift */; };
+		A1B2C3D40000000000000007 /* ExternalBrowserPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000008 /* ExternalBrowserPlugin.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +35,7 @@
 		A1B2C3D40000000000000002 /* WebViewDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewDelegate.swift; sourceTree = "<group>"; };
 		A1B2C3D40000000000000004 /* AudioSessionPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionPlugin.swift; sourceTree = "<group>"; };
 		A1B2C3D40000000000000006 /* SpeechRecognizerPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechRecognizerPlugin.swift; sourceTree = "<group>"; };
+		A1B2C3D40000000000000008 /* ExternalBrowserPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExternalBrowserPlugin.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -73,6 +75,7 @@
 				A1B2C3D40000000000000002 /* WebViewDelegate.swift */,
 				A1B2C3D40000000000000004 /* AudioSessionPlugin.swift */,
 				A1B2C3D40000000000000006 /* SpeechRecognizerPlugin.swift */,
+				A1B2C3D40000000000000008 /* ExternalBrowserPlugin.swift */,
 				504EC30B1FED79650016851F /* Main.storyboard */,
 				504EC30E1FED79650016851F /* Assets.xcassets */,
 				504EC3101FED79650016851F /* LaunchScreen.storyboard */,
@@ -168,6 +171,7 @@
 				A1B2C3D40000000000000001 /* WebViewDelegate.swift in Sources */,
 				A1B2C3D40000000000000003 /* AudioSessionPlugin.swift in Sources */,
 				A1B2C3D40000000000000005 /* SpeechRecognizerPlugin.swift in Sources */,
+				A1B2C3D40000000000000007 /* ExternalBrowserPlugin.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

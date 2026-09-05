@@ -9,15 +9,24 @@
  * links the agent provides in the transcript, nothing opens").
  *
  * Fix: one delegated click listener, native shell only. Anchors whose
- * href is http(s) and not our own origin are opened through the
- * `@capacitor/browser` plugin (SFSafariViewController sheet with a Done
- * button, so the user lands back in the chat). Same-origin links (`?msg=`
- * drills, hash anchors) and non-http schemes (mailto:, tel:) are left to
- * the web view, which already handles them.
+ * href is http(s) and not our own origin are opened by, in order:
+ *
+ *  1. the custom `ExternalBrowser` native plugin (mobile/ios/App/App/
+ *     ExternalBrowserPlugin.swift) — `UIApplication.shared.open()`, which
+ *     hands the URL to the OS's registered default browser (Chrome, Edge,
+ *     etc. as of iOS 14+). This is the one he actually wants: he asked
+ *     2026-09-06 whether a tap would honor his default browser or always
+ *     open Safari.
+ *  2. `@capacitor/browser` (SFSafariViewController — always Safari's
+ *     engine, ignores the default-browser setting) if the native plugin
+ *     is missing (app not yet rebuilt with it).
+ *
+ * Same-origin links (`?msg=` drills, hash anchors) and non-http schemes
+ * (mailto:, tel:) are left to the web view, which already handles them.
  *
  * Runtime access is via the injected `window.Capacitor.Plugins` global
  * (same pattern as speechRecognizer.ts / notifications/native.ts) so the
- * PWA bundle carries no import of the plugin.
+ * PWA bundle carries no import of either plugin.
  */
 
 import { log } from '../util/log.ts';
@@ -42,13 +51,25 @@ export function externalLinkTarget(href: string | null | undefined, currentOrigi
   return url.toString();
 }
 
-function browserPlugin(): any {
+function nativePlugin(name: string): any {
   const cap = (window as any).Capacitor;
-  return cap?.Plugins?.Browser ?? (typeof cap?.registerPlugin === 'function' ? cap.registerPlugin('Browser') : null);
+  return cap?.Plugins?.[name] ?? (typeof cap?.registerPlugin === 'function' ? cap.registerPlugin(name) : null);
 }
 
 export async function openExternal(url: string): Promise<boolean> {
-  const browser = browserPlugin();
+  const externalBrowser = nativePlugin('ExternalBrowser');
+  if (externalBrowser && typeof externalBrowser.open === 'function') {
+    try {
+      await externalBrowser.open({ url });
+      return true;
+    } catch (e) {
+      log(`[external-links] ExternalBrowser.open failed, falling back to in-app sheet: ${(e as Error)?.message || e}`);
+    }
+  }
+  // Older build without the native plugin yet — the in-app Safari sheet
+  // beats a dead tap even though it can't honor the default-browser
+  // setting.
+  const browser = nativePlugin('Browser');
   if (browser && typeof browser.open === 'function') {
     try {
       await browser.open({ url, presentationStyle: 'popover' });
@@ -57,15 +78,13 @@ export async function openExternal(url: string): Promise<boolean> {
       log(`[external-links] Browser.open failed: ${(e as Error)?.message || e}`);
     }
   }
-  // Last resort: a plain top-level navigation still beats a dead tap.
-  // (Capacitor's decidePolicyFor hands off-origin navigations to the
-  // system browser when the host isn't in allowNavigation.)
-  try {
-    window.location.href = url;
-    return true;
-  } catch {
-    return false;
-  }
+  // Neither plugin is available. NOT falling back to
+  // `window.location.href`: allowNavigation is '*' (capacitor.config.ts),
+  // so that would navigate the app's OWN web view to the external site
+  // instead of handing off, stranding the user outside the chat with no
+  // way back — worse than the dead tap this function exists to fix.
+  log(`[external-links] no way to open ${url} — neither ExternalBrowser nor Browser plugin available`);
+  return false;
 }
 
 let installed = false;
@@ -85,5 +104,5 @@ export function installExternalLinkHandler(): void {
     e.stopPropagation();
     void openExternal(url);
   }, true);
-  log('[external-links] native shell: routing off-origin links through Browser.open');
+  log('[external-links] native shell: routing off-origin links to the default browser');
 }
