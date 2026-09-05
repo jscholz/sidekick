@@ -62,6 +62,7 @@ import { getCaptureState } from './capture/recorder.ts';
 import { initTranscriptHighlight } from './transcriptHighlight.ts';
 import * as inAppBanner from './notifications/inAppBanner.ts';
 import * as approvalActions from './notifications/approvalActions.ts';
+import { installExternalLinkHandler } from './native/externalLinks.ts';
 import * as activityStore from './notifications/activityStore.ts';
 import { attachSliderTouchAll } from './sliderTouch.ts';
 import { createDrawer } from './Drawer.ts';
@@ -1179,6 +1180,9 @@ async function boot() {
     onOpen: (chatId, msgId) => { void drillToChatMessage(chatId, msgId); },
     onAction: (chatId, action, msgId) => { void sendApprovalAction(chatId, action, msgId); },
   });
+  // Capacitor shell: target=_blank anchors are dead in WKWebView — hand
+  // off-origin links to the native Browser sheet. No-op in the PWA.
+  installExternalLinkHandler();
   // Transcript approval cards fire through the registry (the reconciler
   // can't import the shell). A card whose tray record lost its chat id
   // falls back to the chat on screen — the card is rendered inside it.
