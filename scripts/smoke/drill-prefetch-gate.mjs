@@ -219,7 +219,14 @@ export default async function run({ page, log }) {
   for (const p of prefetches) {
     for (const f of foregrounds) {
       const fEnd = f.end ?? Infinity;
-      const startedDuringForeground = p.start >= f.start && p.start <= fEnd;
+      // Half-open [start, end): the gate releases prefetch the moment the
+      // foreground read completes, and both stamps are whole ms from the
+      // same clock — a prefetch that starts in the SAME ms the foreground
+      // ended is "after", not "during". The inclusive form flaked ~1 in 3
+      // on both a pre-change and post-change tree (2026-09-05), always
+      // with p.start === fEnd. Matches the `>= drillEnd` deferral check
+      // below, which already counts a same-ms start as deferred.
+      const startedDuringForeground = p.start >= f.start && p.start < fEnd;
       assert(!startedDuringForeground,
         `gate violated: prefetch ${p.chatId} started at +${p.start} during foreground ${f.kind} [${f.start}..${fEnd}]`);
     }

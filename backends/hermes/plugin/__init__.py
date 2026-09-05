@@ -1918,7 +1918,7 @@ class ParleyAdapter(BasePlatformAdapter):
         if self._turn_buffer is not None:
             try:
                 self._turn_buffer.observe_envelope(env)
-                if env_type == "reply_final" and chat_id:
+                if env_type == "reply_final" and chat_id and not env.get("interim"):
                     closed_turn_entry = self._turn_buffer.close_turn(chat_id)
             except Exception as exc:
                 logger.warning("[parley] turn buffer observe failed: %s", exc)
@@ -2337,7 +2337,7 @@ class ParleyAdapter(BasePlatformAdapter):
         wire: the message_id we return here is what the proxy keys the
         UI bubble on.
         """
-        from .parley_dispatcher import is_approval_prompt
+        from .parley_dispatcher import is_approval_prompt, is_progress_heartbeat
         from .parley_route_conversations import is_chat_deleted
 
         # Late output for a chat the user DELETED mid-turn: drop it.
@@ -2413,7 +2413,43 @@ class ParleyAdapter(BasePlatformAdapter):
             ok = await self._safe_send_envelope(env)
             return SendResult(success=ok, message_id=env.get("parley_id") or "")
 
-        message_id = self._next_message_id(chat_id)
+        # Mid-turn plumbing from the gateway (run_turn.py): the progress
+        # heartbeat ("⏳ Working — N min — iteration i/n, tool") and the
+        # inactivity warning arrive through send() because we deliberately
+        # don't implement edit_message. Both carry the gateway's
+        # `_interim_send` metadata marker; the agent's own holding replies
+        # (run_turn_runner._send_status_text) do NOT.
+        #
+        # Heartbeats are a pulse, not conversation: emit them as an
+        # ephemeral `status` envelope keyed per chat (the PWA renders a
+        # working indicator, never a bubble; the proxy never pushes it).
+        # Returning the status id as message_id makes the gateway's next
+        # edit_message attempt target it, which we reject, so it falls
+        # back to send() and we land here again — same key, text replaced.
+        interim = bool(metadata and metadata.get("_interim_send"))
+        if is_progress_heartbeat(content or ""):
+            status_id = f"status_{chat_id}"
+            ok = await self._safe_send_envelope({
+                "type": "status",
+                "chat_id": chat_id,
+                "message_id": status_id,
+                "text": content,
+                "state": "working",
+                "should_push": False,
+                "ts": int(time.time() * 1000),
+            })
+            return SendResult(success=ok, message_id=status_id)
+
+        # One bubble per send. The /v1/responses route reserves the turn's
+        # msg_* id so the OAI item id and the Parley envelope id agree —
+        # but every send() in the turn used to return that SAME id, so a
+        # holding reply, then the real reply, then anything else all
+        # edited one bubble and the earlier text vanished (field
+        # 2026-09-05). Consume the reservation on first use; later sends
+        # in the turn mint their own id. Interim advisories never take
+        # the reservation at all — the OAI item id belongs to a reply.
+        message_id = self._next_message_id(None if interim else chat_id)
+        self._release_response_message_id(chat_id, message_id)
         # Surface a session_changed envelope the first time we ever see this
         # chat_id outbound. Today the gateway resolves session_id internally
         # so we don't have a stable session_id to surface; emit the chat_id
@@ -2422,17 +2458,22 @@ class ParleyAdapter(BasePlatformAdapter):
         if chat_id not in self._known_chat_ids:
             self._known_chat_ids.add(chat_id)
 
-        ok = await self._safe_send_envelope(
-            {
-                "type": "reply_delta",
-                "chat_id": chat_id,
-                "text": content,
-                "message_id": message_id,
-            }
-        )
-        await self._safe_send_envelope(
-            {"type": "reply_final", "chat_id": chat_id, "message_id": message_id}
-        )
+        delta: Dict[str, Any] = {
+            "type": "reply_delta",
+            "chat_id": chat_id,
+            "text": content,
+            "message_id": message_id,
+        }
+        final: Dict[str, Any] = {
+            "type": "reply_final", "chat_id": chat_id, "message_id": message_id,
+        }
+        if interim:
+            # Tells the PWA this bubble does not end the turn (keep the
+            # working indicator; don't treat it as "agent moved on").
+            delta["interim"] = True
+            final["interim"] = True
+        ok = await self._safe_send_envelope(delta)
+        await self._safe_send_envelope(final)
         return SendResult(success=ok, message_id=message_id)
 
     # NOTE: We deliberately DO NOT override edit_message. The base class

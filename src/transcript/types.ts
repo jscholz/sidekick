@@ -49,6 +49,10 @@ export interface ChatState {
    *  `user_message` envelope to land in `inflight` (which dedups by
    *  message_id). On reply_final or timeout, the row clears. */
   pendingSends: PendingSend[];
+  /** Latest `status` envelope for the chat (heartbeat text + arrival
+   *  time). Cleared by a turn-ending reply_final. Optional so partial
+   *  states in tests/fixtures stay valid. */
+  turnStatus?: { text: string; at: number } | null;
   /** Most-recent pagination cursors from the items endpoint. Used by the
    *  load-earlier / load-later paths; not consumed by the projection
    *  itself. `firstId`/`hasMore` page OLDER (toward the head); `lastId`/
@@ -147,11 +151,16 @@ export interface ConversationItem {
  * without a circular dep through the proxy layer.
  */
 export type ParleyEnvelope =
-  | { type: 'reply_delta'; chat_id: string; text: string; message_id: string; edit?: boolean }
-  | { type: 'reply_final'; chat_id: string; message_id: string; text?: string }
+  | { type: 'reply_delta'; chat_id: string; text: string; message_id: string; edit?: boolean; interim?: boolean }
+  | { type: 'reply_final'; chat_id: string; message_id: string; text?: string; interim?: boolean }
   | { type: 'tool_call'; chat_id: string; call_id: string; tool_name: string; args: unknown; started_at?: string }
   | { type: 'tool_result'; chat_id: string; call_id: string; tool_name: string; result: unknown; duration_ms?: number }
   | { type: 'typing'; chat_id: string }
+  /** Ephemeral working indicator. The hermes plugin converts the gateway's
+   *  "⏳ Working — N min — iteration i/n, tool" heartbeat into this (keyed
+   *  `status_<chat>`), so it renders as the turn-status line, never a
+   *  bubble. Not persisted; ignored on ring replay. */
+  | { type: 'status'; chat_id: string; message_id?: string; text?: string; state?: 'working' | 'done'; ts?: number }
   | { type: 'image'; chat_id: string; url: string; caption?: string }
   | { type: 'notification'; chat_id: string; kind: string; content: string; parley_id?: string }
   | { type: 'session_changed'; chat_id: string; session_id: string; title: string }
@@ -175,7 +184,19 @@ export type BubbleSpec =
   | ActivityRowSpec
   | GapBubbleSpec
   | SystemLineSpec
-  | MemoCardSpec;
+  | MemoCardSpec
+  | TurnStatusSpec;
+
+/** "Agent is working" line pinned to the bottom of the transcript while a
+ *  turn is in flight (live send not yet answered, an open activity row, or
+ *  a fresh heartbeat). `text` is the human label ("Thinking", "Working ·
+ *  3 min · iteration 4/60 · terminal"). Exactly one per chat, fixed key. */
+export interface TurnStatusSpec {
+  kind: 'turnStatus';
+  key: string;
+  timestamp: number;
+  text: string;
+}
 
 /** A client-only system line ("New chat started", "Model: …"). Derived
  *  from ChatState.decorations — reconciler-owned DOM, unlike the legacy

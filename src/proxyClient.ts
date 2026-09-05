@@ -46,6 +46,7 @@ import { log, diag } from './util/log.ts';
 import { apiOrigin } from './apiBase.ts';
 import * as conversations from './conversations.ts';
 import * as sessionCache from './sessionCache.ts';
+import * as transcriptStore from './transcript/store.ts';
 import { markRecentlyDeleted, isRecentlyDeleted } from './sessionOps.ts';
 
 let subs: any = null;
@@ -391,6 +392,9 @@ function startStreamChannel(): void {
     handleEnvelope(type, env, chatId);
   };
   for (const t of ['reply_delta', 'reply_final', 'image', 'typing',
+                   // Ephemeral working indicator (plugin-converted
+                   // gateway heartbeat) — see handleEnvelope 'status'.
+                   'status',
                    'notification', 'session_changed', 'error',
                    'tool_call', 'tool_result', 'user_message',
                    // Cross-device SSOT sync envelopes. The proxy
@@ -705,6 +709,18 @@ function handleEnvelope(type: string, env: any, chatId: string): void {
       subs?.onActivity?.({ working: true, detail: 'pending', conversation: chatId });
       return;
 
+    case 'status': {
+      // Ephemeral working indicator (plugin-converted gateway heartbeat).
+      // Never render on ring replay — a stale beat would show a dead
+      // turn as working.
+      if (env?._replay === true) return;
+      const text = typeof env.text === 'string' ? env.text : '';
+      const working = env.state !== 'done';
+      transcriptStore.setTurnStatus(chatId, working ? (text || 'Working') : null);
+      subs?.onActivity?.({ working, detail: text || 'working', conversation: chatId });
+      return;
+    }
+
     case 'reply_delta': {
       const text = typeof env.text === 'string' ? env.text : '';
       if (!text) return;
@@ -724,7 +740,7 @@ function handleEnvelope(type: string, env: any, chatId: string): void {
       // with recent activity (without isReplay, the 'send' chime fires
       // on every switch into a chat with in-flight activity because
       // handleReplyDelta sees replay envelopes as "first delta").
-      subs?.onDelta?.({ replyId, cumulativeText: text, conversation: chatId, messageId: msgId, isReplay });
+      subs?.onDelta?.({ replyId, cumulativeText: text, conversation: chatId, messageId: msgId, isReplay, interim: env?.interim === true });
       return;
     }
 
@@ -740,7 +756,7 @@ function handleEnvelope(type: string, env: any, chatId: string): void {
       // back on. The shell's two-state thinking indicator can flicker
       // briefly between bubbles — acceptable.
       subs?.onActivity?.({ working: false, conversation: chatId });
-      subs?.onFinal?.({ replyId, text: finalText, conversation: chatId, messageId: msgId, isReplay });
+      subs?.onFinal?.({ replyId, text: finalText, conversation: chatId, messageId: msgId, isReplay, interim: env?.interim === true });
       // Bump last_message_at so the drawer sort surfaces this row even
       // before /api/parley/sessions enrichment refreshes.
       // NOT on replay: server replays past envelopes on stream

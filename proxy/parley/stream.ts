@@ -78,6 +78,10 @@ type Envelope = Record<string, unknown> & { type: string; chat_id?: string };
 const FANOUT_TYPES = new Set<string>([
   'reply_delta',
   'reply_final',
+  // Ephemeral per-chat working indicator (plugin turns the gateway's
+  // "⏳ Working — …" heartbeat into this instead of a bubble). Fans out
+  // like typing; never push-eligible (plugin stamps should_push=false).
+  'status',
   'image',
   'typing',
   'notification',

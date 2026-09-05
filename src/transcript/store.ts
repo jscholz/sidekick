@@ -34,6 +34,7 @@ function emptyChatState(): ChatState {
     pendingSends: [],
     pagination: { firstId: null, hasMore: false, lastId: null, hasMoreNewer: false },
     decorations: [],
+    turnStatus: null,
   };
 }
 
@@ -470,6 +471,21 @@ export function setInflight(chatId: string, envelopes: ParleyEnvelope[]): void {
 export function appendInflight(chatId: string, env: ParleyEnvelope): void {
   const s = getState(chatId);
   s.inflight.push(env);
+  // A turn-ending final retires the working indicator; an interim
+  // advisory (inactivity warning) does not.
+  if (env.type === 'reply_final' && !env.interim) s.turnStatus = null;
+  notify(chatId);
+}
+
+/** Record (or clear, with null) the chat's live heartbeat text — the
+ *  `status` envelope the hermes plugin derives from the gateway's
+ *  "⏳ Working — …" pulse. The projection turns it into the turn-status
+ *  line at the bottom of the transcript. */
+export function setTurnStatus(chatId: string, text: string | null): void {
+  const s = getState(chatId);
+  const next = text ? { text, at: Date.now() } : null;
+  if (!next && !s.turnStatus) return;
+  s.turnStatus = next;
   notify(chatId);
 }
 

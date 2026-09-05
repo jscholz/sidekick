@@ -52,6 +52,9 @@ test('progress heartbeats are detected (and suppressed from push)', () => {
   assert.ok(isProgressHeartbeat('⏳ Still working... (3 min elapsed — iteration 15/60, receiving stream response)'));
   // Structural fallback if the emoji is stripped somewhere upstream.
   assert.ok(isProgressHeartbeat('Still working (6 min elapsed — iteration 14/60, running: terminal)'));
+  // hermes 0.21 shape.
+  assert.ok(isProgressHeartbeat('⏳ Working — 3 min — iteration 4/60, terminal'));
+  assert.ok(isProgressHeartbeat('⏳ Working — 1 min'));
 });
 
 test('real replies and approvals are NOT treated as heartbeats', () => {

@@ -186,6 +186,20 @@ _APPROVAL_REASON_RE = re.compile(r"^Reason:\s*(.+)$", re.IGNORECASE | re.MULTILI
 _APPROVAL_REPLY_RE = re.compile(r"^Reply\s+/approve", re.IGNORECASE | re.MULTILINE)
 
 
+# Gateway progress heartbeat, emitted every _NOTIFY_INTERVAL of a long turn
+# (hermes 0.21: "⏳ Working — 3 min — iteration 4/60, terminal"; pre-0.21:
+# "⏳ Still working… (3 min elapsed — iteration 4/60, …)"). A pulse, not a
+# reply — send() turns it into an ephemeral `status` envelope instead of a
+# bubble. KEEP IN SYNC with src/util/progressHeartbeat.ts and
+# proxy/parley/notifications/dispatch.ts isProgressHeartbeat.
+_PROGRESS_HEARTBEAT_RE = re.compile(r"^\s*⏳\s*(Working|Still working)\b", re.IGNORECASE)
+
+
+def is_progress_heartbeat(text: str) -> bool:
+    """True for the gateway's mid-turn "⏳ Working — …" progress pulse."""
+    return bool(isinstance(text, str) and _PROGRESS_HEARTBEAT_RE.search(text or ""))
+
+
 def is_approval_prompt(text: str) -> bool:
     """True when Hermes is asking the user to approve a gated command."""
     return bool(isinstance(text, str) and _APPROVAL_HEADER_RE.search(text or ""))

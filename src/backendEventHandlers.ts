@@ -73,7 +73,7 @@ function attachCardToLatestAgentBubble(card) {
  *  defensively filter them here. With per-turn replay machinery gutted,
  *  the bubble is purely a text surface: TTS is owned by the WebRTC
  *  talk-mode track on the server side and arrives as audio independently. */
-export function handleReplyDelta({ replyId, cumulativeText, conversation, messageId, isReplay = false }: any) {
+export function handleReplyDelta({ replyId, cumulativeText, conversation, messageId, isReplay = false, interim = false }: any) {
   if (!cumulativeText) return;
   // Always store the envelope — even for background chats, so a
   // future switch-back finds the streamed text already there.
@@ -84,6 +84,7 @@ export function handleReplyDelta({ replyId, cumulativeText, conversation, messag
       message_id: messageId,
       text: cumulativeText,
       edit: true,
+      ...(interim ? { interim: true } : {}),
     });
     // Unread badge: one live reply = one unread, deduped by message_id
     // inside noteLiveMessage (also gated there on viewed chat + pinned).
@@ -224,15 +225,17 @@ function schedulePostFinalDurableRefresh(
 
 /** Complete reply. `content` (if present) is the raw block array used to
  *  pull out image attachments. */
-export function handleReplyFinal({ replyId, text, content = [], conversation, messageId, isReplay = false }: any) {
+export function handleReplyFinal({ replyId, text, content = [], conversation, messageId, isReplay = false, interim = false }: any) {
   sessionDrawer.scheduleRefresh();
   // Auto-resolve any pending approval for this chat — but ONLY when this
   // is a REAL reply, not a "⏳ Still working…" heartbeat. Heartbeats fire
   // every iteration of a long autonomous turn (one per ~3 min); without
   // the gate, the first heartbeat after an approval landed would delete
   // the approval row from the tray. A real reply means
-  // the agent moved past the approval point, so mark 'dismissed'.
-  if (!isReplay && conversation) {
+  // the agent moved past the approval point, so mark 'dismissed'. An
+  // `interim` final (gateway inactivity warning) is likewise not the
+  // agent moving on.
+  if (!isReplay && !interim && conversation) {
     // Heartbeat detection: real hermes typically streams the body via
     // reply_delta and emits reply_final with EMPTY text (final = done
     // signal, not body carrier). So `text` from this envelope is often
@@ -280,6 +283,7 @@ export function handleReplyFinal({ replyId, text, content = [], conversation, me
       chat_id: conversation,
       message_id: messageId,
       text: text || undefined,
+      ...(interim ? { interim: true } : {}),
     });
     // Final-only replies (no preceding delta) still count as one unread;
     // delta-then-final dedups via noteLiveMessage's per-id set.

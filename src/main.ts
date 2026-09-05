@@ -61,6 +61,7 @@ import { initMeetingsIndex } from './capture/meetingsIndex.ts';
 import { getCaptureState } from './capture/recorder.ts';
 import { initTranscriptHighlight } from './transcriptHighlight.ts';
 import * as inAppBanner from './notifications/inAppBanner.ts';
+import * as approvalActions from './notifications/approvalActions.ts';
 import * as activityStore from './notifications/activityStore.ts';
 import { attachSliderTouchAll } from './sliderTouch.ts';
 import { createDrawer } from './Drawer.ts';
@@ -1177,6 +1178,14 @@ async function boot() {
   inAppBanner.init({
     onOpen: (chatId, msgId) => { void drillToChatMessage(chatId, msgId); },
     onAction: (chatId, action, msgId) => { void sendApprovalAction(chatId, action, msgId); },
+  });
+  // Transcript approval cards fire through the registry (the reconciler
+  // can't import the shell). A card whose tray record lost its chat id
+  // falls back to the chat on screen — the card is rendered inside it.
+  approvalActions.setApprovalActionHandler((chatId, action, msgId) => {
+    const cid = chatId || switchCtl.focusedId() || null;
+    if (!cid) { status.setStatus('No chat to send the approval to', 'err'); return; }
+    void sendApprovalAction(cid, action, msgId);
   });
   // Sidebar-top search button → opens the cmd+K palette. Lives next to
   // the hamburger as the rightmost icon in .sidebar-top-row (Gemini-style

@@ -31,7 +31,12 @@ import { getAgentLabel } from '../config.ts';
 import { applyBubbleState as applyReplyPlayerState } from '../audio/turn-based/replyPlayer.ts';
 import { rehydrateCards, ensureHistoricalCards } from '../cards/attach.ts';
 import * as memoCardMod from '../memoCard.ts';
-import type { ActivityRowSpec, ActivityTool, AssistantBubbleSpec, BubbleSpec, GapBubbleSpec, MemoCardSpec, NotificationBubbleSpec, SystemLineSpec, UserBubbleSpec } from './types.ts';
+import * as activityStore from '../notifications/activityStore.ts';
+import { parseApprovalPrompt } from '../notifications/approvalText.ts';
+import {
+  APPROVAL_ACTION_LABELS, APPROVAL_RESOLUTION_LABELS, sendApprovalAction,
+} from '../notifications/approvalActions.ts';
+import type { TurnStatusSpec, ActivityRowSpec, ActivityTool, AssistantBubbleSpec, BubbleSpec, GapBubbleSpec, MemoCardSpec, NotificationBubbleSpec, SystemLineSpec, UserBubbleSpec } from './types.ts';
 
 const KEY_ATTR = 'data-key';
 
@@ -185,7 +190,32 @@ function createForSpec(spec: BubbleSpec, batch: boolean): HTMLElement | null {
     case 'gap':        return createGap(spec);
     case 'systemLine': return createSystemLine(spec);
     case 'memoCard':   return createMemoCard(spec);
+    case 'turnStatus': return createTurnStatus(spec);
   }
+}
+
+/** Bottom-pinned "agent is working" line: three pulsing dots + a label
+ *  ("Thinking", or the parsed heartbeat). A `.line.system` row so it's
+ *  never mistaken for an agent bubble by caret/pin/first-reply logic. */
+function createTurnStatus(spec: TurnStatusSpec): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'line system turn-status';
+  el.setAttribute('role', 'status');
+  el.setAttribute('aria-live', 'polite');
+  const dots = document.createElement('span');
+  dots.className = 'thinking-dots';
+  dots.innerHTML = '<span></span><span></span><span></span>';
+  const text = document.createElement('span');
+  text.className = 'turn-status-text';
+  el.appendChild(dots);
+  el.appendChild(text);
+  updateTurnStatus(el, spec);
+  return el;
+}
+
+function updateTurnStatus(el: HTMLElement, spec: TurnStatusSpec): void {
+  const text = el.querySelector('.turn-status-text');
+  if (text && text.textContent !== spec.text) text.textContent = spec.text;
 }
 
 /** Reconciler-owned memo card (writer migration 2026-07-13). The
@@ -288,8 +318,159 @@ function createNotification(spec: NotificationBubbleSpec, batch: boolean): HTMLE
     messageId: spec.key,
     batch,
   }) || null;
-  if (el) applyNotificationKindClass(el, spec.notificationKind || 'notification');
+  if (el) {
+    applyNotificationKindClass(el, spec.notificationKind || 'notification');
+    if (spec.notificationKind === 'approval') renderApprovalCard(el, spec);
+  }
   return el;
+}
+
+// ── Approval card ──────────────────────────────────────────
+// The hermes approval prompt used to render as a plain markdown
+// notification: a "⚠️ approval" speaker line, then the body's own
+// "⚠️ Dangerous command requires approval:" header, the full command,
+// the reason, and the "Reply /approve …" instructions — two stacked
+// triangles, lots of dead space, nothing clickable, and no way to tell
+// it had been approved from the Activity tray (field 2026-09-05). Now:
+// ONE warning line (the speaker), the reason, the command collapsed by
+// default, and a footer that is either Approve / Approve session / Deny
+// or the outcome pill. State comes from the Activity store (the same
+// record the tray renders), so approving anywhere flips the card.
+
+const APPROVAL_SPEAKER = '⚠️ Dangerous command requires approval';
+const APPROVAL_PEEK_MAX = 72;
+
+function approvalItemFor(key: string): activityStore.ActivityItem | null {
+  if (!key) return null;
+  for (const item of activityStore.listActivity()) {
+    if (item.kind !== 'approval') continue;
+    if (item.id === key || item.messageId === key) return item;
+  }
+  return null;
+}
+
+function renderApprovalCard(el: HTMLElement, spec: NotificationBubbleSpec): void {
+  const speaker = el.querySelector('.speaker') as HTMLElement | null;
+  if (speaker && speaker.textContent !== APPROVAL_SPEAKER) speaker.textContent = APPROVAL_SPEAKER;
+  const text = el.querySelector('.text') as HTMLElement | null;
+  if (!text) return;
+  el.dataset.approvalKey = spec.key;
+  if (text.dataset.approvalRendered !== spec.key) {
+    text.dataset.approvalRendered = spec.key;
+    text.innerHTML = '';
+    const { command, reason } = parseApprovalPrompt(spec.text);
+    const card = document.createElement('div');
+    card.className = 'approval-card';
+    if (reason) {
+      const r = document.createElement('div');
+      r.className = 'approval-reason';
+      r.textContent = reason;
+      card.appendChild(r);
+    }
+    if (command) {
+      const det = document.createElement('details');
+      det.className = 'approval-command';
+      const sum = document.createElement('summary');
+      const label = document.createElement('span');
+      label.className = 'approval-command-label';
+      label.textContent = 'Command';
+      const peek = document.createElement('code');
+      peek.className = 'approval-command-peek';
+      const lines = command.split('\n').filter(l => l.trim());
+      let first = lines[0] || '';
+      if (first.length > APPROVAL_PEEK_MAX) first = first.slice(0, APPROVAL_PEEK_MAX - 1) + '…';
+      peek.textContent = lines.length > 1 ? `${first}  +${lines.length - 1} more` : first;
+      sum.appendChild(label);
+      sum.appendChild(peek);
+      const full = document.createElement('pre');
+      full.className = 'approval-command-full';
+      full.textContent = command;
+      det.appendChild(sum);
+      det.appendChild(full);
+      // Clicks inside the card must not bubble to bubble-level handlers
+      // (caret / select-on-click) — the summary toggle is the intent.
+      det.addEventListener('click', (e) => e.stopPropagation());
+      card.appendChild(det);
+    } else if (!reason) {
+      // Unrecognised shape — keep the body readable rather than blank.
+      const body = document.createElement('div');
+      body.className = 'approval-body';
+      body.innerHTML = renderNotificationHtml(spec.text);
+      card.appendChild(body);
+    }
+    const foot = document.createElement('div');
+    foot.className = 'approval-foot';
+    card.appendChild(foot);
+    text.appendChild(card);
+  }
+  applyApprovalState(el);
+}
+
+function applyApprovalState(el: HTMLElement): void {
+  const key = el.dataset.approvalKey || el.getAttribute(KEY_ATTR) || '';
+  const item = approvalItemFor(key);
+  // 'unknown' = no tray record (historical card from before the tray
+  // existed, or evicted): render neither buttons nor an outcome.
+  const state = item ? (item.resolved || 'pending') : 'unknown';
+  if (el.dataset.approvalState !== state) el.dataset.approvalState = state;
+  const foot = el.querySelector('.approval-foot') as HTMLElement | null;
+  if (!foot) return;
+  if (state === 'pending') {
+    if (foot.querySelector('.approval-actions')) return;
+    foot.innerHTML = '';
+    const actions = document.createElement('div');
+    actions.className = 'approval-actions';
+    actions.setAttribute('aria-label', 'Approval actions');
+    for (const [label, action] of APPROVAL_ACTION_LABELS) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `approval-btn approval-btn-${action}`;
+      btn.dataset.approvalAction = action;
+      btn.textContent = label;
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        // Optimistic: disable until the /approve echo resolves the
+        // record (backendEvents.handleUserMessage → activity-changed →
+        // refreshApprovalCards flips the footer to the outcome pill).
+        actions.querySelectorAll('button').forEach(b => { b.disabled = true; });
+        actions.classList.add('is-sending');
+        sendApprovalAction(item?.chatId ?? null, action, item?.messageId || key || null);
+      };
+      actions.appendChild(btn);
+    }
+    foot.appendChild(actions);
+    return;
+  }
+  if (state === 'unknown') {
+    if (foot.childElementCount) foot.innerHTML = '';
+    return;
+  }
+  const label = APPROVAL_RESOLUTION_LABELS[state] || state.replace('_', ' ');
+  let pill = foot.querySelector('.approval-state') as HTMLElement | null;
+  if (!pill) {
+    foot.innerHTML = '';
+    pill = document.createElement('span');
+    pill.className = 'approval-state';
+    foot.appendChild(pill);
+  }
+  if (pill.dataset.resolution !== state) pill.dataset.resolution = state;
+  if (pill.textContent !== label) pill.textContent = label;
+}
+
+/** Re-derive every rendered approval card's state from the Activity
+ *  store. Cheap DOM patch (no re-projection) — wired to the store's
+ *  change events below so approving in the tray, on another device, or
+ *  by typing /approve flips the in-chat card too. */
+export function refreshApprovalCards(root: ParentNode | null = null): void {
+  const scope = root ?? (typeof document !== 'undefined' ? document : null);
+  if (!scope) return;
+  scope.querySelectorAll<HTMLElement>('.line.notification-approval').forEach(applyApprovalState);
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('parley:activity-changed', () => refreshApprovalCards());
+  window.addEventListener('parley:server-activity-changed', () => refreshApprovalCards());
 }
 
 /** Per-activity-row user expand choice, keyed by spec.key. Lives OUTSIDE
@@ -345,6 +526,7 @@ function updateForSpec(el: HTMLElement, spec: BubbleSpec): void {
     case 'systemLine':
       if (el.textContent !== spec.text) el.textContent = spec.text;
       return;
+    case 'turnStatus': return updateTurnStatus(el, spec);
     case 'memoCard':
       // No-op by design: waveform/status/transcript updates flow
       // through the card's own DOM hooks (memoCard.update / find), and
@@ -495,6 +677,13 @@ export function renderNotificationHtml(text: string | undefined): string {
 
 function updateNotification(el: HTMLElement, spec: NotificationBubbleSpec): void {
   applyNotificationKindClass(el, spec.notificationKind || 'notification');
+  if (spec.notificationKind === 'approval') {
+    // Structured card owns .speaker/.text — never overwrite it with the
+    // markdown body (that would resurrect the two-triangle layout).
+    renderApprovalCard(el, spec);
+    updateTimestamp(el, spec.timestamp);
+    return;
+  }
   const speaker = el.querySelector('.speaker') as HTMLElement | null;
   const label = spec.notificationKind && spec.notificationKind !== 'notification'
     ? spec.notificationKind

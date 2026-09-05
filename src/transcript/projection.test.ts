@@ -222,7 +222,70 @@ describe('project: inflight', () => {
     });
     const out = project(s);
     const kinds = out.map(s => s.kind);
+    // Turn still open (no reply_final): the growing tool strip rides at
+    // the very bottom, below the interim reply, followed by the
+    // turn-status line (field 2026-09-05).
+    assert.deepEqual(kinds, ['user', 'assistant', 'activityRow', 'turnStatus']);
+  });
+
+  it('ordering: once the turn is answered the activity row settles between user and reply', () => {
+    const s = state({
+      inflight: [
+        { type: 'user_message', chat_id: 'c', message_id: 'umsg_1', text: 'q' },
+        { type: 'reply_delta', chat_id: 'c', text: 'a', message_id: 'msg_1' },
+        { type: 'tool_call', chat_id: 'c', call_id: 'c1', tool_name: 't', args: {} },
+        { type: 'tool_result', chat_id: 'c', call_id: 'c1', tool_name: 't', result: 'ok' },
+        { type: 'reply_final', chat_id: 'c', message_id: 'msg_1' },
+      ],
+    });
+    const kinds = project(s).map(s => s.kind);
     assert.deepEqual(kinds, ['user', 'activityRow', 'assistant']);
+  });
+
+  it('interim final (gateway advisory) owns a bubble but does not close the turn', () => {
+    const s = state({
+      inflight: [
+        { type: 'user_message', chat_id: 'c', message_id: 'umsg_1', text: 'q' },
+        { type: 'tool_call', chat_id: 'c', call_id: 'c1', tool_name: 't', args: {} },
+        { type: 'tool_result', chat_id: 'c', call_id: 'c1', tool_name: 't', result: 'ok' },
+        { type: 'reply_delta', chat_id: 'c', text: '⚠️ No activity for 5 min.', message_id: 'msg_w', interim: true },
+        { type: 'reply_final', chat_id: 'c', message_id: 'msg_w', interim: true },
+      ],
+    });
+    const out = project(s);
+    const ar = out.find(x => x.kind === 'activityRow');
+    assert.ok(ar && ar.kind === 'activityRow');
+    assert.equal(ar.complete, false);
+    assert.deepEqual(out.map(x => x.kind), ['user', 'assistant', 'activityRow', 'turnStatus']);
+    // …and a real final closes it.
+    s.inflight.push(
+      { type: 'reply_delta', chat_id: 'c', text: 'done', message_id: 'msg_1' },
+      { type: 'reply_final', chat_id: 'c', message_id: 'msg_1' },
+    );
+    const out2 = project(s);
+    assert.deepEqual(out2.map(x => x.kind), ['user', 'activityRow', 'assistant', 'assistant']);
+  });
+
+  it('turn-status line shows the parsed heartbeat while a turn is open, and clears with it', () => {
+    const s = state({
+      inflight: [
+        { type: 'user_message', chat_id: 'c', message_id: 'umsg_1', text: 'q' },
+        { type: 'tool_call', chat_id: 'c', call_id: 'c1', tool_name: 'terminal', args: {} },
+      ],
+      turnStatus: { text: '⏳ Working — 3 min — iteration 4/60, terminal', at: Date.now() },
+    });
+    const out = project(s);
+    const st = out[out.length - 1];
+    assert.ok(st.kind === 'turnStatus');
+    assert.equal(st.key, 'turn:status');
+    assert.equal(st.text, 'Working · 3 min · iteration 4/60 · terminal');
+    // A stale beat (plugin died mid-turn) with no other in-flight signal
+    // must not think forever.
+    const stale = project(state({
+      durable: [u('umsg_1', 'q'), a('msg_1', 'a', T0 + 1)],
+      turnStatus: { text: '⏳ Working — 3 min', at: Date.now() - 11 * 60_000 },
+    }));
+    assert.deepEqual(stale.map(x => x.kind), ['user', 'assistant']);
   });
 });
 
@@ -1126,7 +1189,11 @@ describe('local thinking placeholder (latency B1a, 2026-07-13)', () => {
     // it (mark-unread wrote pending:turn:* activity rows in the field).
     const now = Date.now();
     const out = project(state({ pendingSends: [pending('umsg_p0', now - 500)] }));
-    assert.deepEqual(out.map(x => x.kind), ['user']);
+    // The bottom turn-status line (a .line.system row, NOT an agent
+    // bubble) is the turn-1 feedback instead — no pending:turn:* spec.
+    assert.deepEqual(out.map(x => x.kind), ['user', 'turnStatus']);
+    assert.ok(!out.some(x => x.key.startsWith('pending:turn:')));
+    assert.equal((out[1] as any).text, 'Thinking');
   });
 
   it('persists across the user_message echo (pendingSend cleared, no reply yet)', () => {

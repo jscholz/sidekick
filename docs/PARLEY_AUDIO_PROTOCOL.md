@@ -415,6 +415,7 @@ because the gateway owns conversation state.
 { "type": "reply_final",    "chat_id": "...", "message_id": "..." }
 { "type": "image",          "chat_id": "...", "url": "...", "caption": "..." }
 { "type": "typing",         "chat_id": "..." }
+{ "type": "status",         "chat_id": "...", "message_id": "status_<chat>", "text": "⏳ Working — 3 min — iteration 4/60, terminal", "state": "working" }
 { "type": "notification",   "chat_id": "...", "kind": "cron", "content": "..." }
 { "type": "session_changed","chat_id": "...", "session_id": "...", "title": "..." }
 { "type": "pong",           "chat_id": "..." }
@@ -423,7 +424,16 @@ because the gateway owns conversation state.
 `reply_delta` carries the FULL text-so-far (not a per-token
 diff) — this matches `BasePlatformAdapter.edit_message`'s contract.
 Callers replace the bubble's text on each delta. `reply_final` marks
-the end of a turn.
+the end of a turn — unless it carries `"interim": true`, which flags a
+mid-turn advisory (gateway inactivity warning) that owns a bubble but
+does not end the turn.
+
+`status` is the optional, ephemeral working indicator. The hermes
+plugin converts the gateway's per-iteration heartbeat ("⏳ Working — N
+min — iteration i/n, tool") into one `status` per chat (fixed
+`message_id`, text replaced each beat) instead of a reply bubble. The
+PWA renders it as the bottom turn-status line; it is never pushed,
+persisted, or honoured on replay.
 
 `session_changed` is emitted when the gateway compresses an active
 chat_id's session, which mints a new `session_id` and (often) a new

@@ -1,5 +1,6 @@
 import type { RightDrawerModule, RightDrawerModuleContext } from '../host.ts';
 import { miniMarkdown } from '../../util/markdown.ts';
+import { approvalPreview } from '../../notifications/approvalText.ts';
 import {
   clearDismissible as clearDismissibleActivity,
   dismissActivity,
@@ -164,21 +165,3 @@ function activityPreview(item: ActivityItem): string {
   return body.length > 500 ? body.slice(0, 497) + '...' : body;
 }
 
-function approvalPreview(raw: string): string {
-  const text = raw || '';
-  const reason = /^Reason:\s*(.+)$/im.exec(text)?.[1]?.trim() || '';
-  const lines = text.split('\n');
-  const command: string[] = [];
-  let inCommand = false;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (/Dangerous command requires approval/i.test(trimmed)) { inCommand = true; continue; }
-    if (!inCommand) continue;
-    if (!trimmed) { if (command.length) command.push(''); continue; }
-    if (/^Reason:/i.test(trimmed) || /^Reply\s+\/approve/i.test(trimmed)) break;
-    command.push(line.replace(/\s+$/, ''));
-  }
-  const cmd = command.join('\n').trim().replace(/\n{3,}/g, '\n\n');
-  if (reason && cmd) return reason + ': ' + cmd;
-  return reason || cmd || text;
-}

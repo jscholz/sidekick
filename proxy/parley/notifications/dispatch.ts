@@ -280,7 +280,9 @@ export function approvalPreview(raw: string): string {
 export function isProgressHeartbeat(raw: string): boolean {
   const s = (raw || '').trim();
   if (!s) return false;
-  return /^⏳\s*Still working\b/i.test(s)
+  // hermes 0.21 shortened the beat to "⏳ Working — N min — iteration i/n,
+  // tool"; the older "⏳ Still working… (N min elapsed — …)" still matches.
+  return /^⏳\s*(Working|Still working)\b/i.test(s)
     || /\bStill working\.{0,3}\s*\(\s*\d+\s*min elapsed\b.*\biteration\s*\d+\s*\/\s*\d+/i.test(s);
 }
 

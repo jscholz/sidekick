@@ -8,6 +8,8 @@
  */
 
 import { log } from '../util/log.ts';
+import { approvalPreview } from './approvalText.ts';
+import * as activityStore from './activityStore.ts';
 
 const AUTO_DISMISS_MS = 6_000;
 
@@ -16,6 +18,11 @@ export type ApprovalAction = 'approve' | 'approve_session' | 'deny';
 let bannerEl: HTMLElement | null = null;
 let dismissTimer: ReturnType<typeof setTimeout> | null = null;
 let onOpenCb: ((chatId: string, msgId: string | null) => void) | null = null;
+// Chat of the approval banner currently on screen (null when the banner
+// shows something else or is hidden). Approvals don't auto-dismiss —
+// they block the agent — so the banner stays until acted on, dismissed,
+// or the Activity store reports the chat has no pending approval left.
+let shownApprovalChat: string | null = null;
 let onActionCb: ((chatId: string, action: ApprovalAction, msgId: string | null) => void | Promise<void>) | null = null;
 
 interface ShowArgs {
@@ -91,46 +98,31 @@ export function show(args: ShowArgs): void {
     };
   });
 
-  if (dismissTimer) clearTimeout(dismissTimer);
-  dismissTimer = setTimeout(hide, isApproval ? AUTO_DISMISS_MS * 2 : AUTO_DISMISS_MS);
-  log(`[in-app-banner] show chat=${args.chatId} kind=${kind}`);
+  if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
+  shownApprovalChat = isApproval ? args.chatId : null;
+  if (!isApproval) dismissTimer = setTimeout(hide, AUTO_DISMISS_MS);
+  log(`[in-app-banner] show chat=${args.chatId} kind=${kind}${isApproval ? ' (sticky)' : ''}`);
 }
 
-function approvalPreview(raw: string): string {
-  const text = stripLeadingMetadata(raw || '');
-  const reason = /^Reason:\s*(.+)$/im.exec(text)?.[1]?.trim() || '';
-  const lines = text.split('\n');
-  const command: string[] = [];
-  let inCommand = false;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (/Dangerous command requires approval/i.test(trimmed)) {
-      inCommand = true;
-      continue;
-    }
-    if (!inCommand) continue;
-    if (!trimmed) {
-      if (command.length) command.push('');
-      continue;
-    }
-    if (/^Reason:/i.test(trimmed) || /^Reply\s+\/approve/i.test(trimmed)) break;
-    command.push(line.replace(/\s+$/, ''));
-  }
-  const cmd = command.join('\n').trim().replace(/\n{3,}/g, '\n\n');
-  if (reason && cmd) return `${reason}: ${cmd}`;
-  return reason || cmd || text;
+/** Approval banners retire themselves once the store says the chat has
+ *  no unresolved approval (approved from the card, the tray, another
+ *  device, or the agent moved on). */
+function onActivityChanged(): void {
+  if (!shownApprovalChat || !bannerEl?.classList.contains('visible')) return;
+  const chat = shownApprovalChat;
+  const bare = (id: string | null) => (id || '').replace(/^parley:/, '');
+  const pending = activityStore.listActivity().some(i =>
+    i.kind === 'approval' && !i.resolved && bare(i.chatId) === bare(chat));
+  if (!pending) hide();
 }
 
-function stripLeadingMetadata(s: string): string {
-  const META_LINE_RE = /^\s*(?:session_id|job_id|chat_id|message_id|user_id|run_id|trace_id)\s*:\s*\S/i;
-  const SEP_OR_BLANK_RE = /^\s*(?:-{3,}|=+|\*+)?\s*$/;
-  const lines = s.split('\n');
-  let i = 0;
-  while (i < lines.length && (META_LINE_RE.test(lines[i]) || SEP_OR_BLANK_RE.test(lines[i]))) i++;
-  return lines.slice(i).join('\n');
+if (typeof window !== 'undefined') {
+  window.addEventListener('parley:activity-changed', onActivityChanged);
+  window.addEventListener('parley:server-activity-changed', onActivityChanged);
 }
 
 function hide(): void {
+  shownApprovalChat = null;
   if (!bannerEl) return;
   bannerEl.classList.remove('visible');
   if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }

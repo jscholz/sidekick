@@ -39,6 +39,7 @@ import type {
   PendingSend,
   UserBubbleSpec,
 } from './types.ts';
+import { formatTurnStatus } from '../util/progressHeartbeat.ts';
 
 export function project(state: ChatState): BubbleSpec[] {
   const specs: BubbleSpec[] = [];
@@ -421,8 +422,11 @@ export function project(state: ChatState): BubbleSpec[] {
           if (env.text != null) spec.text = env.text;
           spec.streaming = false;
         }
-        // Whatever activity row this turn produced is now complete.
-        if (currentTurnKey) {
+        // Whatever activity row this turn produced is now complete —
+        // unless this final is an interim advisory (gateway inactivity
+        // warning etc., `interim: true`), which owns a bubble but does
+        // not end the turn.
+        if (currentTurnKey && !env.interim) {
           const row = activityByKey.get(currentTurnKey);
           if (row) row.complete = true;
           // The turn is answered — even a BLANK final (tool-only turn)
@@ -549,6 +553,22 @@ export function project(state: ChatState): BubbleSpec[] {
     return kindOrder(a) - kindOrder(b);
   });
 
+  // ── 4b. The in-flight activity row rides at the very bottom. While a
+  // turn is open the tool strip keeps growing; sorted by its turn
+  // timestamp it sat ABOVE any interim reply the agent had already
+  // sent, so the live "N tools · running…" line was buried mid-turn
+  // (field 2026-09-05). Pin open rows to the tail; on reply_final
+  // `complete` flips and the row settles back into chronological order.
+  {
+    const open = specs.filter(s => s.kind === 'activityRow' && !s.complete);
+    if (open.length) {
+      const openSet = new Set(open);
+      const rest = specs.filter(s => !openSet.has(s));
+      specs.length = 0;
+      specs.push(...rest, ...open);
+    }
+  }
+
   // ── 5. Local thinking placeholder (latency audit B1a): after a send
   // commits, the thinking dots used to appear only when the server's
   // first delta arrived — a full round-trip of dead air on EVERY turn.
@@ -578,14 +598,16 @@ export function project(state: ChatState): BubbleSpec[] {
   // `pending:turn:*`, and first-reply wait predicates raced two sends
   // into colliding mock message ids. On turn 1 the optimistic user
   // bubble is the send feedback; dots start from turn 2.
-  {
-    const PLACEHOLDER_MAX_AGE_MS = 120_000;
-    const liveSendKeys = new Set<string>();
-    for (const p of state.pendingSends) {
-      if (!p.failed && Date.now() - p.sentAt < PLACEHOLDER_MAX_AGE_MS) {
-        liveSendKeys.add(p.messageId);
-      }
+  const now = Date.now();
+  const PLACEHOLDER_MAX_AGE_MS = 120_000;
+  const liveSendKeys = new Set<string>();
+  for (const p of state.pendingSends) {
+    if (!p.failed && now - p.sentAt < PLACEHOLDER_MAX_AGE_MS) {
+      liveSendKeys.add(p.messageId);
     }
+  }
+  let placeholderSpliced = false;
+  {
     const agentHasSpoken = specs.some(s =>
       s.kind === 'assistant' || s.kind === 'activityRow' || s.kind === 'notification');
     if (agentHasSpoken) {
@@ -608,9 +630,36 @@ export function project(state: ChatState): BubbleSpec[] {
             // landing in the same millisecond.
             timestamp: s.timestamp + 1,
           });
+          placeholderSpliced = true;
         }
         break;
       }
+    }
+  }
+
+  // ── 6. Turn-status line ("Thinking" / "Working · 3 min · iteration
+  // 4/60 · terminal"): the agent-is-working indicator, pinned below
+  // everything while a turn is in flight and the step-5 placeholder
+  // isn't already showing dots. In flight means any of: an open
+  // activity row (tool running, or a new call after an interim reply),
+  // a young live send whose turn has no turn-ending final yet, or a
+  // fresh heartbeat (`status` envelope; the store clears it on a
+  // turn-ending final, the age cap covers a plugin that died mid-turn).
+  {
+    const STATUS_MAX_AGE_MS = 10 * 60_000;
+    const beat = state.turnStatus && now - state.turnStatus.at < STATUS_MAX_AGE_MS
+      ? state.turnStatus : null;
+    const openRow = specs.some(s => s.kind === 'activityRow' && !s.complete);
+    const liveTurn = specs.some(s =>
+      s.kind === 'user' && liveSendKeys.has(s.key) && !finalizedTurnUserKeys.has(s.key));
+    if (!placeholderSpliced && (openRow || liveTurn || beat)) {
+      const last = specs[specs.length - 1];
+      specs.push({
+        kind: 'turnStatus',
+        key: 'turn:status',
+        timestamp: (last ? last.timestamp : now) + 1,
+        text: beat ? formatTurnStatus(beat.text) : 'Thinking',
+      });
     }
   }
   return specs;
@@ -767,6 +816,8 @@ function kindOrder(s: BubbleSpec): number {
     case 'systemLine': return 5;
     // Memo cards record what the user just spoke — same placement logic.
     case 'memoCard': return 5;
+    // Always last — appended after the sort anyway.
+    case 'turnStatus': return 9;
   }
 }
 
