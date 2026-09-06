@@ -9,24 +9,27 @@
  * links the agent provides in the transcript, nothing opens").
  *
  * Fix: one delegated click listener, native shell only. Anchors whose
- * href is http(s) and not our own origin are opened by, in order:
+ * href is http(s) and not our own origin are handed to the custom
+ * `ExternalBrowser` native plugin (mobile/ios/App/App/
+ * ExternalBrowserPlugin.swift) — `UIApplication.shared.open()`, which
+ * routes to the OS's registered default browser (Chrome, Edge, etc. as
+ * of iOS 14+, not always Safari — he asked 2026-09-06).
  *
- *  1. the custom `ExternalBrowser` native plugin (mobile/ios/App/App/
- *     ExternalBrowserPlugin.swift) — `UIApplication.shared.open()`, which
- *     hands the URL to the OS's registered default browser (Chrome, Edge,
- *     etc. as of iOS 14+). This is the one he actually wants: he asked
- *     2026-09-06 whether a tap would honor his default browser or always
- *     open Safari.
- *  2. `@capacitor/browser` (SFSafariViewController — always Safari's
- *     engine, ignores the default-browser setting) if the native plugin
- *     is missing (app not yet rebuilt with it).
+ * No first-party `@capacitor/*` plugin (Browser, Camera, PushNotifications,
+ * …) is linked into this app: mobile/ios/App/CapApp-SPM/Package.swift only
+ * depends on bare Capacitor+Cordova (unchanged since 2026-05-04), and push
+ * notifications are hand-registered in AppDelegate.swift rather than via
+ * `@capacitor/push-notifications`'s native side. `ExternalBrowserPlugin`
+ * follows that same established pattern (see AudioSessionPlugin.swift /
+ * SpeechRecognizerPlugin.swift) — a `@capacitor/browser` fallback here
+ * would be dead code that can never resolve, so there isn't one.
  *
  * Same-origin links (`?msg=` drills, hash anchors) and non-http schemes
  * (mailto:, tel:) are left to the web view, which already handles them.
  *
  * Runtime access is via the injected `window.Capacitor.Plugins` global
  * (same pattern as speechRecognizer.ts / notifications/native.ts) so the
- * PWA bundle carries no import of either plugin.
+ * PWA bundle carries no import of the plugin.
  */
 
 import { log } from '../util/log.ts';
@@ -63,27 +66,15 @@ export async function openExternal(url: string): Promise<boolean> {
       await externalBrowser.open({ url });
       return true;
     } catch (e) {
-      log(`[external-links] ExternalBrowser.open failed, falling back to in-app sheet: ${(e as Error)?.message || e}`);
+      log(`[external-links] ExternalBrowser.open failed: ${(e as Error)?.message || e}`);
     }
   }
-  // Older build without the native plugin yet — the in-app Safari sheet
-  // beats a dead tap even though it can't honor the default-browser
-  // setting.
-  const browser = nativePlugin('Browser');
-  if (browser && typeof browser.open === 'function') {
-    try {
-      await browser.open({ url, presentationStyle: 'popover' });
-      return true;
-    } catch (e) {
-      log(`[external-links] Browser.open failed: ${(e as Error)?.message || e}`);
-    }
-  }
-  // Neither plugin is available. NOT falling back to
-  // `window.location.href`: allowNavigation is '*' (capacitor.config.ts),
-  // so that would navigate the app's OWN web view to the external site
-  // instead of handing off, stranding the user outside the chat with no
-  // way back — worse than the dead tap this function exists to fix.
-  log(`[external-links] no way to open ${url} — neither ExternalBrowser nor Browser plugin available`);
+  // NOT falling back to `window.location.href`: allowNavigation is '*'
+  // (capacitor.config.ts), so that would navigate the app's OWN web view
+  // to the external site instead of handing off, stranding the user
+  // outside the chat with no way back — worse than the dead tap this
+  // function exists to fix.
+  log(`[external-links] no way to open ${url} — ExternalBrowser plugin not available (build didn't pick it up?)`);
   return false;
 }
 
