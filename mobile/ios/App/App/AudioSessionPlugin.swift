@@ -81,20 +81,23 @@ final class AudioSessionController {
 /// around mic capture. JS would reach it at
 /// `window.Capacitor.Plugins.AudioSession`.
 ///
-/// ⚠️ NOT CURRENTLY REGISTERED — THIS PLUGIN HAS NEVER RUN. The original
-/// comment here claimed "auto-registered by Capacitor via the @objc runtime";
-/// that is false. Capacitor 8's CapacitorBridge.registerPlugins() only loads
-/// five hard-coded core plugins plus the npm-derived packageClassList in
-/// capacitor.config.json — a local plugin needs an explicit
-/// `bridge.registerPluginInstance(AudioSessionPlugin())` in
-/// WebViewDelegate.capacitorDidLoad() (see ExternalBrowserPlugin, which does).
-/// Because nativeAudioSession() in src/audio/shared/ios-specific.ts null-checks
-/// `cap.Plugins?.AudioSession` and no-ops, the failure was silent: the app has
-/// been running in whatever category WKWebView's getUserMedia negotiates, so
-/// the Bluetooth-A2DP-preservation behaviour this plugin exists to provide
-/// (podcast over BT not dropping to HFP when Parley opens) was never active.
-/// Registering it is a live audio-routing change and wants its own on-device
-/// test pass — deliberately left off until then (found 2026-09-06).
+/// Registered in WebViewDelegate.capacitorDidLoad() via
+/// `bridge.registerPluginInstance(_:)`. That call is mandatory: Capacitor 8
+/// does not auto-discover CAPBridgedPlugin classes (the comment that used to
+/// sit here claiming "@objc runtime auto-registration" was false).
+///
+/// History: from this file's creation until 2026-09-06 the registration line
+/// did not exist, so this plugin never ran once. nativeAudioSession() in
+/// src/audio/shared/ios-specific.ts null-checks `cap.Plugins?.AudioSession`
+/// and no-ops, so the failure was silent. Two consequences, both now fixed by
+/// registering it:
+///   1. The A2DP preservation this plugin was written for never happened —
+///      the session category was whatever WKWebView's getUserMedia left behind.
+///   2. Worse: AppDelegate.applyDesiredCategory() re-asserts `desiredCategory`
+///      on launch, route change and interruption-end, and that value was pinned
+///      at `.playback` (output-only) forever. A Bluetooth route change or a
+///      phone-call interruption DURING a Parley call therefore re-applied an
+///      output-only category underneath a live capture.
 @objc(AudioSessionPlugin)
 public class AudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "AudioSessionPlugin"
