@@ -1965,7 +1965,7 @@ async function promptRename(s: any) {
  *       at `id` (otherwise refresh()'s activeRowId() = focusedId()
  *       fallback paints an isFresh placeholder for the deleted id).
  *    4. backend (proxyClient) — server-side DELETE + IDB conversation
- *       remove + activeChatId clear.
+ *       remove + lastActiveChatId memo clear.
  *    5. sessionCache — IDB list cache patched so the next refresh's
  *       cache-render doesn't briefly resurrect the row before the
  *       server-fetch reconciles.

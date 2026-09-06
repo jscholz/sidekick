@@ -235,6 +235,20 @@ export interface SearchOpts {
 
 /**
  * @typedef {Object} SendOpts
+ * @property {string} chatId  REQUIRED for session-capable backends. The
+ *                            conversation the message was COMPOSED in,
+ *                            captured at intent time — never resolved
+ *                            from "wherever the user is" at send time
+ *                            (UX_DETERMINISM_PLAN §6 rule 3). An absent
+ *                            chatId is a programming error: proxyClient
+ *                            throws in dev mode and diags + best-effort
+ *                            resolves in prod. Optional in the typedef
+ *                            only because backends without session
+ *                            browsing have no chat ids at all.
+ * @property {string} [userMessageId]  Pre-minted id for the shell's
+ *                            optimistic bubble; echoed back by the
+ *                            upstream's user_message broadcast so the
+ *                            originating device dedups.
  * @property {Array<{type?: string, mimeType: string, fileName?: string, content: string}>} [attachments]
  * @property {boolean} [voice]  Flag this message as voice-dictated. Backends
  *                              that use in-band prefixes to hint origin (e.g.
@@ -308,15 +322,22 @@ export interface SearchOpts {
  *   cleanup. Callers typically pair this with local UI cleanup (chat.clear(),
  *   draft.dismiss(), voiceMemos.clearAll(), etc.).
  * @property {() => string | null} [getCurrentSessionId]
- *   Identifier of the currently-active session (conversation name for hermes).
- *   Shell uses it to highlight the active row in the drawer + to resume on
- *   reconnect. Null if no session has been opened yet.
+ *   The adapter's memo of the persisted "active conversation" — NOT "the chat
+ *   the user is looking at". That question has exactly one answer and it lives
+ *   in src/switchController.ts (UX_DETERMINISM_PLAN §6 rule 2); the shell asks
+ *   switchController first everywhere and falls through to here only in the
+ *   PRE-VIEW cases: the boot landing before any switch has committed, and
+ *   reading back the id `newSession()` just minted. Null if no session has been
+ *   opened yet. Never use it to address a send.
  * @property {(limit?: number) => Promise<SessionInfo[]>} [listSessions]
  *   Available when `capabilities.sessionBrowsing` is true.
  * @property {(id: string) => Promise<{ messages: SessionMessage[], firstId?: number|null, hasMore?: boolean }>} [resumeSession]
- *   Point the adapter at an existing session and return its transcript. The
- *   shell replays the messages into chat UI. Next `sendMessage` continues
- *   that session server-side (e.g. hermes chains via previous_response_id).
+ *   Fetch an existing session's transcript and persist it as the active
+ *   conversation for the NEXT boot. The shell replays the messages into the
+ *   chat UI. It does NOT decide where subsequent sends go — every send carries
+ *   its own `chatId` (see SendOpts). It used to, and a boot restore calling it
+ *   three seconds after a user tapped a different chat is how the 2026-09-06
+ *   mis-send happened (UX_DETERMINISM_PLAN §1).
  *   May return only the newest page; `firstId` + `hasMore` describe the
  *   cursor for loadEarlier (omitted = full transcript returned).
  * @property {(id: string) => Promise<{ messages: SessionMessage[], firstId?: number|null, hasMore?: boolean, inflight?: any[] }>} [fetchSessionMessages]

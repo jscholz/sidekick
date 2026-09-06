@@ -83,10 +83,40 @@ test('authority: every programmatic origin is refused; every user origin is gran
     assert.equal(switchCtl.originClass(origin), 'programmatic', `${origin} is programmatic`);
     assert.equal(switchCtl.begin('chat-prog', origin), null, `${origin} must be refused`);
   }
-  for (const origin of ['tap', 'keyboard', 'cmdk', 'push-tap', 'drill', 'delete-landing'] as switchCtl.NavOrigin[]) {
+  for (const origin of ['tap', 'keyboard', 'cmdk', 'push-tap', 'drill', 'delete-landing',
+                        'new-chat', 'capture-landing'] as switchCtl.NavOrigin[]) {
     assert.equal(switchCtl.originClass(origin), 'user', `${origin} is a user gesture`);
     assert.ok(switchCtl.begin('chat-user', origin), `${origin} must be granted`);
   }
+});
+
+test('noteUserNavigation: records authority without disturbing the epoch', () => {
+  // The New chat / meeting-capture doors (UX_DETERMINISM_PLAN §5 Phase
+  // 1). They own their own invalidate()/setOptimistic()/setViewed(); all
+  // this adds is the sticky flag and a ledger line, so it must leave the
+  // generation and the highlight exactly where it found them — a live
+  // switch elsewhere in the app cannot be collateral damage.
+  const live = switchCtl.begin('chat-live', 'tap');
+  assert.ok(live);
+  switchCtl.setOptimistic('chat-live');
+
+  switchCtl.noteUserNavigation('chat-fresh', 'new-chat');
+
+  assert.equal(switchCtl.canPaint(live), true, 'noteUserNavigation must not bump the generation');
+  assert.equal(switchCtl.optimisticId(), 'chat-live', 'noteUserNavigation must not touch the highlight');
+  assert.equal(switchCtl.viewedId() !== 'chat-fresh', true, 'and must not commit a view on the caller\'s behalf');
+
+  const last = switchCtl.getNavLedger().pop();
+  assert.equal(last?.origin, 'new-chat');
+  assert.equal(last?.id, 'chat-fresh');
+  assert.equal(last?.outcome, 'committed', 'the landing is a decided fact by the time it is recorded');
+
+  // The entry is resolved on arrival, so a later begin() must not
+  // re-stamp it as superseded the way it does a `begun` one.
+  switchCtl.begin('chat-after', 'tap');
+  const stillCommitted = switchCtl.getNavLedger()
+    .filter((e) => e.origin === 'new-chat' && e.id === 'chat-fresh');
+  assert.equal(stillCommitted[stillCommitted.length - 1].outcome, 'committed');
 });
 
 test('authority: a deep link counts as a user navigation', () => {

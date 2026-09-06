@@ -449,13 +449,24 @@ function sendEchoSeen(chatId: string | null, messageId: string): boolean {
 
 /** Offline-first send dispatch. Fire the POST now; classify a failure as
  *  connectivity (→ queue for reconnect, bubble stays `.pending`) or an
- *  answered refusal (→ `.failed` Retry affordance). Never throws. */
+ *  answered refusal (→ `.failed` Retry affordance). Never throws.
+ *
+ *  `chatId` is the chat the message was COMPOSED in, and it is stamped
+ *  into `sendOpts` here so the address survives into `queuedSends`. That
+ *  matters because the retry can fire minutes later, after the user has
+ *  moved on: a queued send re-POSTs to the chat it was written in, never
+ *  to wherever focus happens to be when the link comes back
+ *  (UX_DETERMINISM_PLAN §6 rule 3). Callers that already set
+ *  sendOpts.chatId are left alone — this only closes the gap where a
+ *  caller passed the id for the optimistic bubble but not for the POST,
+ *  which proxyClient.sendMessage now treats as a programming error. */
 function sendOrQueueMessage(
   chatId: string | null,
   messageId: string,
   text: string,
   sendOpts: Record<string, any>,
 ): void {
+  if (chatId && !sendOpts.chatId) sendOpts.chatId = chatId;
   Promise.resolve()
     .then(() => backend.sendMessage(text, sendOpts))
     .catch((e: unknown) => {
@@ -484,6 +495,9 @@ async function flushQueuedSends(): Promise<void> {
     for (const q of batch) {
       if (sendEchoSeen(q.chatId, q.messageId)) continue;   // original POST landed
       try {
+        // q.sendOpts.chatId was stamped at COMPOSE time by
+        // sendOrQueueMessage — deliberately not re-resolved here. The
+        // user may be in a different chat by now; the message is not.
         await backend.sendMessage(q.text, q.sendOpts);
       } catch (e: unknown) {
         const msg = (e as Error)?.message || String(e);
@@ -1102,15 +1116,25 @@ async function boot() {
   // Paint the clean shell instantly — status line, focused composer,
   // zero spinners — and let the start-message arrive via SSE like any
   // live envelope. backend.resumeSession is fired in the BACKGROUND
-  // purely to flip the adapter's active-chat send pointer (it does so
-  // synchronously at call, before its fetch — proxyClient.ts) and to
-  // reconcile anything that raced ahead.
+  // purely to persist the IDB active row (so a reload lands back on the
+  // meeting) and to reconcile anything that raced ahead. It is NOT how
+  // sends find this chat — sessionDrawer.setViewed below is, and sends
+  // are addressed from that.
   const openMeetingSession = (chatId: string) => {
     // Supersede any in-flight switch/resume so its continuation can't
     // repaint the prior chat over the fresh shell (same discipline as
-    // the new-chat handler above).
+    // the new-chat handler above)...
     switchCtl.invalidate();
     switchCtl.setOptimistic(null);
+    // ...and CLAIM AUTHORITY for it. invalidate() only bumps the epoch;
+    // it says nothing about who navigated, so before this line a meeting
+    // landing left hasUserNavigated() false and a boot restore arriving
+    // moments later was still free to begin() and paint its chat over
+    // the recording shell. Same bug class as the 2026-09-06 tap, a
+    // different door (UX_DETERMINISM_PLAN §5 Phase 1). See
+    // switchController's 'capture-landing' origin for why this counts as
+    // user authority even on the capture_control (agent-triggered) path.
+    switchCtl.noteUserNavigation(chatId, 'capture-landing');
     const prev = switchCtl.viewedId();
     if (prev && prev !== chatId) {
       chat.saveCurrentScrollPosition();
@@ -1508,9 +1532,11 @@ async function boot() {
       // draft flushed while the link is down stays `.pending` and POSTs
       // on reconnect (field 2026-07-21). Previously this was a bare
       // sendMessage whose offline rejection went unhandled.
-      sendOrQueueMessage(chatId, userMessageId, text, chatId
-        ? { voice: true, userMessageId, chatId }
-        : { voice: true, userMessageId });
+      // Addressed at flush time (the moment the user committed the
+      // dictated text); sendOrQueueMessage carries it into the retry
+      // queue. A null chatId here means resolveOrMintSendChatId found no
+      // view AND could not mint — a backend without session support.
+      sendOrQueueMessage(chatId, userMessageId, text, { voice: true, userMessageId });
       playFeedback('send');
     },
   });
@@ -1688,7 +1714,10 @@ async function boot() {
           //                 plain reload keeps your place (continuity wins)
           //   pinnedTop  — the top pinned session as the "home base" on a
           //                truly fresh open (no snapshot to restore)
-          //   getCurrentSessionId() — adapter default ('parley-main')
+          //   getCurrentSessionId() — the adapter's IDB active-conversation
+          //                 memo. Legitimate here precisely because
+          //                 nothing has committed a view yet: this is the
+          //                 pre-view landing case the memo exists for.
           // The user controls the home-base landing purely by which pin
           // sits at index 0 (drag-reorder); there's no separate default-
           // session state.
@@ -1822,7 +1851,7 @@ async function boot() {
           clearUrlParams();
           // Boot-UX: if nothing got rendered above
           // (no snapshot, OR snapshot's session no longer exists, OR
-          // adapter's activeChatId points to an unsent stub), pick the
+          // the adapter's last-active memo points to an unsent stub), pick the
           // most recent existing session and show it. Avoids the
           // "selected stub but body shows another chat" divergence and
           // gives the user a sane landing state on fresh installs that
@@ -2158,23 +2187,32 @@ async function boot() {
     dcGateDrops.drainInterims = 0; dcGateDrops.drainFinals = 0;
   }
   function currentChatId(): string | null {
-    // View state FIRST (hardening invariant #3: sends are addressed,
-    // not pointed). focusedId() flips synchronously at the row click;
-    // the adapter's pointer only re-aims when the switch's server
-    // fetch starts, so a send committed in the click's own task read
-    // the OLD chat from the pointer (same-tick variant of the
-    // /approve-into-wrong-session class — pinned by send-during-switch
-    // variant 2). The pointer remains as the fallback for surfaces
-    // with no view state (fresh boot, stub backend without browsing).
+    // switchController is THE source of truth for "which conversation am
+    // I in" (UX_DETERMINISM_PLAN §6 rule 2). focusedId() flips
+    // synchronously at the row click, so even a send committed in the
+    // click's own task reads the chat the user is looking at — the
+    // same-tick variant of the /approve-into-wrong-session class, pinned
+    // by send-during-switch variant 2.
+    //
+    // getCurrentSessionId() is no longer a competing pointer: as of the
+    // pointer-retirement change it is a memo of the IDB active-
+    // conversation row that resumeSession() cannot re-aim under the user
+    // (proxyClient.ts). It answers only the pre-view cases — a fresh boot
+    // before any switch commits, or a stub backend with no session
+    // browsing at all.
     return switchCtl.focusedId() ?? backend.getCurrentSessionId?.() ?? null;
   }
   /** Resolve the chatId for a fresh send. On a fresh PWA the user's
    *  first action (typed send, voice send, slash command) lands BEFORE
    *  backend.newSession has been called — `currentChatId()` returns
    *  null and the optimistic-bubble path can't route. Pre-mint a chat
-   *  via backend.newSession's synchronous prefix (it sets activeChatId
-   *  via mintChatId before its first await). Also pin sessionDrawer +
-   *  chat to the new id so subsequent envelopes route correctly. */
+   *  via backend.newSession's synchronous prefix (it sets the adapter's
+   *  lastActiveChatId memo via mintChatId before its first await), then
+   *  read it straight back. This is the ONE getCurrentSessionId() call
+   *  that is about the pointer rather than the view, and it is
+   *  deliberate: the mint has no view yet, and reading it back is how we
+   *  learn the id newSession() chose. Also pins sessionDrawer + chat to
+   *  the new id so subsequent envelopes route correctly. */
   function resolveOrMintSendChatId(): string | null {
     const existing = currentChatId();
     if (existing) return existing;
@@ -3279,8 +3317,8 @@ async function boot() {
       composerInput.dispatchEvent(new Event('input'));
       attachments.clear();
       historyLoaded = false;
-      // newSession mints the chat_id SYNCHRONOUSLY (activeChatId is set
-      // before its first await — mintChatId is pure), so
+      // newSession mints the chat_id SYNCHRONOUSLY (lastActiveChatId is
+      // set before its first await — mintChatId is pure), so
       // getCurrentSessionId() below is already correct without waiting.
       // The await it used to carry was only the IDB setActive
       // persistence — durability, not correctness — and IDB writes
@@ -3318,6 +3356,19 @@ async function boot() {
       // handleReplyDelta / handleReplyFinal don't drop incoming
       // envelopes for it.
       const newChatId = backend.getCurrentSessionId?.() || null;
+      // Claim authority for the rotation (UX_DETERMINISM_PLAN §5 Phase 1).
+      // invalidate() above bumps the epoch so in-flight paints bail, but
+      // it is anonymous — it never marked that a HUMAN moved. So New chat
+      // pressed during a slow boot bumped the generation while boot's
+      // begin() had not run yet; boot then took the newer generation and
+      // painted the restored chat over the fresh one, exactly as it did
+      // over the tap on 2026-09-06. Everything from the invalidate() down
+      // to here is synchronous (newSession's mint is pre-await), so this
+      // lands in the same task as the click — no window for boot to slip
+      // through. noteUserNavigation rather than begin() because there is
+      // no fetch to gate and no token for anyone to carry; see its
+      // docstring.
+      switchCtl.noteUserNavigation(newChatId, 'new-chat');
       sessionDrawer.setViewed(newChatId);
       // Mirror into chat.viewedSessionIdRef so subsequent in-bubble
       // chat-id resolution (pin button, snapshot persist) sees the

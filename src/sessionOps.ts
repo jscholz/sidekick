@@ -9,10 +9,10 @@
  *   - sessionDrawer owns drawer-render state (cachedSessions, the
  *     switchController focus epoch, etc.). It only needs to know "is this id
  *     deleted?" to filter the visible list.
- *   - proxyClient owns server-side lifecycle (activeChatId, conversations
- *     IDB row, sessions endpoint). It needs the same answer to bail out
- *     of `resumeSession` before its own `setActive(id)` re-pins a chat
- *     that was just deleted.
+ *   - proxyClient owns server-side lifecycle (the lastActiveChatId memo,
+ *     the conversations IDB row, the sessions endpoint). It needs the
+ *     same answer to bail out of `resumeSession` before its own
+ *     `setActive(id)` re-pins a chat that was just deleted.
  *   - Putting `recentlyDeleted` on either module forces an awkward import.
  *     A neutral module both can consult is the natural shape.
  *

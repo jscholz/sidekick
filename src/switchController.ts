@@ -50,8 +50,10 @@
  *     is "current" iff its gen still equals the live gen. A refused
  *     begin() leaves it alone, so nothing in flight is disturbed.
  *   - `userNavigated` — sticky for the app session; set by the first
- *     user-class begin(). The authority gate reads only this.
- *   - `ledger` — a 100-entry ring of every begin() and how it ended
+ *     user-class begin() OR noteUserNavigation(). The authority gate
+ *     reads only this.
+ *   - `ledger` — a 100-entry ring of every begin() (and every
+ *     noteUserNavigation()) and how it ended
  *     (begun / committed / superseded / refused), mirrored read-only at
  *     `window.__parleyNav` and sampled into the send-time diag in
  *     proxyClient.sendMessage. The 2026-09-06 incident had to be
@@ -133,6 +135,20 @@ export function canPaint(tok: PaintToken): boolean {
  *                were viewing. Not a race: it is the direct continuation
  *                of a user gesture, and refusing it would strand the user
  *                on a deleted chat's transcript.
+ *    new-chat  — the New chat button's rotation onto a freshly minted,
+ *                empty chat. It never calls begin() (see
+ *                noteUserNavigation below) but it IS a navigation and
+ *                the user made it.
+ *    capture-landing — the jump onto the dedicated session a meeting
+ *                capture just minted. Three of its four triggers are a
+ *                finger (header button, Cmd+Shift+M, ?capture=start
+ *                shortcut); the fourth is a `capture_control` envelope,
+ *                i.e. the agent starting a recording because the user
+ *                asked it to. Classed as user because the landing has
+ *                ALWAYS repainted unconditionally — calling it
+ *                programmatic would not make it refusable (it doesn't go
+ *                through begin()), it would only leave the boot restore
+ *                free to paint over the meeting shell.
  *  programmatic:
  *    boot      — the boot restore of the last-viewed / pinned chat
  *    fallback  — boot's most-recent landing when the restore came back
@@ -142,6 +158,7 @@ export function canPaint(tok: PaintToken): boolean {
  *    prewarm   — a speculative fetch/paint (none today) */
 export type NavOrigin =
   | 'tap' | 'keyboard' | 'cmdk' | 'push-tap' | 'deep-link' | 'drill' | 'delete-landing'
+  | 'new-chat' | 'capture-landing'
   | 'boot' | 'fallback' | 'reconcile' | 'prewarm';
 
 /** THE authority rule, as a pure function so it is testable and so the
@@ -155,6 +172,8 @@ export function originClass(o: NavOrigin): 'user' | 'programmatic' {
     case 'deep-link':
     case 'drill':
     case 'delete-landing':
+    case 'new-chat':
+    case 'capture-landing':
       return 'user';
     default:
       return 'programmatic';
@@ -233,9 +252,62 @@ export function begin(id: string, origin: NavOrigin, targetMessageId?: string): 
   return { gen, id, targetMessageId };
 }
 
-/** True once any user-class begin() has been granted this app-session.
- *  Boot reads it to abandon its restore outright rather than race — the
- *  begin() refusal is the safety net, this is the readable intent. */
+/** Sentinel id for a rotation whose chat hasn't been minted yet. Cannot
+ *  collide with a real chat_id (those are UUIDs), so a ledger reader can
+ *  tell "we don't know the id" from "the id was empty". */
+const UNMINTED_ID = '(unminted)';
+
+/** Record a user navigation that has NO switch to gate — the sticky
+ *  authority flag plus a ledger line, nothing else.
+ *
+ *  Why this exists rather than routing these through begin(): the New
+ *  chat button and the meeting-capture landing rotate onto a chat that
+ *  is EMPTY by construction, paint synchronously, and commit the view in
+ *  the same task. There is no fetch, so there is no async continuation
+ *  to carry a token, and begin() would actively get in the way — it
+ *  claims the optimistic highlight, which both callers immediately have
+ *  to clear (optimisticId() is the app's "a switch is in flight, show a
+ *  spinner" signal, and the new-chat handler's own no-op guard reads
+ *  it), and it would leave a `begun` entry that nothing ever resolves.
+ *
+ *  What they DID do before this (2026-09-06 residual): invalidate() +
+ *  setOptimistic(null). That bumps the epoch, so anything ALREADY in
+ *  flight bails — but it is anonymous, and a navigation that has not yet
+ *  claimed the epoch is untouched by it. Two ways that bit:
+ *    - boot's restore reaches begin() after the rotation, takes the
+ *      NEWER generation, and repaints over the fresh chat;
+ *    - boot's most-recent FALLBACK mints no token before its
+ *      `await listSessions()`, so its post-await "is this still ours?"
+ *      check has no generation to compare and falls through to
+ *      `!hasUserNavigated()` — which the rotation never set. (This is
+ *      the one scripts/smoke/new-chat-during-slow-boot.mjs reproduces:
+ *      on a fresh profile boot has no restore target, so the fallback is
+ *      its only move.)
+ *  Same bug as the tap, different door.
+ *
+ *  Callers still own invalidate()/setOptimistic()/setViewed(); this adds
+ *  only authority + evidence. Outcome is `committed` because by the time
+ *  a caller reaches here the landing is a decided fact, not a request.
+ *
+ *  @param id  the chat navigated to, or null when it hasn't been minted
+ *             yet (only the flag matters in that case).
+ *  @param origin  must be user-class — a programmatic caller has no
+ *             business setting the sticky flag, and passing one is a
+ *             no-op with a ledger line so the mistake is visible rather
+ *             than silently authoritative. */
+export function noteUserNavigation(id: string | null, origin: NavOrigin): void {
+  if (originClass(origin) !== 'user') {
+    record({ t: Date.now(), gen, id: id ?? UNMINTED_ID, origin, outcome: 'refused' });
+    return;
+  }
+  userNavigated = true;
+  record({ t: Date.now(), gen, id: id ?? UNMINTED_ID, origin, outcome: 'committed' });
+}
+
+/** True once any user-class begin() has been granted — or any
+ *  noteUserNavigation() has been recorded — this app-session. Boot reads
+ *  it to abandon its restore outright rather than race; the begin()
+ *  refusal is the safety net, this is the readable intent. */
 export function hasUserNavigated(): boolean {
   return userNavigated;
 }

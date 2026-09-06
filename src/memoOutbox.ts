@@ -168,7 +168,13 @@ function routeListenTurnText(body: string, item: any): void {
     status.setStatus('No speech detected', null);
     return;
   }
-  const current = backend.getCurrentSessionId?.() ?? null;
+  // "Still in the chat the turn was committed to" is a question about
+  // the VIEW, so ask switchController first — same precedence as every
+  // other addressed path. The adapter memo is the pre-view fallback and
+  // now lags a switch by a couple of awaits (it is written next to the
+  // IDB row, not ahead of the fetch), which would have made this compare
+  // against the chat the user just left.
+  const current = switchCtl.focusedId() ?? backend.getCurrentSessionId?.() ?? null;
   if (item.chatId && current && current !== item.chatId) {
     composer.appendText(body);
     status.setStatus('Recovered voice turn — review & send', null);
@@ -197,9 +203,18 @@ export async function flushOutbox() {
       }
       // Address the send to the chat the memo was RECORDED in (queued
       // items carry it) — a drain after the user moved chats must not
-      // deliver into wherever they are now. Legacy items without a
-      // chatId fall back to the pointer as before.
-      backend.sendMessage(text, item?.chatId ? { chatId: item.chatId } : undefined);
+      // deliver into wherever they are now. Legacy IDB rows predate
+      // rec.chatId; resolve one HERE rather than leaving opts.chatId
+      // absent, which proxyClient now treats as a programming error
+      // (dev-mode throw). Same precedence as every other send: the chat
+      // on screen first, the adapter's pre-view memo only if nothing has
+      // committed. A legacy memo has no better answer available.
+      const memoChatId = item?.chatId
+        ?? switchCtl.focusedId()
+        ?? backend.getCurrentSessionId?.()
+        ?? null;
+      if (!item?.chatId) diag(`outbox: legacy memo without chatId — delivering to ${memoChatId ?? 'no chat'}`);
+      backend.sendMessage(text, memoChatId ? { chatId: memoChatId } : undefined);
     },
     async (blob, mimeType, id, autoSend, toComposer, durationMs, item) => {
       const listenTurn = !!(item && item.listenTurn);

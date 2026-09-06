@@ -49,14 +49,31 @@ import * as sessionCache from './sessionCache.ts';
 import * as transcriptStore from './transcript/store.ts';
 import { markRecentlyDeleted, isRecentlyDeleted } from './sessionOps.ts';
 import * as switchCtl from './switchController.ts';
+import { isDevMode } from './util/devMode.ts';
 
 let subs: any = null;
 let connected = false;
-/** Active chat_id memoized in-process. Hydrated on connect() from IDB.
- *  setCurrentSessionId / resumeSession / newSession / first-message
- *  paths all funnel through this so lookups don't hit IDB on the
- *  hot path. */
-let activeChatId: string | null = null;
+/** In-process memo of the IDB "active conversation" row
+ *  (conversations.getActive/setActive) — a CACHE, never an authority.
+ *
+ *  It used to be the second source of truth for "which chat am I in",
+ *  and resumeSession() flipped it FIRST with a comment claiming the
+ *  active chat_id was "the single source of truth". That was false in
+ *  both directions: the shell had already moved addressing onto view
+ *  state (main.ts currentChatId), and on 2026-09-06 a boot restore's
+ *  resumeSession re-aimed this pointer under a user who had tapped a
+ *  different chat three seconds earlier (UX_DETERMINISM_PLAN §1, §3).
+ *
+ *  What it is now (UX_DETERMINISM_PLAN §6 rule 2 — exactly one source of
+ *  truth for the current conversation, and it lives in switchController):
+ *    - hydrated on connect() so getCurrentSessionId() can answer
+ *      synchronously BEFORE any view has committed (fresh boot),
+ *    - written wherever we write conversations.setActive(), so the memo
+ *      and the IDB row never disagree,
+ *    - read only by getCurrentSessionId(), whose remaining jobs are the
+ *      pre-view boot landing and the lazy-mint of a first chat.
+ *  Nothing addresses a send from it. See sendMessage below. */
+let lastActiveChatId: string | null = null;
 /** Health-poll handle. We use GET /api/parley/sessions as a cheap
  *  liveness probe — its handler is the same one the drawer calls, so
  *  there's no separate health route to mount. */
@@ -511,10 +528,10 @@ function scheduleReconcile(gapMs: number): void {
   }, 500);
 }
 
-/** Refetch + replay the active chat's transcript when the stream channel
- *  has been down long enough that the server's 128-entry replay ring may
- *  not cover what we missed. Skips when:
- *    - no active chat (nothing to reconcile against)
+/** Refetch + replay the ON-SCREEN chat's transcript when the stream
+ *  channel has been down long enough that the server's 128-entry replay
+ *  ring may not cover what we missed. Skips when:
+ *    - nothing is committed on screen (nothing to reconcile against)
  *    - no shell subscription (adapter not wired up)
  *    - the gap since the previous reconnect is short (<10s) — ring
  *      replay via Last-Event-ID should have caught us up.
@@ -522,9 +539,28 @@ function scheduleReconcile(gapMs: number): void {
  *  (`onResume` callback → shell clears + re-renders). The shell already
  *  knows how to reconcile a fresh transcript dump, so we don't need an
  *  incremental diff; the brief "loading…" flash is acceptable for the
- *  rare iOS-backgrounding case. */
+ *  rare iOS-backgrounding case.
+ *
+ *  Reads switchCtl.viewedId(), not the lastActiveChatId memo: this
+ *  repaints the pane, so the only defensible target is the chat whose
+ *  transcript is COMMITTED on screen. viewedId() is also the id the
+ *  shell's own onResume guard compares against, so source and gate now
+ *  read the same variable instead of two that merely tended to agree.
+ *  optimisticId() is deliberately NOT consulted — an in-flight switch
+ *  owns its own fetch and will paint the incoming chat itself. */
 async function reconcileActiveChat(gapMs: number, isRetry = false): Promise<void> {
-  if (!activeChatId || !subs?.onResume) return;
+  // Snapshot the chat we are reconciling AT CALL TIME. The fetch below
+  // can take seconds on a phone link, and the user can navigate away
+  // (New chat, drawer click) while it is in flight — the live view will
+  // already name the NEW chat by the time we resume here. Labelling the
+  // payload with the post-await value made the shell's epoch guard
+  // (main.ts onResume: focusedId() !== e.conversation) compare the new
+  // chat against itself, so it always passed and the OLD chat's
+  // transcript painted over the fresh one. Field bug 2026-07-12 (CAP
+  // walking test): "new chat… some lag… then left me in current
+  // session".
+  const reconcilingChatId = switchCtl.viewedId();
+  if (!reconcilingChatId || !subs?.onResume) return;
   if (gapMs < RECONCILE_GAP_MS && !reconcileOwed) {
     diag(`proxy-client: reconcile skipped (gap ${gapMs}ms < ${RECONCILE_GAP_MS}ms)`);
     return;
@@ -534,18 +570,7 @@ async function reconcileActiveChat(gapMs: number, isRetry = false): Promise<void
   if (!isRetry && gapMs >= RECONCILE_GAP_MS) reconcileRetries = 0;
   const owedRun = gapMs < RECONCILE_GAP_MS;
   reconcileOwed = true;
-  // Snapshot the chat we are reconciling. The fetch below can take
-  // seconds on a phone link, and the user can navigate away (New chat,
-  // drawer click) while it is in flight — `activeChatId` is live state
-  // and will already point at the NEW chat by the time we resume here.
-  // Labelling the payload with the post-await value made the shell's
-  // epoch guard (main.ts onResume: focusedId() !== e.conversation)
-  // compare the new chat against itself, so it always passed and the
-  // OLD chat's transcript painted over the fresh one. Field bug
-  // 2026-07-12 (CAP walking test): "new chat… some lag… then left me in
-  // current session".
-  const reconcilingChatId = activeChatId;
-  log(`proxy-client: reconciling active chat ${reconcilingChatId} after ${gapMs}ms gap${owedRun ? ' (owed)' : ''}`);
+  log(`proxy-client: reconciling viewed chat ${reconcilingChatId} after ${gapMs}ms gap${owedRun ? ' (owed)' : ''}`);
   try {
     const r = await fetch(
       `${apiBase()}/sessions/${encodeURIComponent(reconcilingChatId)}/messages`,
@@ -1029,10 +1054,10 @@ export const proxyClientAdapter = {
     // answer synchronously after connect resolves. We don't AUTO-mint
     // here — first-send / explicit-new-chat allocates lazily.
     try {
-      activeChatId = await conversations.getActive();
+      lastActiveChatId = await conversations.getActive();
     } catch (e: any) {
       diag(`proxy-client: getActive failed: ${e.message}`);
-      activeChatId = null;
+      lastActiveChatId = null;
     }
     // Open the stream channel FIRST and let its onopen drive "connected".
     // We deliberately do NOT `await probeSessions()` here: on a cold
@@ -1109,24 +1134,59 @@ export const proxyClientAdapter = {
     if (!connected) {
       diag('proxy-client.sendMessage: POSTing while stream channel is down (offline-first)');
     }
-    // Explicit target override — approval actions (and any other
-    // send whose owning chat is pinned at tap time) must NOT follow
-    // activeChatId: a mid-flight session switch re-aims the module-
-    // level id and the command lands in whatever chat the user
-    // switched to (field bug 2026-06-12: /approve ×5 into the wrong
-    // session while switching on CAP).
+    // ADDRESSED, NOT POINTED (UX_DETERMINISM_PLAN §6 rule 3): opts.chatId
+    // is REQUIRED. Every send names the chat it was composed in, captured
+    // at intent time — the composer, the approval buttons, the question
+    // popup, slash commands, the voice draft flush, the memo outbox drain
+    // and the offline retry queue all resolve one and carry it. Reading a
+    // module-level pointer at completion time is precisely how /approve
+    // ×5 landed in the wrong session (field 2026-06-12) and how the
+    // 2026-09-06 dream log went to Notion.
+    //
+    // Missing chatId is a PROGRAMMING error, not a user-facing one, so it
+    // is loud where a developer will see it and survivable where the user
+    // is:
+    //   dev mode → throw. A new send path that forgets to address itself
+    //              fails on the first try, in the smokes, not in the
+    //              field nine minutes later.
+    //   prod     → diag + best-effort resolve, because dropping a typed
+    //              message on the floor is worse than sending it to the
+    //              most likely chat. Order matters: the chat the user is
+    //              LOOKING AT (switchCtl — the one source of truth) first,
+    //              the IDB active row / lazy mint only when there is no
+    //              view at all (fresh install, first send before any
+    //              landing). The old code had this backwards.
     let chatId: string;
     if (typeof opts.chatId === 'string' && opts.chatId) {
       chatId = opts.chatId;
     } else {
-      // Lazy-allocate: first send under no active chat_id mints one.
-      // Drawer entries created by the user clicking "new chat" go via
-      // newSession() below.
-      if (!activeChatId) {
-        const conv = await conversations.getOrCreateActive();
-        activeChatId = conv.chat_id;
+      // Shape, not content: enough to tell WHICH send path forgot to
+      // address itself, without putting the user's message into a diag
+      // line that the dev-mode relay writes to disk. The dev throw
+      // carries a stack, which is the precise answer anyway.
+      const shape = `len=${text.length} voice=${!!opts.voice} att=${Array.isArray(opts.attachments) ? opts.attachments.length : 0}`;
+      if (isDevMode()) {
+        throw new Error(
+          'proxy-client.sendMessage: opts.chatId is required — sends must be addressed '
+          + `at intent time, not resolved from a pointer at send time (${shape}). `
+          + 'Capture the chat id where the user committed the message and pass it through.',
+        );
       }
-      chatId = activeChatId!;
+      const focused = switchCtl.focusedId();
+      diag(`proxy-client.sendMessage: UNADDRESSED SEND (${shape}) — falling back to `
+        + `${focused ? `focusedId=${focused}` : 'the lazy-mint path'}; fix the caller`);
+      if (focused) {
+        chatId = focused;
+      } else {
+        // No view has ever committed: this is the genuine first send on
+        // a fresh install. Lazy-allocate — drawer entries created by the
+        // user clicking "New chat" go via newSession() below.
+        if (!lastActiveChatId) {
+          const conv = await conversations.getOrCreateActive();
+          lastActiveChatId = conv.chat_id;
+        }
+        chatId = lastActiveChatId!;
+      }
     }
     // Nav evidence, one line, no wire change (UX_DETERMINISM_PLAN §5
     // Phase 0.3). The 2026-09-06 mis-send had to be reconstructed from
@@ -1217,25 +1277,38 @@ export const proxyClientAdapter = {
     // server side via plugin's get_or_create_session, IDB on this
     // side via conversations.hydrate from resumeSession or via
     // updateLastMessageAt's create-if-missing semantics).
-    activeChatId = conversations.mintChatId();
-    await conversations.setActive(activeChatId);
-    log(`proxy-client: new session (chat_id=${activeChatId})`);
+    lastActiveChatId = conversations.mintChatId();
+    await conversations.setActive(lastActiveChatId);
+    log(`proxy-client: new session (chat_id=${lastActiveChatId})`);
   },
 
+  /** The IDB "active conversation" memo — NOT "the chat the user is
+   *  looking at". That question has one answer and it is
+   *  switchCtl.viewedId()/focusedId(); every caller in the shell asks
+   *  switchController first and only falls through to here.
+   *
+   *  Two legitimate jobs remain, both of them PRE-VIEW:
+   *    1. boot landing — the last-active row survived the reload but no
+   *       switch has committed yet, so there is no view to read.
+   *    2. lazy mint — main.ts resolveOrMintSendChatId reads this
+   *       immediately after newSession() to learn the id that was just
+   *       minted (mintChatId is synchronous, before newSession's first
+   *       await).
+   *  Anything else asking this for a send target is a bug. */
   getCurrentSessionId() {
-    return activeChatId;
+    return lastActiveChatId;
   },
 
   /** Imperative active-chat setter. Currently UNUSED by the shell:
    *  every active-chat flip funnels through resumeSession (drawer
    *  click) or newSession (toolbar / first-message), both of which
-   *  already write activeChatId + persist to IDB. Kept on the adapter
+   *  already write lastActiveChatId + persist to IDB. Kept on the adapter
    *  so callers that want a no-history-fetch session switch (e.g. a
    *  future cmdk palette quick-jump that does its own snapshot replay)
    *  have a stable hook. NOT exported through src/backend.ts —
    *  promote it through the dispatcher when a real call site lands. */
   async setCurrentSessionId(chat_id: string | null) {
-    activeChatId = chat_id;
+    lastActiveChatId = chat_id;
     await conversations.setActive(chat_id);
   },
 
@@ -1446,20 +1519,13 @@ export const proxyClientAdapter = {
     // Phantom-resume guard: if `id` was deleted from this tab in the
     // last few seconds, return empty WITHOUT calling setActive(id) —
     // an in-flight click that fired before the delete would otherwise
-    // re-pin activeChatId on a chat that no longer exists, leaving the
+    // re-pin lastActiveChatId on a chat that no longer exists, leaving the
     // PWA pointing at a phantom. The drawer's recentlyDeleted filter
     // hides the row but proxyClient state would still be wrong.
     if (isRecentlyDeleted(id)) {
       diag(`proxy-client.resumeSession: ${id} was just deleted, skipping setActive + fetch`);
       return { messages: [], firstId: null, hasMore: false };
     }
-    // Flip the active pointer FIRST. The next sendMessage uses this
-    // chat_id even if the history fetch below errors — the gateway
-    // resolves (Platform.PARLEY, chat_id) → session_id internally
-    // so the conversation continues server-side regardless. We don't
-    // need a token-monotonic guard like hermes.ts because the active
-    // chat_id is the single source of truth and IDB write is atomic.
-    activeChatId = id;
     // Lazily hydrate the local IDB row if this is a server-side chat
     // we've never touched on this device (cross-device, or after a
     // clear-site-data on a device that previously had it). Without
@@ -1470,7 +1536,26 @@ export const proxyClientAdapter = {
     } catch (e: any) {
       diag(`proxy-client.resumeSession: IDB hydrate failed: ${e.message}`);
     }
+    // Persist "this is where I was" for the NEXT boot, and keep the
+    // in-process memo in step with the row we just wrote.
+    //
+    // This used to run FIRST, ahead of the hydrate, under a comment
+    // claiming the active chat_id was "the single source of truth" and
+    // that the next sendMessage would follow it. Neither half was true
+    // any more, and the ordering was load-bearing for exactly the bug we
+    // are removing: it made resumeSession — which boot restore, cmd-K,
+    // drill and the foreground reconcile all call — able to re-aim
+    // "where the user is" as a side effect of fetching a transcript. On
+    // 2026-09-06 boot's restore did that three seconds after the user
+    // had tapped a different chat (UX_DETERMINISM_PLAN §1).
+    //
+    // It is now a plain derived cache written next to the IDB row it
+    // mirrors. Addressing lives in switchController; sends carry their
+    // own chat id (see sendMessage). Nothing reads this to decide where
+    // a message goes, so its position no longer matters — which is the
+    // whole point.
     await conversations.setActive(id);
+    lastActiveChatId = id;
     // Fetch transcript via the proxy. The endpoint resolves chat_id →
     // session_id by looking up state.db.sessions.session_key, then walks
     // the parent_session_id chain so compression rotations show their
@@ -1488,7 +1573,7 @@ export const proxyClientAdapter = {
     return result;
   },
 
-  /** Fetch a session transcript without changing activeChatId or IDB
+  /** Fetch a session transcript without changing lastActiveChatId or IDB
    *  active state. Used by active-chat post-final refresh: after
    *  reply_final, the shell wants a fresh durable snapshot so the
    *  transcript store can drain completed inflight envelopes, but it
@@ -1732,8 +1817,8 @@ export const proxyClientAdapter = {
     if (id.startsWith('__parley:hint:')) return;
     // Mark BEFORE the network round-trip so any concurrent resumeSession
     // for the same id sees the flag and short-circuits before its own
-    // setActive(id) re-pins activeChatId. Without this, click-then-
-    // immediate-delete races re-pin after delete clears activeChatId,
+    // setActive(id) re-pins lastActiveChatId. Without this, click-then-
+    // immediate-delete races re-pin after delete clears lastActiveChatId,
     // and the drawer paints a placeholder for the deleted chat.
     markRecentlyDeleted(id);
     // Server delete FIRST, and failures PROPAGATE (latency-audit A1,
@@ -1753,8 +1838,8 @@ export const proxyClientAdapter = {
       throw new Error(`server delete failed (HTTP ${r.status})`);
     }
     await conversations.remove(id);
-    if (activeChatId === id) {
-      activeChatId = null;
+    if (lastActiveChatId === id) {
+      lastActiveChatId = null;
       await conversations.setActive(null);
     }
     log(`proxy-client: deleted session ${id}`);
