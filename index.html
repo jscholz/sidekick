@@ -90,6 +90,14 @@
     <span class="wm-rest">Parley</span>
     <span class="version" id="app-version">—</span>
   </h1>
+  <!-- Current-session title (UX_DETERMINISM_PLAN Phase 0 #1). Nothing on
+       screen named the active chat after the drawer closed on mobile —
+       how a dictation landed in the wrong session (docs/UX_DETERMINISM_PLAN.md
+       §1). src/headerTitle.ts owns this element: "Opening <target>…" while
+       a switch is in flight, else the viewed session's title, else empty
+       (fresh boot before restore). aria-live so screen readers hear the
+       switch land without needing focus moved to it. -->
+  <span class="header-title" id="header-title" aria-live="polite"></span>
   <span class="status" id="status"><span class="dot"></span><span id="status-text">Not connected</span></span>
 </div>
 

@@ -397,6 +397,24 @@
     font-family: var(--font-mono); font-size: 10.5px; font-weight: 400;
     letter-spacing: 0.18em; text-transform: uppercase; color: var(--primary);
   }
+  /* Current-session title (UX_DETERMINISM_PLAN Phase 0 #1). Sits between
+   * the brand (auto width) and .status (pinned right via its own
+   * margin-left:auto) — flex-basis 0 + flex-grow 1 means it alone absorbs
+   * the squeeze on a narrow phone instead of the brand or status glyphs
+   * shrinking. min-width:0 is required for a flex child to actually
+   * shrink below its content's natural width (the classic flexbox
+   * ellipsis trap). :empty collapses it to zero width (no stray 12px
+   * .header gap) for the fresh-boot-before-restore case. */
+  .header .header-title {
+    flex: 1 1 0%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .header .header-title:empty { display: none; }
   .header .status {
     margin-left: auto; font-family: var(--font-mono); font-size: calc(var(--content-size) - 3px);
     color: var(--muted); letter-spacing: 0.04em;
@@ -1800,6 +1818,35 @@
   }
   @keyframes transcript-spinner-fade-in {
     to { opacity: 0.7; }
+  }
+  /* Named loading state (UX_DETERMINISM_PLAN Phase 0 #2): "Opening
+   * <target title>…" under the spinner, so the blank pane during a slow
+   * switch names where it's going instead of just spinning. A real
+   * element (not ::after content) so a smoke can assert on it. Created/
+   * removed by transcript/index.ts's showTranscriptLoading — a real DOM
+   * child of #transcript, but tagged `data-island` so the reconciler's
+   * keyed-child sweep (reconciler.ts TRANSCRIPT OWNERSHIP CONTRACT)
+   * leaves it alone instead of treating it as a stale keyless leftover.
+   * Positioned the same way as the spinner (percentage of #transcript's
+   * own box, which is position:relative) so it lands directly under it
+   * regardless of where #transcript sits in the taller .chat-column. */
+  .transcript-loading-label {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, 28px);
+    max-width: calc(100% - 36px);
+    font-size: 13px;
+    color: var(--muted);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .transcript.transcript-loading .transcript-loading-label {
+    animation: transcript-spinner-fade-in 0.2s ease 0.2s forwards;
   }
 
   /* ── Call-dropped banner ──

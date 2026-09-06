@@ -24,6 +24,30 @@ import {
 let getTranscriptEl: () => HTMLElement | null = () => document.getElementById('transcript');
 let getFocusedChatId: () => string | null = () => null;
 
+/** Transcript elements we've already wired the loading-label cleanup
+ *  observer onto — guards against attaching a second observer if
+ *  showTranscriptLoading fires more than once against the same node. */
+const labelCleanupWired = new WeakSet<HTMLElement>();
+
+/** `.transcript-loading` has three legitimate clear sites (this file's
+ *  rerenderInto, plus main.ts's new-chat/meeting-session shells, which
+ *  supersede an in-flight resume and clear the class directly without
+ *  going through rerenderInto). Chasing every clear site to also remove
+ *  the label would leave the label's lifecycle hostage to code this
+ *  module doesn't own. Instead: the label is a pure function of the
+ *  class. Wire it once per transcript element so ANY removal of
+ *  `.transcript-loading` — present or future call site — clears the
+ *  label too, without those sites needing to know the label exists. */
+function ensureLoadingLabelCleanup(el: HTMLElement): void {
+  if (labelCleanupWired.has(el)) return;
+  labelCleanupWired.add(el);
+  new MutationObserver(() => {
+    if (!el.classList.contains('transcript-loading')) {
+      el.querySelector(':scope > .transcript-loading-label')?.remove();
+    }
+  }).observe(el, { attributes: true, attributeFilter: ['class'] });
+}
+
 export interface BindOpts {
   transcriptEl: () => HTMLElement | null;
   getFocusedChatId: () => string | null;
@@ -69,8 +93,17 @@ export function bindTranscriptPipeline(opts: BindOpts): () => void {
  *  rung that has verified we hold NO paintable bytes in memory. Do not
  *  add call sites; a spinner armed anywhere else will fight the paint
  *  ladder (stale-paint-then-reconcile paints CONTENT on every rung that
- *  has any). */
-export function showTranscriptLoading(): void {
+ *  has any).
+ *
+ *  `label` (UX_DETERMINISM_PLAN Phase 0 #2) names the target underneath
+ *  the spinner — e.g. "Opening Time management…" — so the blank pane
+ *  during a slow switch says where it's going instead of just spinning.
+ *  Rendered as a real DOM element (not `::after` content) tagged
+ *  `data-island` so the reconciler's keyed-child sweep leaves it in place
+ *  across any windowed-replay batches that land while it's showing (see
+ *  reconciler.ts's TRANSCRIPT OWNERSHIP CONTRACT). rerenderInto below
+ *  removes it in the same step that clears `.transcript-loading`. */
+export function showTranscriptLoading(label: string): void {
   const el = getTranscriptEl();
   if (!el) return;
   // Switching chats: forget per-row tool-list expand choices so the incoming
@@ -87,6 +120,12 @@ export function showTranscriptLoading(): void {
     el.innerHTML = '';
   });
   el.classList.add('transcript-loading');
+  const labelEl = document.createElement('div');
+  labelEl.className = 'transcript-loading-label';
+  labelEl.setAttribute('data-island', 'transcript-loading-label');
+  labelEl.textContent = label;
+  el.appendChild(labelEl);
+  ensureLoadingLabelCleanup(el);
 }
 
 /** Force a re-render of the active chat. Call after a session-switch
@@ -127,8 +166,14 @@ function rerenderInto(chatId: string): void {
   // Switch-then-load: the row-click handler sets .transcript-loading
   // synchronously when flipping focus to a new chat. Clear it as soon
   // as the first non-empty render lands so the spinner disappears
-  // when content arrives (whether from cache or server).
-  if (renderSpecs.length > 0) el.classList.remove('transcript-loading');
+  // when content arrives (whether from cache or server). The named
+  // loading label (Phase 0 #2) clears synchronously here too — the
+  // MutationObserver in ensureLoadingLabelCleanup is a backstop for the
+  // OTHER clear sites, not the primary path.
+  if (renderSpecs.length > 0) {
+    el.classList.remove('transcript-loading');
+    el.querySelector(':scope > .transcript-loading-label')?.remove();
+  }
   // Follow the tail while streaming: when a reply_delta grows the last
   // assistant bubble (an UPDATE, not a create — so per-bubble autoScroll
   // doesn't fire), keep the live edge in view. autoScroll() is a no-op

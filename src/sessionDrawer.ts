@@ -46,6 +46,7 @@ import * as sessionIdentity from './sessionIdentity.ts';
 import * as sessionAnnounce from './sessionAnnounce.ts';
 import * as settings from './settings.ts';
 import { AURA_VOICES, voiceLabel } from './voices.ts';
+import * as headerTitle from './headerTitle.ts';
 
 let onResumeCb: ((tok: switchCtl.SwitchToken, messages: any[], pagination?: { firstId: number | null; hasMore: boolean }, inflight?: any[], targetMessageId?: string) => void) | null = null;
 
@@ -572,6 +573,11 @@ export function noteViewIntent(id: string): void {
 
 function applyViewChangedEffects(prev: string | null, id: string | null): void {
   if (prev && prev !== id) previouslyViewedId = prev;
+  // Header title (UX_DETERMINISM_PLAN Phase 0 #1). setViewed() and
+  // commitView() are the only two callers of this function, so this one
+  // call covers both view-commit paths — no need to duplicate it at each
+  // call site.
+  headerTitle.sync();
   // Switching INTO a chat is the "user has now seen this" signal.
   // User-gesture paths already cleared at tap time via noteViewIntent;
   // this commit-time repeat is the idempotent backstop that also covers
@@ -980,6 +986,10 @@ async function doRefresh() {
   const cached = await sessionCache.getListCache();
   if (cached?.sessions?.length) {
     cachedSessions = overlayPendingRenames(cached.sessions);
+    // A renamed/re-titled session's new name may be sitting in this list
+    // fetch even when the viewed id itself hasn't changed — re-sync so
+    // the header doesn't keep showing a stale title (Phase 0 #1).
+    headerTitle.sync();
     renderListFiltered(listEl, active);
   } else {
     listEl.innerHTML = '<li class="sess-empty">Loading…</li>';
@@ -1001,6 +1011,10 @@ async function doRefresh() {
     // repaints over the optimistic rename (title visibly reverts until
     // the post-rename refresh; field 2026-07-22).
     cachedSessions = overlayPendingRenames(sessions);
+    // Same as the cache-render rung above: the server list is the
+    // authoritative title source (session_changed / rename), so re-sync
+    // the header here too (Phase 0 #1).
+    headerTitle.sync();
     // Drain pending sessions:
     //   1. Server now knows about the id — confirmed; drop the
     //      synthesized row, the persisted row supersedes it.
@@ -2121,6 +2135,14 @@ async function resume(id: string, targetMessageId?: string) {
   // the old one). The token authorizes every render below; superseded
   // continuations bail at switchCtl.isCurrent(tok).
   const tok = switchCtl.begin(id, targetMessageId);
+  // Header title + named loading state (UX_DETERMINISM_PLAN Phase 0 #1/#2):
+  // reflect the in-flight target the moment the switch opens, before any
+  // fetch — this "Opening <title>…" state replaces the nameless spinner
+  // that let this morning's boot-restore navigation land unnoticed (see
+  // docs/UX_DETERMINISM_PLAN.md §1). openingLabel is computed once and
+  // reused at both showTranscriptLoading call sites below.
+  headerTitle.sync();
+  const openingLabel = `Opening ${getTitleForChat(id) || 'New chat'}…`;
   // Switch-back fast paint: the in-memory transcriptStore retains this
   // session's durable rows from an earlier visit this app-session (SSE
   // keeps background chats current in place). When present AND tail-
@@ -2235,7 +2257,7 @@ async function resume(id: string, targetMessageId?: string) {
       // from the LEAVING chat must not stack under the incoming
       // full-area spinner.
       clearEdgeLoader();
-      showTranscriptLoading();
+      showTranscriptLoading(openingLabel);
       t?.trace('transcript-cleared');
     }
   }
@@ -2274,7 +2296,7 @@ async function resume(id: string, targetMessageId?: string) {
           // to the blank+spinner path. This is still resume()'s mem-gate
           // fall-through (the sole legal showTranscriptLoading caller).
           clearEdgeLoader();
-          showTranscriptLoading();
+          showTranscriptLoading(openingLabel);
           t?.trace('transcript-cleared');
         }
       }
@@ -2424,6 +2446,12 @@ async function resume(id: string, targetMessageId?: string) {
     // Clear optimistic only if our switch is still live AND optimistic
     // still points at us (no newer switch superseded us).
     switchCtl.clearOptimisticIfCurrent(tok);
+    // Re-sync the header: an error/no-op rung above can leave optimistic
+    // cleared without ever calling setViewed/commitView (e.g. the
+    // `result.error` branch, or a superseded switch) — without this the
+    // header would keep reading "Opening <target>…" after the switch that
+    // was opening it has already given up.
+    headerTitle.sync();
     t?.trace('resume-finally');
   }
 }
@@ -2755,6 +2783,11 @@ export function init(opts: {
   onBeforeSwitchCb = opts.onBeforeSwitch || null;
   onMultiSelectChangeCb = opts.onMultiSelectChange || null;
   onSessionGoneCb = opts.onSessionGone || null;
+  // Header title (UX_DETERMINISM_PLAN Phase 0 #1) grabs its DOM element
+  // here — main.ts calls sessionDrawer.init() once at boot, so this is
+  // the earliest guaranteed-DOM-ready hook without adding a new call site
+  // in main.ts itself.
+  headerTitle.init();
   installSelectionKeyboardListener();
   // Restore persisted filter (don't await — boot order shouldn't block
   // on IDB; refresh() will pick it up on the next render once resolved).

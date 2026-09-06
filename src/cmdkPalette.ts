@@ -21,6 +21,7 @@ import * as switchCtl from './switchController.ts';
 import { parseQuery, applyFilter } from './sessionFilter.ts';
 import type { SearchMessageHit as ServerMessageHit } from './proxyClientTypes.ts';
 import { diag } from './util/log.ts';
+import * as headerTitle from './headerTitle.ts';
 
 type SessionHit = {
   kind: 'session';
@@ -496,6 +497,10 @@ async function activate(hit: Hit) {
   // the await supersedes this — the paint below then refuses.
   const targetMessageId = hit.kind === 'message' ? String(hit.message_id) : undefined;
   const tok = switchCtl.begin(id, targetMessageId);
+  // Header title (UX_DETERMINISM_PLAN Phase 0 #1): a palette pick is a
+  // switch-begin site same as a drawer row click — reflect the "Opening
+  // <title>…" state immediately.
+  headerTitle.sync();
   // Palette pick = user intent to view — the seen effects (unread chip
   // + badge clear, activity read-mark) fire at the pick, not after the
   // resumeSession fetch commits the view. (The message-hit DRILL branch
@@ -511,6 +516,10 @@ async function activate(hit: Hit) {
     diag(`cmdk: resume ${id} failed: ${e?.message || e}`);
   } finally {
     switchCtl.clearOptimisticIfCurrent(tok);
+    // Same rationale as sessionDrawer.resume()'s finally: an error/no-op
+    // path can clear optimistic without ever committing a view, which
+    // would otherwise leave the header stuck on "Opening…".
+    headerTitle.sync();
   }
 }
 
