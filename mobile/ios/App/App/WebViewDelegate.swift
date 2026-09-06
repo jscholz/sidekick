@@ -108,6 +108,25 @@ class ParleyBridgeViewController: CAPBridgeViewController, WKUIDelegate, WKScrip
 
     override func capacitorDidLoad() {
         super.capacitorDidLoad()
+        // Local (non-npm) plugins MUST be registered by hand. Capacitor 8 does
+        // NOT scan the Objective-C runtime for CAPBridgedPlugin conformers:
+        // CapacitorBridge.registerPlugins() builds an explicit list of the five
+        // built-in core plugins (Http/Console/WebView/Cookies/SystemBars) plus
+        // whatever class names `cap sync` wrote into capacitor.config.json's
+        // packageClassList — and that list only ever contains npm-installed
+        // plugins. A plugin file sitting in this target compiles fine, exports
+        // nothing, and every JS call rejects with "not implemented on ios"
+        // (field 2026-09-06: transcript links did nothing in the CAP app; the
+        // JS console showed the plugin missing, and
+        // `Capacitor.PluginHeaders` listed only the six npm/core plugins).
+        //
+        // NOTE: AudioSessionPlugin + SpeechRecognizerPlugin are NOT registered
+        // here yet, so they have never actually run — their own doc comments
+        // claiming "@objc runtime auto-registration" are wrong. Their JS
+        // callers null-check and no-op silently, which is why nothing looked
+        // broken. Registering them changes live audio-routing behaviour, so
+        // that's a deliberate separate change, not a drive-by.
+        bridge?.registerPluginInstance(ExternalBrowserPlugin())
         guard let webView = self.bridge?.webView else { return }
         // Take ownership of the UI delegate slot. Capacitor itself only sets
         // the navigation delegate, so we don't conflict with the bridge.

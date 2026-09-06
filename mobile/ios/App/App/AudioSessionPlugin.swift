@@ -78,9 +78,23 @@ final class AudioSessionController {
 }
 
 /// Capacitor bridge so JS can flip the AVAudioSession category just-in-time
-/// around mic capture. Auto-registered by Capacitor via the @objc runtime
-/// (same pattern as SpeechRecognizerPlugin — no manual registration list).
-/// JS reaches it at `window.Capacitor.Plugins.AudioSession`.
+/// around mic capture. JS would reach it at
+/// `window.Capacitor.Plugins.AudioSession`.
+///
+/// ⚠️ NOT CURRENTLY REGISTERED — THIS PLUGIN HAS NEVER RUN. The original
+/// comment here claimed "auto-registered by Capacitor via the @objc runtime";
+/// that is false. Capacitor 8's CapacitorBridge.registerPlugins() only loads
+/// five hard-coded core plugins plus the npm-derived packageClassList in
+/// capacitor.config.json — a local plugin needs an explicit
+/// `bridge.registerPluginInstance(AudioSessionPlugin())` in
+/// WebViewDelegate.capacitorDidLoad() (see ExternalBrowserPlugin, which does).
+/// Because nativeAudioSession() in src/audio/shared/ios-specific.ts null-checks
+/// `cap.Plugins?.AudioSession` and no-ops, the failure was silent: the app has
+/// been running in whatever category WKWebView's getUserMedia negotiates, so
+/// the Bluetooth-A2DP-preservation behaviour this plugin exists to provide
+/// (podcast over BT not dropping to HFP when Parley opens) was never active.
+/// Registering it is a live audio-routing change and wants its own on-device
+/// test pass — deliberately left off until then (found 2026-09-06).
 @objc(AudioSessionPlugin)
 public class AudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "AudioSessionPlugin"

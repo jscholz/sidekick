@@ -11,9 +11,13 @@ import UIKit
 ///
 /// `UIApplication.shared.open(_:options:completionHandler:)` is Apple's
 /// documented "hand this URL to whichever app owns it" API; for http/https
-/// that's the OS's registered default browser as of iOS 14+. Auto-registered
-/// via the @objc runtime (same pattern as AudioSessionPlugin /
-/// SpeechRecognizerPlugin — no manual registration list). JS reaches it at
+/// that's the OS's registered default browser as of iOS 14+.
+///
+/// Registered by hand in WebViewDelegate.capacitorDidLoad() via
+/// `bridge.registerPluginInstance(_:)`. That call is NOT optional: Capacitor 8
+/// does not auto-discover CAPBridgedPlugin classes, so without it this file
+/// compiles into the binary and is never reachable from JS. See the comment in
+/// capacitorDidLoad() for the full mechanism. JS reaches it at
 /// `window.Capacitor.Plugins.ExternalBrowser`.
 @objc(ExternalBrowserPlugin)
 public class ExternalBrowserPlugin: CAPPlugin, CAPBridgedPlugin {

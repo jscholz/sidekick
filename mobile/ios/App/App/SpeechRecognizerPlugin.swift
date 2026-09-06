@@ -34,6 +34,17 @@ import AVFoundation
 /// engine and WKWebView's getUserMedia capture; concurrent input taps
 /// across separate AVAudioEngines normally coexist under .playAndRecord,
 /// but this is the behavior to verify on-device.
+/// ⚠️ NOT CURRENTLY REGISTERED — THIS PLUGIN HAS NEVER RUN. Capacitor 8 does
+/// not auto-discover CAPBridgedPlugin classes; a local plugin needs an explicit
+/// `bridge.registerPluginInstance(SpeechRecognizerPlugin())` in
+/// WebViewDelegate.capacitorDidLoad() (see ExternalBrowserPlugin, which does).
+/// Its JS caller gates on `nativeSpeech.isAvailable()` (turnbased.ts, sendword
+/// phrase detection), which is false when the plugin is missing, so the failure
+/// was silent — sendword has been running on the non-native engine the whole
+/// time and general dictation never used this path. Registering it adds a third
+/// concurrent
+/// reader of the hardware input (see the caveat above), so it wants its own
+/// on-device test pass — deliberately left off until then (found 2026-09-06).
 @objc(SpeechRecognizerPlugin)
 public class SpeechRecognizerPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "SpeechRecognizerPlugin"
