@@ -301,6 +301,12 @@ export async function resetServerSettings(page, overrides = {}) {
     // Body-STT engine (default = server-side blob → /transcribe). Tests
     // that exercise the local Web Speech path override to 'local'.
     streamingEngine: 'server',
+    // Mic-tap dictation mode (src/settings.ts DEFAULTS). Added to the map
+    // 2026-09-06: dictation-draft-binds-to-origin flips it to false to
+    // exercise the batch/checkmark path, and the proxy's settings table
+    // is shared across scenarios — without a reset here that leaks to
+    // every later scenario that touches the mic.
+    dictateRealtime: true,
   };
   const target = { ...defaults, ...overrides };
   // Use a Promise.all of fetches; the proxy handles each independently.

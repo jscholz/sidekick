@@ -27,6 +27,7 @@ import * as voiceMemos from './voiceMemos.ts';
 import * as memoCard from './memoCard.ts';
 import * as webrtcControls from './audio/realtime/controls.ts';
 import * as switchCtl from './switchController.ts';
+import * as dictationBinding from './dictationBinding.ts';
 import * as transcriptStore from './transcript/store.ts';
 import * as turnbased from './audio/turn-based/turnbased.ts';
 import * as handsfree from './audio/shared/handsfree.ts';
@@ -474,7 +475,17 @@ export async function flushOutbox() {
         // durable queue so a bad-connection upload retried here instead
         // of evaporating.
         if (id) markDelivered(id);
-        composer.appendText(text, typeof item?.anchorId === 'number' ? item.anchorId : null);
+        // ADDRESSED, not pointed: the transcript goes to the chat the
+        // dictation was spoken into (item.chatId, captured at recording
+        // start), not to whatever composer is on screen when the upload
+        // finally lands. Same chat → the anchored at-caret insert,
+        // byte-for-byte as before; a different chat → the origin's
+        // persisted draft. This branch is the one the durable retry
+        // drains through, so it covers the late deliveries too.
+        dictationBinding.deliver(text, {
+          originChatId: item?.chatId ?? null,
+          anchorId: typeof item?.anchorId === 'number' ? item.anchorId : null,
+        });
         status.setStatus('', null);
         return;
       }
@@ -491,9 +502,20 @@ export async function flushOutbox() {
       memoCard.dropRec(id);
       await voiceMemos.remove(id);
       if (id) markDelivered(id);
-      composer.appendText(text);
       if (autoSend) {
+        // Auto-send memos are a SEND, and send addressing is not this
+        // change's business (it reads the chat on screen, deliberately).
+        // Left exactly as it was.
+        composer.appendText(text);
         composer.submit();
+      } else {
+        // Review-first memo: the transcript is composer INPUT, so it
+        // obeys the dictation rule. registered.chatId is the chat the
+        // memo card was rendered into; note it is captured at record
+        // STOP (renderMemoCard), not record start — good enough to stop
+        // a delayed/retried transcript landing in a chat the user walked
+        // to since, which is the failure this closes.
+        dictationBinding.deliver(text, { originChatId: registered?.chatId ?? null });
       }
     }
   );
@@ -691,6 +713,7 @@ export async function transcribeToComposer(
   audioBlob: Blob | null,
   durationMs?: number,
   anchorId?: number | null,
+  originChatId?: string | null,
 ): Promise<void> {
   if (!audioBlob) return;
   // Same hard ceiling as memos: a too-big blob just retries forever and
@@ -717,6 +740,12 @@ export async function transcribeToComposer(
   await queue.enqueue({
     type: 'audio', blob: audioBlob, mimeType: audioBlob.type, durationMs, toComposer: true,
     anchorId: typeof anchorId === 'number' ? anchorId : undefined,
+    // The chat this dictation was SPOKEN INTO, captured at recording
+    // start by the mic gesture site. Rides the DURABLE row, so the
+    // binding outlives a reload — the anchor above cannot (in-memory),
+    // and the deliveries most likely to arrive off-origin are exactly
+    // the slow ones. See dictationBinding.ts.
+    chatId: originChatId ?? null,
   });
   log('dictate: queued audio blob (' + Math.round(audioBlob.size / 1024) + 'KB) toComposer');
 

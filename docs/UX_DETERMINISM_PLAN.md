@@ -186,6 +186,15 @@ Acceptance tests are named so "done" is checkable, not felt.
    goes to the bound chat. (Check `composerDrafts` — drafts are already
    per-chat; extend the binding to the dictation buffer.)
 
+   **SUPERSEDED 2026-09-06 — shipped differently.** Jonathan rejected
+   the chip and the redirected send: "The Send button always sends what
+   is in the current composer to the session on screen." The binding
+   itself stands, but it routes the TRANSCRIPT, not the send — the
+   checkmark files it in the origin chat's per-chat draft, the visible
+   composer is untouched, and the user switches back to edit and send
+   there. Implemented in `src/dictationBinding.ts`; smoke
+   `dictation-draft-binds-to-origin`.
+
 ### Phase 1 — navigation authority (the actual fix; 2–3 days)
 
 1. **Authority classes in `switchController`.** `begin()` takes a

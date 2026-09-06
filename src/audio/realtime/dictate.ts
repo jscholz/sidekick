@@ -145,6 +145,7 @@
  */
 
 import * as conn from './realtime.ts';
+import * as dictationBinding from '../../dictationBinding.ts';
 import { log, diag } from '../../util/log.ts';
 import { diffEdit, shiftSpan } from '../../util/textAnchor.ts';
 import type { STTProvider, TranscriptEvent, Unsubscribe } from '../shared/stt-provider.ts';
@@ -220,6 +221,17 @@ let onStateChangeCb: ((opening: boolean, error?: string) => void) | null = null;
  *  stale values, dropping voice text at the wrong location. */
 let initialCursor: number | null = null;
 
+/** The chat this dictation session is BOUND to (captured at record
+ *  start). Every transcript event is routed against it: same chat →
+ *  splice into the visible textarea exactly as before; different chat →
+ *  the origin's persisted draft, and the visible textarea is not
+ *  touched. See dictationBinding.ts. Survives stop() on purpose so a
+ *  flushed straggler final is still routed. */
+let originChatId: string | null = null;
+/** Reason-stamped once per off-origin session so the log says WHY the
+ *  box stopped filling, without a line per transcript event. */
+let offOriginLogged = false;
+
 /** Timestamp (ms) of the last user-driven reset (typing or cursor moved
  *  outside the in-flight utterance). STT events arriving within
  *  ABANDON_SUPPRESS_MS after this and matching the abandoned interim
@@ -283,6 +295,13 @@ export function isActive(): boolean {
   return active;
 }
 
+/** The chat this dictation is bound to (record-start capture), or null
+ *  when nothing has been started. Read by main.ts's view-commit listener
+ *  to decide whether a switch just walked away from the live session. */
+export function originId(): string | null {
+  return originChatId;
+}
+
 function notify(opening: boolean, error?: string): void {
   if (!onStateChangeCb) return;
   try { onStateChangeCb(opening, error); } catch { /* ignore */ }
@@ -331,6 +350,11 @@ export function init(input: HTMLTextAreaElement | null): void {
 export async function start(opts: {
   sessionId?: string | null;
   chatId?: string | null;
+  /** The chat this dictation is BOUND to, captured at record start.
+   *  Distinct from `chatId`, which addresses the bridge session: this
+   *  one decides where the WORDS go if focus moves. Defaults to chatId
+   *  so a caller that only knows one id still gets the binding. */
+  originChatId?: string | null;
   initialCursor?: number | null;
   provider?: STTProvider;
 } = {}): Promise<void> {
@@ -352,6 +376,8 @@ export async function start(opts: {
   lastSetCursor = -1;
   observedValue = composerInput.value;
   initialCursor = (typeof opts.initialCursor === 'number') ? opts.initialCursor : null;
+  originChatId = opts.originChatId ?? opts.chatId ?? null;
+  offOriginLogged = false;
   if (dictateDebugOn) log('[dictate] start initialCursor=', initialCursor);
 
   const provider: STTProvider = opts.provider ?? conn.defaultWebRTCSTTProvider;
@@ -426,6 +452,11 @@ export async function stop(): Promise<void> {
   lastInterimText = '';
   lastSetCursor = -1;
   initialCursor = null;
+  // Deliberately NOT cleared here: a provider commonly flushes a final
+  // between the stop request and its response, and that straggler must
+  // still be routed by the binding rather than spliced into whatever
+  // composer is on screen. It is overwritten by the next start().
+  // originChatId stays.
   notify(false);
 
   try {
@@ -440,6 +471,40 @@ export async function stop(): Promise<void> {
 function transcriptHandler(ev: TranscriptEvent): void {
   if (ev.role !== 'user') return;
   const trimmed = ev.text.trim();
+  // OFF-ORIGIN GUARD, before any state-machine work. The splice model
+  // below addresses a POSITION in the composer; a position has no
+  // meaning once the composer holds a different conversation's text, and
+  // splicing anyway is precisely how a dictation ends up in the wrong
+  // chat. main.ts normally ends the session at the switch (see the
+  // parley:view-committed listener there), so what reaches here is the
+  // straggler final a provider flushes during teardown — small, and
+  // exactly the text that is easiest to lose.
+  if (dictationBinding.routeDictation({
+    focusedId: dictationBinding.captureOrigin(),
+    originChatId,
+  }) === 'draft') {
+    if (!offOriginLogged) {
+      offOriginLogged = true;
+      log(`[dictate] focus left ${originChatId?.slice(-12)} — transcripts now go to its draft`);
+    }
+    // Interims are a live caption for a textarea we are no longer
+    // writing; only finalized words are worth persisting. Utterance-end
+    // (empty final) carries no text and needs no handling: everything
+    // committed has already been appended below.
+    if (ev.is_final && trimmed) {
+      // Sentence-fragment separator: successive finals belong to one
+      // spoken utterance, so they join with a space rather than becoming
+      // a paragraph each. Written through on every final (not buffered
+      // to the end) so a tab that dies mid-dictation still leaves the
+      // words in IDB.
+      dictationBinding.deliver(trimmed, { originChatId, separator: ' ', quiet: true });
+    }
+    // Whatever the state machine was tracking described the OLD textarea
+    // contents; keep it from being re-used if focus comes back.
+    if (anchor !== null) resetUtterance('off-origin');
+    return;
+  }
+  offOriginLogged = false;
   if (ev.is_final) {
     if (trimmed) handleContentFinal(trimmed);
     else handleUtteranceEnd();

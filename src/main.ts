@@ -93,6 +93,7 @@ import * as attachments from './attachments.ts';
 import * as draft from './draft.ts';
 import * as composer from './composer.ts';
 import * as composerDrafts from './composerDrafts.ts';
+import * as dictationBinding from './dictationBinding.ts';
 import * as questionPopup from './questionPopup.ts';
 import * as selectToQuote from './selectToQuote.ts';
 import * as docStore from './rightDrawer/docStore.ts';
@@ -152,6 +153,13 @@ async function restoreMemoCards() {
 }
 
 let memoActive = false;  // true while voice-memo recording bar is shown
+/** The chat an IN-FLIGHT batch dictation (mic tap with dictateRealtime
+ *  off — recording bar + checkmark) was started in, or null when the
+ *  recording isn't a dictation. Module-scoped rather than local to
+ *  startMemo because the view-commit listener has to know, while the
+ *  recording is still running, whether the checkmark now points at a
+ *  chat the user has left. Cleared by exitMemoMode. */
+let batchDictateOrigin: string | null = null;
 
 // releaseCaptureIfActive is defined as a closure inside boot() so it can
 // close the WebRTC peer connection cleanly when slash-commands or other
@@ -2587,6 +2595,16 @@ async function boot() {
     onRestored: () => { autoResize(); updateSendButtonState(); },
     onComposerState: () => syncComposerEditButtons(),
   });
+  // The dictation binding needs two things this app knows and it
+  // shouldn't: the pre-view chat-id fallback (so capture and routing
+  // agree about "the current chat" even before a view has committed) and
+  // a chat title for the "landed out of sight" toast. Injected rather
+  // than imported so dictationBinding stays a leaf the audio modules can
+  // pull in without dragging the adapter and the sidebar behind it.
+  dictationBinding.init({
+    fallbackChatId: () => backend.getCurrentSessionId?.() ?? null,
+    titleFor: (id) => sessionDrawer.getTitleForChat?.(id) ?? null,
+  });
   void composerDrafts.hydrateDrafts();
   syncComposerEditButtons();
 
@@ -3432,6 +3450,7 @@ async function boot() {
 
   function exitMemoMode() {
     memoActive = false;
+    batchDictateOrigin = null;
     log('[mic-diag] memoActive=false (exitMemoMode)');
     // Restore the composer-actions row + put the send button back in its
     // original DOM home (last child of .composer-actions-right). The bar
@@ -3497,6 +3516,53 @@ async function boot() {
     updateSendButtonState();
   });
 
+  // ── A chat switch while the mic is still running ────────────────────
+  //
+  // Jonathan's rule binds a dictation to the chat recording started in,
+  // which leaves one question the rule doesn't answer: what happens to
+  // the RECORDER when the user walks away mid-sentence? The two modes
+  // get different answers because their recorder UIs mean different
+  // things, and neither answer may lose a word.
+  //
+  //  • BATCH (dictateRealtime off — recording bar + checkmark): KEEP
+  //    RECORDING, still bound to the origin. Nothing has been
+  //    transcribed yet, so stopping here would silently truncate the
+  //    sentence he is in the middle of saying, and the recording bar is
+  //    generic composer chrome rather than something attached to a
+  //    transcript. This is also literally the flow he described: press
+  //    the checkmark wherever you are, the transcript lands in the
+  //    origin's draft. All we owe him is honesty about it, so the
+  //    checkmark stops claiming it will fill the box in front of him.
+  //
+  //  • REALTIME (dictateRealtime on — words stream into the textarea
+  //    live): AUTO-COMMIT, i.e. end the session as if he had tapped the
+  //    mic again. Everything transcribed so far is already IN the
+  //    textarea, and composerDrafts.switchTo — which runs at this same
+  //    view-commit seam, immediately before this event — has just saved
+  //    it into the origin's draft. So the commit is free of loss. The
+  //    alternative, streaming on into a chat whose composer we refuse to
+  //    write, would leave a lit mic with no visible effect anywhere: the
+  //    "is it even recording?" state that voice UIs must not have. The
+  //    off-origin guard in dictate.ts still catches the final a provider
+  //    flushes during teardown and files it in the origin's draft.
+  window.addEventListener('parley:view-committed', (ev) => {
+    const chatId = (ev as CustomEvent).detail?.chatId ?? null;
+    if (memoActive && batchDictateOrigin) {
+      // Keep the checkmark honest about where it will put the words —
+      // and put the promise back if he wanders home again mid-recording.
+      composerSend.title = chatId === batchDictateOrigin
+        ? 'Insert transcript into composer'
+        : 'Save transcript to the draft of the chat you started dictating in';
+      return;
+    }
+    if (!dictateActive) return;
+    const origin = webrtcDictate.originId();
+    if (!origin || chatId === origin) return;
+    log(`[dictate] view moved off ${origin.slice(-12)} — committing the live dictation there`);
+    void stopDictate();
+    toast('Dictation ended — saved as a draft in the chat you started it in');
+  });
+
   // ── Composer voice dispatch ─────────────────────────────────────────
   //
   // Two-button split (2026-05): btn-mic owns memo + dictation, btn-call
@@ -3541,6 +3607,14 @@ async function boot() {
     // so the text lands where the utterance was aimed, not wherever
     // the caret sits at flush time (Jonathan field bug 2026-07-21).
     const dictateAnchorId = dictateToComposer ? composer.createAnchor(initialCursor) : null;
+    // …and BIND THE DICTATION to the chat it is being spoken into, at the
+    // same instant. The anchor answers "where in the box"; this answers
+    // "whose box" — and unlike the anchor it rides the durable queue row,
+    // so it still holds when the transcript arrives after a reload. Every
+    // delivery for this recording (the checkmark, a chunked retry, the
+    // outbox drain minutes later) routes on it. See dictationBinding.ts.
+    const dictateOrigin = dictateToComposer ? dictationBinding.captureOrigin() : null;
+    batchDictateOrigin = dictateOrigin;
     // iOS AVAudioSession prep: prepareForCapture before getUserMedia.
     primeAudio(player);
     audioSession.prepareForCapture();
@@ -3563,7 +3637,7 @@ async function boot() {
         const { audioBlob, durationMs } = await memo.stop();
         exitMemoMode();
         if (dictateToComposer) {
-          await memoOutbox.transcribeToComposer(audioBlob, durationMs, dictateAnchorId);
+          await memoOutbox.transcribeToComposer(audioBlob, durationMs, dictateAnchorId, dictateOrigin);
         } else {
           await memoOutbox.handleMemoResult(audioBlob, durationMs, autoSend, 'composerSend.click');
         }
@@ -3587,7 +3661,7 @@ async function boot() {
       onDone: (audioBlob) => {
         exitMemoMode();
         if (dictateToComposer) {
-          void memoOutbox.transcribeToComposer(audioBlob, undefined, dictateAnchorId);
+          void memoOutbox.transcribeToComposer(audioBlob, undefined, dictateAnchorId, dictateOrigin);
         } else {
           memoOutbox.handleMemoResult(audioBlob, undefined, autoSend, 'memo.onDone');
         }
@@ -3652,6 +3726,12 @@ async function boot() {
       await webrtcDictate.start({
         sessionId: chatId,
         chatId,
+        // Bind at record start, same rule as the batch path. Separate
+        // from `chatId` above on purpose: that one addresses the BRIDGE
+        // session and reads viewedId(), while the binding must read
+        // focusedId() — a tap that hasn't committed its transcript yet
+        // is already the chat the user is dictating into.
+        originChatId: dictationBinding.captureOrigin(),
         initialCursor,
         provider,
       });

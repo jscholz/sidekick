@@ -25,9 +25,17 @@
 // v1 scope (recorded in the session-hardening doc): text only
 // (attachments stay with the visible composer), per-device (no sync),
 // no badges (drafts are inventory, not attention — one-number rule).
-// Mid-dictation switches: interim text saved so far stays with the
-// chat it was bound to at switch time; STT output arriving AFTER the
-// switch lands in the newly bound chat, same as typing would.
+//
+// Mid-dictation switches (REVISED 2026-09-06): interim text saved so far
+// still stays with the chat it was bound to at switch time. What changed
+// is the second half of this note, which used to read "STT output
+// arriving AFTER the switch lands in the newly bound chat, same as
+// typing would". It is NOT the same as typing: typing is aimed by the
+// finger that is on the keyboard now, whereas a transcript was aimed
+// minutes ago at a conversation the user has since left. A dictation is
+// now bound to the chat where recording started and its late output
+// appends to THAT chat's draft — see dictationBinding.ts for the rule
+// and UX_DETERMINISM_PLAN §1/§6 for the mis-send that motivated it.
 
 import { diag } from './util/log.ts';
 
@@ -263,21 +271,33 @@ export function stashAndClear(): void {
  *  in the `parley-drafts` IDB store and survives an app restart (a
  *  rescue that only lived in a DOM node would be lost to the very same
  *  reload the dropped call often triggers). flushDraft skips the
- *  300 ms debounce — a rescue must not race a backgrounding tab. */
-export function appendDraft(chatId: string | null, text: string): boolean {
+ *  300 ms debounce — a rescue must not race a backgrounding tab.
+ *
+ *  `separator` defaults to a blank line: a rescued block, or a whole
+ *  batch dictation, is its own paragraph. Streaming callers appending
+ *  successive fragments of ONE utterance pass ' ' so the sentence doesn't
+ *  come back cut into paragraphs. An option rather than something guessed
+ *  from the text, because only the caller knows whether what it holds is
+ *  a fragment or a block. */
+export function appendDraft(
+  chatId: string | null,
+  text: string,
+  opts?: { separator?: string },
+): boolean {
   const addition = (text || '').trim();
   if (!chatId || !addition) return false;
+  const sep = opts?.separator ?? '\n\n';
+  const join = (existing: string) =>
+    (existing.trim() ? `${existing.replace(/\s+$/, '')}${sep}${addition}` : addition);
   if (chatId === boundChatId && textareaRef) {
-    const existing = textareaRef.value;
-    textareaRef.value = existing.trim() ? `${existing.replace(/\s+$/, '')}\n\n${addition}` : addition;
+    textareaRef.value = join(textareaRef.value);
     saveDraft(chatId, textareaRef.value);
     flushDraft(chatId);
     onRestoredCb?.();
     notifyComposerState();
     return true;
   }
-  const existing = cache.get(chatId) ?? '';
-  saveDraft(chatId, existing.trim() ? `${existing.replace(/\s+$/, '')}\n\n${addition}` : addition);
+  saveDraft(chatId, join(cache.get(chatId) ?? ''));
   flushDraft(chatId);
   return false;
 }
