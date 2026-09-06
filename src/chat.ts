@@ -25,6 +25,7 @@ import * as backend from './backend.ts';
 import { rerenderActive, isBackfillActive } from './transcript/index.ts';
 import * as transcriptStore from './transcript/store.ts';
 import * as switchCtl from './switchController.ts';
+import { isDurableMessageKey } from './transcript/keys.ts';
 
 let transcriptEl: HTMLElement | null = null;
 
@@ -175,15 +176,25 @@ export function runWithScrollSaveSuppressed(fn: () => void): void {
  *  is what raw scrollTop can't survive once `content-visibility: auto`
  *  renders off-screen rows from 100px placeholders to their real height).
  *  Every bubble is in the DOM (full-DOM render), so this is a direct
- *  query — no spacer math. */
+ *  query — no spacer math.
+ *
+ *  Skips past rows whose key is SYNTHETIC (the local thinking
+ *  placeholder, the bottom turn-status line, gap markers, decorations —
+ *  see src/transcript/keys.ts) to the next visible row that's a real
+ *  message. This anchor gets persisted (saveCurrentScrollPosition) and
+ *  later fed back as `around=<key>`; a synthetic key there returns
+ *  nothing server-side (field 2026-09-05: boot's prewarm for
+ *  `pending:turn:umsg_…`). If every visible row is synthetic, returns
+ *  null so the caller falls back to a scrollTop-only save. */
 export function getDomAnchor(): { key: string; offsetPx: number } | null {
   if (!transcriptEl) return null;
   const ct = transcriptEl.getBoundingClientRect().top;
   for (const el of Array.from(transcriptEl.querySelectorAll('.line[data-key]')) as HTMLElement[]) {
     const r = el.getBoundingClientRect();
-    if (r.bottom > ct + 1) {
-      return { key: el.getAttribute('data-key') || '', offsetPx: Math.round(r.top - ct) };
-    }
+    if (r.bottom <= ct + 1) continue;
+    const key = el.getAttribute('data-key') || '';
+    if (!isDurableMessageKey(key)) continue;
+    return { key, offsetPx: Math.round(r.top - ct) };
   }
   return null;
 }
@@ -1266,7 +1277,12 @@ function openMsgMenu(line: HTMLElement): void {
       () => pinBtn.click(), pinned);
   }
   if (copyBtn) addItem('Copy', ICON.copy, () => copyBtn.click());
-  if (isAgent && msgId) {
+  // Gated on isDurableMessageKey for the same reason as the pin button
+  // above: the thinking-dots placeholder is an agent bubble too, and
+  // "Mark unread" would otherwise persist an activity row keyed
+  // `pending:turn:…` — the exact shape the field bug this comment
+  // describes elsewhere in this file already hit once.
+  if (isAgent && msgId && isDurableMessageKey(msgId)) {
     addItem('Mark unread', ICON.unread, () => {
       const chatId = viewedSessionIdRef || backend.getCurrentSessionId?.() || null;
       const liveText = line.dataset.text
@@ -1400,19 +1416,24 @@ export function addLine(speaker: string, text: string, cls = '', opts: {
 
   // Per-bubble pin toggle — adds the bubble to the pinned-messages
   // store (drives the right-side pins drawer's cross-chat aggregation).
-  // Shown on any bubble with a stable msgId. The chat_id is resolved
-  // LAZILY at click time from viewedSessionIdRef so the button works
-  // even on optimistic user bubbles rendered before trackViewedSession
-  // has stamped the chat id (fresh-new-chat path: send() runs before
-  // backend.newSession() completes its assignment). Without the lazy
-  // read, the fresh-new-chat smoke caught the button missing entirely
+  // Shown on any bubble with a stable, DURABLE msgId — gated so the
+  // affordance never appears on a synthetic row (the local thinking
+  // placeholder renders as an agent bubble keyed `pending:turn:…` and
+  // would otherwise offer a working Pin button for a message id the
+  // server has never heard of; see src/transcript/keys.ts). The chat_id
+  // is resolved LAZILY at click time from viewedSessionIdRef so the
+  // button works even on optimistic user bubbles rendered before
+  // trackViewedSession has stamped the chat id (fresh-new-chat path:
+  // send() runs before backend.newSession() completes its assignment).
+  // Without the lazy read, the fresh-new-chat smoke caught the button
+  // missing entirely
   // (2026-05-12).
   //
   // Icon swap is CSS-driven (.pin-btn.pinned hides outline, shows
   // filled) so the global parley:pins-changed listener at init()
   // only needs to toggle the `.pinned` class — no innerHTML rebuild
   // per repaint cycle.
-  if (opts.messageId) {
+  if (opts.messageId && isDurableMessageKey(String(opts.messageId))) {
     const msgId = String(opts.messageId);
     const pinBtn = document.createElement('button');
     pinBtn.className = 'pin-btn';

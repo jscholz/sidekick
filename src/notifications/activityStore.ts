@@ -2,6 +2,7 @@ import { log } from '../util/log.ts';
 import { apiUrl } from '../apiBase.ts';
 import { isProgressHeartbeatText } from '../util/progressHeartbeat.ts';
 import { ServerBackedStore } from '../util/serverBackedStore.ts';
+import { isDurableMessageKey } from '../transcript/keys.ts';
 
 export type ActivityKind = 'approval' | 'cron' | 'agent_reply' | 'notification';
 export type ActivityResolution = 'approved' | 'approved_session' | 'denied' | 'dismissed' | 'stale';
@@ -279,6 +280,18 @@ export function markUnreadForMessage(args: {
   store.hydrate();
   const id = args.messageId;
   if (!id) return;
+  // This morning's field bug (projection.ts's own comment: "mark-unread
+  // wrote an activity row keyed pending:turn:*") happened at exactly
+  // this write — a synthetic bubble key (the thinking-dots placeholder,
+  // the bottom turn-status line, …) persisted as an activity target
+  // that `around=<messageId>` (prewarmActivityWindows,
+  // src/sessionResume.ts) can never resolve server-side. chat.ts's
+  // "Mark unread" menu item is gated the same way; this is the
+  // structural backstop for every caller.
+  if (!isDurableMessageKey(id)) {
+    log(`[activity] refusing to mark-unread synthetic key chat=${args.chatId} messageId=${id}`);
+    return;
+  }
   const prev = store.items.get(id);
   const item: ActivityItem = prev
     ? { ...prev, read: false, resolved: undefined }
