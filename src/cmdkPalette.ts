@@ -496,10 +496,18 @@ async function activate(hit: Hit) {
   // optimistic highlight flips now, and a drawer click landing during
   // the await supersedes this — the paint below then refuses.
   const targetMessageId = hit.kind === 'message' ? String(hit.message_id) : undefined;
-  const tok = switchCtl.begin(id, targetMessageId);
+  // 'cmdk' is user-class, so this begin() is never refused; the null
+  // branch exists because begin()'s contract allows it, not because this
+  // path can hit it.
+  const tok = switchCtl.begin(id, 'cmdk', targetMessageId);
+  if (!tok) {
+    diag(`cmdk: switch to ${id} refused`);
+    return;
+  }
   // Header title (UX_DETERMINISM_PLAN Phase 0 #1): a palette pick is a
   // switch-begin site same as a drawer row click — reflect the "Opening
-  // <title>…" state immediately.
+  // <title>…" state immediately. After the guard: a refused begin() claims
+  // nothing, so there is nothing for the header to reflect.
   headerTitle.sync();
   // Palette pick = user intent to view — the seen effects (unread chip
   // + badge clear, activity read-mark) fire at the pick, not after the

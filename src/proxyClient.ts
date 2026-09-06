@@ -48,6 +48,7 @@ import * as conversations from './conversations.ts';
 import * as sessionCache from './sessionCache.ts';
 import * as transcriptStore from './transcript/store.ts';
 import { markRecentlyDeleted, isRecentlyDeleted } from './sessionOps.ts';
+import * as switchCtl from './switchController.ts';
 
 let subs: any = null;
 let connected = false;
@@ -1127,6 +1128,16 @@ export const proxyClientAdapter = {
       }
       chatId = activeChatId!;
     }
+    // Nav evidence, one line, no wire change (UX_DETERMINISM_PLAN §5
+    // Phase 0.3). The 2026-09-06 mis-send had to be reconstructed from
+    // SERVER logs because nothing client-side recorded WHICH navigation
+    // put that chat on screen. The last three ledger entries next to the
+    // resolved target answer that at the moment it matters — the send.
+    try {
+      const nav = switchCtl.getNavLedger().slice(-3)
+        .map((e) => `${e.origin}/${e.id}/g${e.gen}/${e.outcome}`).join(' ');
+      diag(`proxy-client.sendMessage: → ${chatId} nav=[${nav}]`);
+    } catch { /* a diag must never block a send */ }
     // Lazy-allocate from newSession() leaves no IDB row; first send
     // is the moment we know the chat is "real". Hydrate creates the
     // conversations row if missing so the drawer's listSessions

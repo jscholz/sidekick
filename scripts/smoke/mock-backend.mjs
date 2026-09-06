@@ -105,6 +105,15 @@ export async function installMockBackend(page) {
   let streamOutage = false;
   let sessionsFailStatus = 0;
   let sessionsDelayMs = 0;      // artificial /sessions list latency
+  /** Artificial latency before the SSE stream response is forwarded.
+   *  The PWA gates its whole boot LANDING (last-viewed restore +
+   *  most-recent fallback, main.ts onStatus) on the EventSource
+   *  opening, while the drawer renders from the (undelayed) sessions
+   *  list long before that. Holding the stream open-handshake is
+   *  therefore the only way to reproduce the field window in which the
+   *  user taps a row BEFORE boot has begun its switch — the
+   *  2026-09-06 mis-send (docs/UX_DETERMINISM_PLAN.md §1). */
+  let streamConnectDelayMs = 0;
   const messageFailStatus = new Map();
   /** Active SSE responses (real http.ServerResponse objects). */
   const streamSubs = new Set();
@@ -804,6 +813,9 @@ export async function installMockBackend(page) {
       // A network abort would leave it in the CONNECTING retry loop with
       // connected stuck true, which is a different failure shape.
       return route.fulfill({ status: 503, contentType: 'text/plain', body: 'mock stream outage' });
+    }
+    if (streamConnectDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, streamConnectDelayMs));
     }
     const lastEventId = route.request().headers()['last-event-id'];
     // Forward Last-Event-Id as a query param too — some Playwright
@@ -1680,6 +1692,12 @@ export async function installMockBackend(page) {
      *  drawer paints must NOT wait for it. */
     setSessionsDelay(ms) {
       sessionsDelayMs = typeof ms === 'number' && ms > 0 ? ms : 0;
+    },
+    /** Hold the SSE open-handshake for `ms` — simulates the slow/retrying
+     *  radio that delays onStatus(connected) and therefore the whole boot
+     *  landing, while the drawer is already painted and tappable. */
+    setStreamConnectDelay(ms) {
+      streamConnectDelayMs = typeof ms === 'number' && ms > 0 ? ms : 0;
     },
     setMessageFailure(chatId, status = 503) {
       if (!chatId) return;
