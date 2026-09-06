@@ -35,9 +35,16 @@ import AVFoundation
 /// across separate AVAudioEngines normally coexist under .playAndRecord,
 /// but this is the behavior to verify on-device.
 ///
-/// Registered in WebViewDelegate.capacitorDidLoad() via
-/// `bridge.registerPluginInstance(_:)`. That call is mandatory: Capacitor 8
-/// does not auto-discover CAPBridgedPlugin classes.
+/// ⚠️ NOT REGISTERED — reverted 2026-09-06 alongside AudioSessionPlugin.
+///
+/// Capacitor 8 does not auto-discover CAPBridgedPlugin classes, so this plugin
+/// has never run. It was switched on together with AudioSessionPlugin and both
+/// were reverted when the device froze. This plugin is not known to be at
+/// fault — `startInternal()` calls `AudioSessionController.shared.beginCapture()`,
+/// which is the exact call that triggers the category-change feedback loop
+/// documented in AudioSessionPlugin.swift, so it can drive that loop even
+/// with AudioSessionPlugin itself unregistered. Re-register only after that
+/// loop is fixed, and then on its own so the signal stays clean.
 ///
 /// History: the registration line did not exist until 2026-09-06, so this
 /// plugin never ran once. `nativeSpeech.isAvailable()` was therefore always

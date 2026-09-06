@@ -81,10 +81,37 @@ final class AudioSessionController {
 /// around mic capture. JS would reach it at
 /// `window.Capacitor.Plugins.AudioSession`.
 ///
-/// Registered in WebViewDelegate.capacitorDidLoad() via
-/// `bridge.registerPluginInstance(_:)`. That call is mandatory: Capacitor 8
-/// does not auto-discover CAPBridgedPlugin classes (the comment that used to
-/// sit here claiming "@objc runtime auto-registration" was false).
+/// ⚠️ NOT REGISTERED — REGISTERING THIS FREEZES THE DEVICE (reverted 2026-09-06).
+///
+/// Capacitor 8 does not auto-discover CAPBridgedPlugin classes, so this plugin
+/// never ran from its creation until we tried to switch it on. Turning it on
+/// produced an audio-session feedback loop that hung the app hard enough to
+/// need a force-quit, and Listen never started:
+///
+///     [Parley] AVAudioSession apply failed: … (OSStatus error 560557684.)
+///     [Parley] audio route changed (reason: 3)
+///     SessionCore.mm:546  Failed to set properties, error: '!int'
+///     …repeating forever
+///
+/// 560557684 == '!int' == AVAudioSessionErrorCodeCannotInterruptOthers, and
+/// route-change reason 3 == .categoryChange. The cycle:
+///   setCategory() → iOS posts routeChangeNotification(.categoryChange)
+///     → AppDelegate.handleAudioRouteChange() re-asserts unconditionally
+///       → applyDesiredCategory() calls setCategory() + setActive(true)
+///         → another .categoryChange → …
+/// setActive(true) also fails CannotInterruptOthers because the options here
+/// include .mixWithOthers. The loop was dormant only because desiredCategory
+/// never changed while this plugin was unregistered — re-asserting an
+/// already-current category is a no-op that posts no notification. The moment
+/// beginCapture() could actually flip it, the loop became live, and because
+/// AudioSessionController funnels its work onto the main queue the flood
+/// saturated the UI thread — hence the freeze.
+///
+/// PREREQUISITE before re-registering: make AppDelegate.handleAudioRouteChange
+/// ignore .categoryChange (it is our OWN change echoing back; the reasons worth
+/// reacting to are .newDeviceAvailable / .oldDeviceUnavailable), and re-check
+/// whether setActive(true) belongs on that path at all. Fixing that is what the
+/// original A2DP work actually needed; this plugin alone is not enough.
 ///
 /// History: from this file's creation until 2026-09-06 the registration line
 /// did not exist, so this plugin never ran once. nativeAudioSession() in
