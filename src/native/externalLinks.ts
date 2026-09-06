@@ -20,15 +20,14 @@
  * depends on bare Capacitor+Cordova (unchanged since 2026-05-04), and push
  * notifications are hand-registered in AppDelegate.swift rather than via
  * `@capacitor/push-notifications`'s native side. `ExternalBrowserPlugin`
- * follows that same established pattern (see AudioSessionPlugin.swift /
- * SpeechRecognizerPlugin.swift) — a `@capacitor/browser` fallback here
- * would be dead code that can never resolve, so there isn't one.
+ * follows that same established pattern — a `@capacitor/browser` fallback
+ * here would be dead code that can never resolve, so there isn't one.
  *
  * Same-origin links (`?msg=` drills, hash anchors) and non-http schemes
  * (mailto:, tel:) are left to the web view, which already handles them.
  *
  * Runtime access is via the injected `window.Capacitor.Plugins` global
- * (same pattern as speechRecognizer.ts / notifications/native.ts) so the
+ * (same pattern as notifications/native.ts) so the
  * PWA bundle carries no import of the plugin.
  */
 

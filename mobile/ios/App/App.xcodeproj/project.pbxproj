@@ -16,8 +16,7 @@
 		504EC3121FED79650016851F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC3101FED79650016851F /* LaunchScreen.storyboard */; };
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
 		A1B2C3D40000000000000001 /* WebViewDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000002 /* WebViewDelegate.swift */; };
-		A1B2C3D40000000000000003 /* AudioSessionPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000004 /* AudioSessionPlugin.swift */; };
-		A1B2C3D40000000000000005 /* SpeechRecognizerPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000006 /* SpeechRecognizerPlugin.swift */; };
+		A1B2C3D40000000000000003 /* AudioSessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000004 /* AudioSessionController.swift */; };
 		A1B2C3D40000000000000007 /* ExternalBrowserPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000000000000008 /* ExternalBrowserPlugin.swift */; };
 /* End PBXBuildFile section */
 
@@ -33,8 +32,7 @@
 		50B271D01FEDC1A000F3C39B /* public */ = {isa = PBXFileReference; lastKnownFileType = folder; path = public; sourceTree = "<group>"; };
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
 		A1B2C3D40000000000000002 /* WebViewDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewDelegate.swift; sourceTree = "<group>"; };
-		A1B2C3D40000000000000004 /* AudioSessionPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionPlugin.swift; sourceTree = "<group>"; };
-		A1B2C3D40000000000000006 /* SpeechRecognizerPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechRecognizerPlugin.swift; sourceTree = "<group>"; };
+		A1B2C3D40000000000000004 /* AudioSessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionController.swift; sourceTree = "<group>"; };
 		A1B2C3D40000000000000008 /* ExternalBrowserPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExternalBrowserPlugin.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -73,8 +71,7 @@
 				50379B222058CBB4000EE86E /* capacitor.config.json */,
 				504EC3071FED79650016851F /* AppDelegate.swift */,
 				A1B2C3D40000000000000002 /* WebViewDelegate.swift */,
-				A1B2C3D40000000000000004 /* AudioSessionPlugin.swift */,
-				A1B2C3D40000000000000006 /* SpeechRecognizerPlugin.swift */,
+				A1B2C3D40000000000000004 /* AudioSessionController.swift */,
 				A1B2C3D40000000000000008 /* ExternalBrowserPlugin.swift */,
 				504EC30B1FED79650016851F /* Main.storyboard */,
 				504EC30E1FED79650016851F /* Assets.xcassets */,
@@ -169,8 +166,7 @@
 			files = (
 				504EC3081FED79650016851F /* AppDelegate.swift in Sources */,
 				A1B2C3D40000000000000001 /* WebViewDelegate.swift in Sources */,
-				A1B2C3D40000000000000003 /* AudioSessionPlugin.swift in Sources */,
-				A1B2C3D40000000000000005 /* SpeechRecognizerPlugin.swift in Sources */,
+				A1B2C3D40000000000000003 /* AudioSessionController.swift in Sources */,
 				A1B2C3D40000000000000007 /* ExternalBrowserPlugin.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

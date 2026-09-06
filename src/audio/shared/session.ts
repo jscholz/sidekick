@@ -42,8 +42,6 @@ export {
   getKeepaliveEl,
   setListening,
   ensureIOSAudioSessionPrimed,
-  nativeBeginCapture,
-  nativeEndCapture,
 } from './ios-specific.ts';
 
 let mediaSessionInit = false;

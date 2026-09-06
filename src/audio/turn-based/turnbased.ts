@@ -49,7 +49,6 @@ import { getBargeThreshold, getBargeDetectorTuning } from '../../voiceTuning.ts'
 import * as recorderBar from '../shared/recorderBar.ts';
 import { BrowserSTTProvider, isSupported as isBrowserSttSupported } from '../streaming/browserDictate.ts';
 import type { STTProvider, TranscriptEvent } from '../shared/stt-provider.ts';
-import * as nativeSpeech from '../../native/speechRecognizer.ts';
 
 export type ListenState = 'idle' | 'armed' | 'committing' | 'playing' | 'cooldown';
 
@@ -151,43 +150,23 @@ let localUnsub: (() => void) | null = null;
  *  time so a mid-turn settings flip doesn't rip the floor out from
  *  under commitNow. */
 let armedWithLocal = false;
-/** Stop handle for the native iOS SpeechRecognizer source, when the send
- *  word is being fed from native SFSpeechRecognizer (CAP server-engine
- *  path) instead of a standalone Web Speech session. Null otherwise. */
-let nativeSendwordStop: (() => void) | null = null;
-
-/** Stop the native sendword source if one is running. Idempotent. */
-function stopNativeSendword(): void {
-  if (nativeSendwordStop) {
-    try { nativeSendwordStop(); } catch { /* noop */ }
-    nativeSendwordStop = null;
-  }
-}
-
 /** Start sendword detection, choosing the transcript source:
  *   - LOCAL engine: FED from the BrowserSttProvider already running for
- *     body transcription (one shared SR session — unchanged).
- *   - CAP server engine: FED from native SFSpeechRecognizer, because the
- *     standalone Web Speech session is gated by WKWebView. If native
- *     start fails, the detector stays in FED mode with no source, which
- *     degrades to silence-only commit (the prior CAP behavior).
- *   - Other server engine (PWA/desktop): standalone Web Speech, as before.
+ *     body transcription (one shared SR session).
+ *   - Otherwise (server engine, CAP included): the detector opens its own
+ *     standalone Web Speech session. `webkitSpeechRecognition` exists in
+ *     WKWebView and works there — a native SFSpeechRecognizer bridge was
+ *     built on the assumption it didn't, was never registered so never
+ *     ran, and was deleted 2026-09-06 once the standalone path was
+ *     confirmed working on device (he'd been using it for months).
  */
-async function startSendword(phrase: string): Promise<void> {
+function startSendword(phrase: string): void {
   const fedFromLocal = armedWithLocal && !!localProvider;
-  const useNative = !fedFromLocal && nativeSpeech.isAvailable();
   sendwordDetector.start({
     phrase,
     onMatch: () => commitFromSendword(),
-    feed: fedFromLocal || useNative,
+    feed: fedFromLocal,
   });
-  if (!useNative) return;
-  try {
-    nativeSendwordStop = await nativeSpeech.start((ev) => sendwordDetector.feedTranscript(ev));
-  } catch (e: any) {
-    diag(`[turnbased] native sendword unavailable, falling back to silence-only: ${e?.message || e}`);
-    stopNativeSendword();
-  }
 }
 
 /** External read of the current state. */
@@ -221,7 +200,6 @@ export function notifyReplyPlayback(playing: boolean): void {
       // Pause the sendword detector during TTS — the user's mic would
       // otherwise pick up the agent's voice and trip a false match.
       try { sendwordDetector.stop(); } catch { /* noop */ }
-  stopNativeSendword();
       // Start barge detection. The mic stream stays open through TTS
       // (per design); we now actively listen for sustained user voice
       // above the threshold during playback. Fire → caller cancels TTS
@@ -366,14 +344,13 @@ function ensureVisibilityHandler(): void {
     if (state !== 'armed' && state !== 'committing') return;
     if (document.visibilityState === 'hidden') {
       try { sendwordDetector.stop(); } catch { /* noop */ }
-  stopNativeSendword();
     } else {
       // Re-arm sendword on resume if we're still in armed state.
       if (state === 'armed') {
         const engine = (settings.get() as any).listenSttEngine || 'local';
         const { sendwordPhrase } = getHandsfreeConfig();
         if (sendwordPhrase && engine !== 'silence-only') {
-          void startSendword(sendwordPhrase);
+          startSendword(sendwordPhrase);
         }
       }
     }
@@ -496,12 +473,12 @@ async function armRecorder(): Promise<void> {
   // both paths (the user-facing kill switch — separate from
   // streamingEngine which controls body transcription).
   const sendwordEngine = (settings.get() as any).listenSttEngine || 'local';
-  diag(`[turnbased] sendword config: phrase="${cfg.sendwordPhrase}" engine=${sendwordEngine} streamingEngine=${(settings.get() as any).streamingEngine} armedWithLocal=${armedWithLocal} localProvider=${!!localProvider} nativeSpeech=${nativeSpeech.isAvailable()}`);
+  diag(`[turnbased] sendword config: phrase="${cfg.sendwordPhrase}" engine=${sendwordEngine} streamingEngine=${(settings.get() as any).streamingEngine} armedWithLocal=${armedWithLocal} localProvider=${!!localProvider}`);
   if (cfg.sendwordPhrase && sendwordEngine !== 'silence-only') {
     // Source selection lives in startSendword: FED from the local
-    // provider, FED from native SFSpeechRecognizer on CAP (server path),
-    // or standalone Web Speech elsewhere.
-    await startSendword(cfg.sendwordPhrase);
+    // provider, or a standalone Web Speech session everywhere else
+    // (CAP included).
+    startSendword(cfg.sendwordPhrase);
   } else {
     diag(`[turnbased] sendword skipped: phrase=${!!cfg.sendwordPhrase} engine=${sendwordEngine}`);
   }
@@ -626,7 +603,6 @@ async function commitNow(reason: 'silence' | 'sendword'): Promise<void> {
   clearSendwordCommitTimer();
   stopSilenceLoop();
   try { sendwordDetector.stop(); } catch { /* noop */ }
-  stopNativeSendword();
   // The 'commit' chime plays at DETECTION time in commitFromSendword
   // (before the commitDelaySec grace window), not here — by commit
   // time the user already got their feedback.
@@ -783,7 +759,6 @@ function teardown(): void {
   analyser = null;
   mockFrames = null;
   try { sendwordDetector.stop(); } catch { /* noop */ }
-  stopNativeSendword();
   // Tear down the visual recorder bar BEFORE transition('idle') so
   // the transition's analyser-detach logic (bar.attachAnalyser(null))
   // doesn't run on a destroyed bar.

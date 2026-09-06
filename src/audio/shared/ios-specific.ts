@@ -64,59 +64,16 @@ function setSessionType(type: string) {
   try { as.type = type; } catch {}
 }
 
-// ── Native AVAudioSession category bridge (Capacitor/iOS only) ──────────
-// On the native CAP build the app launches its AVAudioSession in `.playback`
-// (output-only, A2DP-friendly) so merely OPENING Parley while a podcast
-// streams over Bluetooth A2DP does NOT drag the BT route onto the low-sample
-// HFP/SCO call codec. The native AudioSessionPlugin
-// (mobile/ios/App/App/AudioSessionPlugin.swift) flips the category to
-// `.playAndRecord` only when the user actually starts capture, and back to
-// `.playback` when capture ends.
-//
-// Reached at runtime via the injected `window.Capacitor.Plugins.AudioSession`
-// global (same access pattern as src/native/speechRecognizer.ts — the build
-// doesn't bundle, so a bare `@capacitor/core` import wouldn't resolve in the
-// WebView). No-op on web/PWA/desktop: `nativeAudioSession()` returns null
-// unless Capacitor reports a native platform.
-type NativeAudioSessionPlugin = {
-  beginCapture(): Promise<void>;
-  endCapture(): Promise<void>;
-};
-
-function nativeAudioSession(): NativeAudioSessionPlugin | null {
-  const cap = (typeof window !== 'undefined') ? (window as any).Capacitor : undefined;
-  if (!cap) return null;
-  const isNative = typeof cap.isNativePlatform === 'function' ? cap.isNativePlatform() : false;
-  if (!isNative) return null;
-  return (cap.Plugins?.AudioSession as NativeAudioSessionPlugin) ?? null;
-}
-
-/** Flip the native AVAudioSession to `.playAndRecord` for an active capture.
- *  No-op off native iOS. Fire-and-forget — callers don't block on it. */
-export function nativeBeginCapture(): void {
-  const p = nativeAudioSession();
-  if (!p) return;
-  try { void p.beginCapture().catch(() => {}); } catch {}
-  diag('[audio-session] native beginCapture (playAndRecord)');
-}
-
-/** Return the native AVAudioSession to `.playback` after capture ends.
- *  No-op off native iOS. Fire-and-forget. */
-export function nativeEndCapture(): void {
-  const p = nativeAudioSession();
-  if (!p) return;
-  try { void p.endCapture().catch(() => {}); } catch {}
-  diag('[audio-session] native endCapture (playback)');
-}
-
 /** Ensure the AudioSession category is capture-compatible. Call right
  *  before getUserMedia so any prior 'playback' hint (from TTS) is cleared.
- *  On native iOS this also flips the AVAudioSession category to
- *  `.playAndRecord` via the AudioSessionPlugin bridge (the app launches in
- *  `.playback` to keep Bluetooth A2DP intact when no capture is active). */
+ *
+ *  On the CAP build the AVAudioSession category is left to WKWebView's own
+ *  getUserMedia negotiation. A native bridge to drive it explicitly existed
+ *  (AudioSessionPlugin) but was never registered, so it never ran; enabling
+ *  it on 2026-09-06 put the app in a route-change feedback loop that froze
+ *  the device, and it was deleted rather than left as a trap. */
 export function prepareForCapture() {
   setSessionType('play-and-record');
-  nativeBeginCapture();
 }
 
 // ── iOS audio-session prime ─────────────────────────────────────────────

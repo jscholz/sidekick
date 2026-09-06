@@ -37,11 +37,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         //     The silent keepalive engine is output-only too, so it runs
         //     fine under .playback (no input tap involved).
         //   - When the user ACTUALLY starts an audio experience (call /
-        //     dictate / listen) the JS layer calls into AudioSessionPlugin
-        //     (beginCapture) which flips the category to .playAndRecord
-        //     just-in-time, then back to .playback on endCapture. First mic
-        //     tap after launch pays a one-time category switch + A2DP→HFP
-        //     flip (a fraction of a second) — an accepted tradeoff.
+        //     dictate / listen), WKWebView's own getUserMedia negotiates a
+        //     record-capable session. A CAPPlugin bridge that let the JS
+        //     layer drive this explicitly (beginCapture/endCapture) was
+        //     deleted 2026-09-06 — it had never been registered, so it had
+        //     never run, and enabling it looped this very handler. See
+        //     AudioSessionController.swift.
         //   - .default mode (NOT .voiceChat): .voiceChat killed TTS reply
         //     playback after the first call (HFP routing / output de-prio
         //     conflicts with WebKit's HTMLAudioElement path). .default is

@@ -148,13 +148,6 @@ export function release(owner?: string): void {
     return;
   }
   try { activeStream.getTracks().forEach(t => t.stop()); } catch {}
-  // Native iOS only: flip the AVAudioSession category back to `.playback`
-  // now that capture is done, restoring the A2DP-friendly idle state (the
-  // app launches in .playback and acquire()→prepareForCapture flipped it to
-  // .playAndRecord). Symmetric with prepareForCapture's nativeBeginCapture.
-  // No-op on web/desktop. Mutually-exclusive capture means a single
-  // begin/end pair brackets each capture session.
-  audioSession.nativeEndCapture();
   // Drop the wake-lock key we registered in acquire(). If other holders
   // (e.g. the user's 'setting' key) remain, the OS sentinel stays live.
   const priorOwner = activeOwner;

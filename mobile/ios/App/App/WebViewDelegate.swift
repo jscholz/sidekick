@@ -123,11 +123,11 @@ class ParleyBridgeViewController: CAPBridgeViewController, WKUIDelegate, WKScrip
         // Every local plugin goes here. If you add one and skip this line it
         // will look fine in Xcode and be invisible to JS.
         bridge?.registerPluginInstance(ExternalBrowserPlugin())
-        // AudioSessionPlugin + SpeechRecognizerPlugin are deliberately NOT
-        // registered — see the REVERTED 2026-09-06 note in AudioSessionPlugin.swift.
-        // Registering AudioSessionPlugin puts the app in an audio-session
-        // feedback loop that freezes the device. Do not re-add without fixing
-        // handleAudioRouteChange first.
+        // (AudioSessionPlugin + SpeechRecognizerPlugin used to live here too.
+        // Both were dead — never registered, so never run — and were deleted
+        // 2026-09-06. AudioSessionController.swift records why, including the
+        // route-change feedback loop that has to be fixed before anything
+        // drives the AVAudioSession category from JS again.)
         guard let webView = self.bridge?.webView else { return }
         // Take ownership of the UI delegate slot. Capacitor itself only sets
         // the navigation delegate, so we don't conflict with the bridge.
