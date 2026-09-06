@@ -25,6 +25,7 @@
 import { log } from '../util/log.ts';
 import { apiUrl } from '../apiBase.ts';
 import { ServerBackedStore } from '../util/serverBackedStore.ts';
+import { isDurableMessageKey } from '../transcript/keys.ts';
 
 const PINS_ENDPOINT = '/api/parley/pins';
 
@@ -107,6 +108,17 @@ export async function hydrate(): Promise<void> {
  *  re-fetch to reconcile. */
 export async function pinMessage(item: Omit<PinnedItem, 'pinnedAt'>): Promise<void> {
   if (!item.chatId || !item.msgId) return;
+  // Choke point for every pin-from-a-bubble call site (chat.ts's pin
+  // button, transcriptHighlight.ts's keyboard toggle). A synthetic key
+  // (pending:turn:…, turn:status, …) has no server-side row — pinning
+  // one persists a target that `around=<key>` (prewarmPinnedWindows,
+  // src/sessionResume.ts) can never resolve. The primary chat.ts button
+  // is already gated so this shouldn't fire in practice; kept as the
+  // structural guarantee for every current and future caller.
+  if (!isDurableMessageKey(item.msgId)) {
+    log(`[pins] refusing to pin synthetic key chat=${item.chatId} msgId=${item.msgId}`);
+    return;
+  }
   const full: PinnedItem = { ...item, pinnedAt: Date.now() };
   store.items.set(key(item.chatId, item.msgId), full);
   store.commit();

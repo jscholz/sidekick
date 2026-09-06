@@ -43,6 +43,7 @@ import { listAllPins } from './pins/store.ts';
 import { listActivity } from './notifications/activityStore.ts';
 import { rerenderActive, requestWindowedReplay, cancelWindowedReplay } from './transcript/index.ts';
 import { getScrollPosition } from './chatScrollPositions.ts';
+import { isDurableMessageKey } from './transcript/keys.ts';
 
 /** Persist the chat's now-grown in-memory transcript back to IDB so a
  *  later resume/drill reads the deeper history from cache instead of
@@ -200,8 +201,16 @@ export function replaySessionMessages(
   if (targetMessageId) {
     cancelWindowedReplay();
   } else if (!sameSession) {
+    // isDurableMessageKey guards a LEGACY saved anchor from before this
+    // check existed (getDomAnchor now refuses to save a synthetic key —
+    // src/chat.ts, src/transcript/keys.ts). Without it a stale
+    // `turn:status`/`pending:turn:…` anchorKey could coincidentally
+    // match a same-keyed row in the freshly resumed session (the
+    // turn-status line is a fixed, reused key) and window the initial
+    // render around the wrong thing.
     const anchorKey = saved && !saved.atBottom
       && saved.anchorKey && typeof saved.anchorOffsetPx === 'number'
+      && isDurableMessageKey(saved.anchorKey)
       ? saved.anchorKey : null;
     const legacyMidChat = !!(saved && !saved.atBottom && !anchorKey);
     if (legacyMidChat) cancelWindowedReplay();
@@ -391,8 +400,16 @@ export function replaySessionMessages(
       // row, not to the bottom; if new turns arrived the user ends up
       // visibly ABOVE the bottom. atBottom is the user-intent flag;
       // honor it first.
+      // isDurableMessageKey rejects a LEGACY saved anchor from before
+      // getDomAnchor started refusing synthetic keys (src/chat.ts). A
+      // diag line names the bad key so we can tell, from the field,
+      // how many pre-fix saves are still floating around.
+      if (saved.anchorKey && !isDurableMessageKey(saved.anchorKey)) {
+        diag(`[chat-resume] discarding synthetic saved anchor key=${saved.anchorKey}`);
+      }
       const tryAnchor = !saved.atBottom
         && saved.anchorKey && typeof saved.anchorOffsetPx === 'number'
+        && isDurableMessageKey(saved.anchorKey)
         ? chat.restoreDomAnchor({ key: saved.anchorKey, offsetPx: saved.anchorOffsetPx })
         : false;
       if (tryAnchor) {
@@ -762,6 +779,19 @@ let aroundDrillInFlight: { key: string; promise: Promise<boolean> } | null = nul
 const aroundFetchInFlight = new Map<string, Promise<any>>();
 
 function fetchAroundWindowOnce(chatId: string, targetMessageId: string): Promise<any> {
+  // Read-side guard (shared by drillViaAroundWindow, prewarmPinnedWindows,
+  // prewarmActivityWindows — every caller of this function): a saved
+  // anchor or prewarm target keyed by a client-only SYNTHETIC id
+  // (pending:turn:…, turn:status, gap:…, …) has no server-side row to
+  // build an `around=` window on. This is the round trip §1 of
+  // UX_DETERMINISM_PLAN.md caught (`around=pending:turn:umsg_…`, n=0,
+  // field 2026-09-05). Skip the fetch and report shape-compatible
+  // "not found" so every caller falls back exactly as it would for a
+  // deleted/missing target — never issue the doomed request.
+  if (!isDurableMessageKey(targetMessageId)) {
+    diag(`[around-window] skip synthetic key chat=${chatId} key=${targetMessageId}`);
+    return Promise.resolve({ targetFound: false, messages: [] });
+  }
   const key = `${chatId}::${targetMessageId}`;
   const existing = aroundFetchInFlight.get(key);
   if (existing) return existing;
