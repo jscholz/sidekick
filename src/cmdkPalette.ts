@@ -495,7 +495,14 @@ async function activate(hit: Hit) {
   // optimistic highlight flips now, and a drawer click landing during
   // the await supersedes this — the paint below then refuses.
   const targetMessageId = hit.kind === 'message' ? String(hit.message_id) : undefined;
-  const tok = switchCtl.begin(id, targetMessageId);
+  // 'cmdk' is user-class, so this begin() is never refused; the null
+  // branch exists because begin()'s contract allows it, not because this
+  // path can hit it.
+  const tok = switchCtl.begin(id, 'cmdk', targetMessageId);
+  if (!tok) {
+    diag(`cmdk: switch to ${id} refused`);
+    return;
+  }
   // Palette pick = user intent to view — the seen effects (unread chip
   // + badge clear, activity read-mark) fire at the pick, not after the
   // resumeSession fetch commits the view. (The message-hit DRILL branch

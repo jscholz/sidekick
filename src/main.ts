@@ -1704,6 +1704,41 @@ async function boot() {
           const deliberateSid = urlChatId || restoredSid || pinnedTop || null;
           const sid = deliberateSid || backend.getCurrentSessionId?.();
           let bootRendered = false;
+          // ── Authority gate (UX_DETERMINISM_PLAN §5 Phase 1.1) ───────
+          // This whole block is a PROGRAMMATIC navigation, and it runs
+          // late by construction: sessionDrawer.init and its sessions
+          // fetch happen before backend.connect, so on a slow radio the
+          // drawer is painted and tappable for seconds before
+          // onStatus(connected) gets us here. If the user has already
+          // chosen a chat in that window, that choice is the newest
+          // intent and boot has nothing left to decide — abandon the
+          // restore AND the most-recent fallback rather than race them.
+          // switchCtl.begin() would refuse a 'boot'/'fallback' origin
+          // anyway (that is the safety net, and it also covers a tap
+          // that lands mid-await); this check is the readable intent,
+          // and it keeps us from firing the resume fetches at all.
+          // Field 2026-09-06: without it, boot's begin() took the newer
+          // generation 3s after his tap and repainted a different chat
+          // under him.
+          const userAlreadyNavigated = switchCtl.hasUserNavigated();
+          if (userAlreadyNavigated) {
+            diag('boot: user already navigated, restore abandoned');
+          }
+          // Consume the deep-link params on EVERY path that settles the
+          // landing (including the abandoned one) so a later reload
+          // doesn't re-drill and the address bar stays clean.
+          const clearUrlParams = () => {
+            if (!urlChatId && !urlMsgId) return;
+            try {
+              const cleaned = new URL(location.href);
+              cleaned.searchParams.delete('chat');
+              cleaned.searchParams.delete('msg');
+              history.replaceState({}, '', cleaned.toString());
+            } catch { /* noop */ }
+          };
+          // Hoisted out of the try below so the fallback can ask whether
+          // boot's own switch is still the live one.
+          let bootTok: switchCtl.SwitchToken | null = null;
           // #204 (field 2026-06-12, CAP): resumeSession NEVER throws —
           // failures come back as `result.error` with an empty
           // transcript, so the try/catch around the boot resume was
@@ -1721,7 +1756,7 @@ async function boot() {
             if (result?.error) diag(`boot: resume ${sessionId} still failing after retries: ${result.error}`);
             return result;
           };
-          if (sid) {
+          if (sid && !userAlreadyNavigated) {
             // Seed the drawer highlight immediately — before
             // resumeSession's network fetch resolves — so it doesn't
             // briefly flash the placeholder row. ONLY when we're
@@ -1743,42 +1778,48 @@ async function boot() {
               // Boot restore is a switch (from nothing) — mint a real
               // switch token so a user click landing DURING the slow
               // boot fetch supersedes it and this paint refuses.
-              const bootTok = switchCtl.begin(sid, urlMsgId ?? undefined);
-              const result: any = await resumeWithRetry(sid);
-              const messages = result.messages || [];
-              if (messages.length) {
-                // Pass urlMsgId as targetMessageId so the existing
-                // pin-drawer-jump scroll-to machinery kicks in: it
-                // walks the rendered transcript for a matching
-                // data-message-id and scrolls it to the viewport top.
-                // If the target isn't in the initial page,
-                // drillToOlderMessage paginates back until found.
-                replaySessionMessages(
-                  bootTok, messages,
-                  { firstId: result.firstId ?? null, hasMore: !!result.hasMore },
-                  urlMsgId ?? undefined,
-                  result.inflight,
-                );
-                bootRendered = true;
+              //
+              // A ?chat= landing is 'deep-link': the OS opened the URL,
+              // but a human tapped the notification behind it, so it
+              // carries user authority. Everything else here (last-viewed
+              // snapshot, top pin, adapter default) is 'boot' — the app
+              // guessing, and refusable.
+              bootTok = switchCtl.begin(sid, urlChatId ? 'deep-link' : 'boot', urlMsgId ?? undefined);
+              // Refused: a user navigation slipped in between the
+              // synchronous guard above and here. Leave the pane exactly
+              // as the user's switch left it — no paint, no resume, no
+              // fetch. Falls through to the fallback block, which asks
+              // the same question again and also declines.
+              if (!bootTok) {
+                diag(`boot: restore of ${sid} refused — user navigated first`);
+              } else {
+                const result: any = await resumeWithRetry(sid);
+                const messages = result.messages || [];
+                if (messages.length) {
+                  // Pass urlMsgId as targetMessageId so the existing
+                  // pin-drawer-jump scroll-to machinery kicks in: it
+                  // walks the rendered transcript for a matching
+                  // data-message-id and scrolls it to the viewport top.
+                  // If the target isn't in the initial page,
+                  // drillToOlderMessage paginates back until found.
+                  replaySessionMessages(
+                    bootTok, messages,
+                    { firstId: result.firstId ?? null, hasMore: !!result.hasMore },
+                    urlMsgId ?? undefined,
+                    result.inflight,
+                  );
+                  bootRendered = true;
+                }
+                // Release the optimistic claim (mirrors resume()'s finally):
+                // the paint committed viewed; leaving optimistic set would
+                // just be a stale pointer for the next click to overwrite.
+                switchCtl.clearOptimisticIfCurrent(bootTok);
               }
-              // Release the optimistic claim (mirrors resume()'s finally):
-              // the paint committed viewed; leaving optimistic set would
-              // just be a stale pointer for the next click to overwrite.
-              switchCtl.clearOptimisticIfCurrent(bootTok);
             } catch (e: any) {
               diag(`boot: resume ${sid} failed: ${e.message}`);
             }
-            // Clear the URL params after consuming them so a reload
-            // doesn't re-drill (and the address bar stays clean).
-            if (urlChatId || urlMsgId) {
-              try {
-                const cleaned = new URL(location.href);
-                cleaned.searchParams.delete('chat');
-                cleaned.searchParams.delete('msg');
-                history.replaceState({}, '', cleaned.toString());
-              } catch { /* noop */ }
-            }
           }
+          clearUrlParams();
           // Boot-UX: if nothing got rendered above
           // (no snapshot, OR snapshot's session no longer exists, OR
           // adapter's activeChatId points to an unsent stub), pick the
@@ -1786,10 +1827,18 @@ async function boot() {
           // "selected stub but body shows another chat" divergence and
           // gives the user a sane landing state on fresh installs that
           // already have history (cross-device, cross-platform).
-          if (!bootRendered) {
+          if (!bootRendered && !userAlreadyNavigated) {
             try {
               const sessions = await backend.listSessions(50);
-              if (sessions.length > 0) {
+              // Re-ask AFTER the await, synchronously with the begin()
+              // below: a tap that lands during the list fetch must win.
+              // When boot minted a token, "still ours" is just "nothing
+              // superseded it"; when it didn't (no sid, or the restore
+              // was refused), fall back to the authority flag.
+              const stillOurs = bootTok ? switchCtl.isCurrent(bootTok) : !switchCtl.hasUserNavigated();
+              if (!stillOurs) {
+                diag('boot: most-recent fallback abandoned — user navigated');
+              } else if (sessions.length > 0) {
                 // #239 residual #225: if the deliberate target (urlChatId /
                 // restoredSid / pinnedTop) STILL EXISTS in the session list,
                 // land on IT even though its resume came back empty — an
@@ -1804,16 +1853,30 @@ async function boot() {
                 diag(chosen
                   ? `boot: empty resume, staying on deliberate target: ${target.id}`
                   : `boot: no rendered session, picking most recent: ${target.id}`);
-                const fallbackTok = switchCtl.begin(target.id);
-                const result: any = await resumeWithRetry(target.id);
-                replaySessionMessages(
-                  fallbackTok,
-                  result.messages || [],
-                  { firstId: result.firstId ?? null, hasMore: !!result.hasMore },
-                  undefined,
-                  result.inflight,
-                );
-                switchCtl.clearOptimisticIfCurrent(fallbackTok);
+                // The fallback INHERITS the authority of the landing it
+                // is completing. Staying on a deliberate ?chat= target
+                // whose resume came back empty is still the user's
+                // deep-link intent (#239 residual #225) and must not be
+                // refused by the deep-link's own begin() a few lines up;
+                // a bare most-recent guess is the app guessing, i.e.
+                // 'fallback'. Either way the stillOurs check above has
+                // already established that no user navigation is pending.
+                const fallbackOrigin: switchCtl.NavOrigin =
+                  chosen && urlChatId ? 'deep-link' : 'fallback';
+                const fallbackTok = switchCtl.begin(target.id, fallbackOrigin);
+                if (!fallbackTok) {
+                  diag(`boot: fallback to ${target.id} refused — user navigated first`);
+                } else {
+                  const result: any = await resumeWithRetry(target.id);
+                  replaySessionMessages(
+                    fallbackTok,
+                    result.messages || [],
+                    { firstId: result.firstId ?? null, hasMore: !!result.hasMore },
+                    undefined,
+                    result.inflight,
+                  );
+                  switchCtl.clearOptimisticIfCurrent(fallbackTok);
+                }
               }
             } catch (e: any) {
               diag(`boot: most-recent fallback failed: ${e.message}`);

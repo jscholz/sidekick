@@ -40,7 +40,7 @@ import { showTranscriptLoading } from './transcript/index.ts';
 import { clearEdgeLoader } from './chat.ts';
 import * as transcriptStore from './transcript/store.ts';
 import * as switchCtl from './switchController.ts';
-import type { SwitchToken } from './switchController.ts';
+import type { NavOrigin, SwitchToken } from './switchController.ts';
 import * as sessionPins from './sessionPins.ts';
 import * as sessionIdentity from './sessionIdentity.ts';
 import * as sessionAnnounce from './sessionAnnounce.ts';
@@ -359,7 +359,7 @@ function navigateByKey(direction: -1 | 1): boolean {
   // handler uses, so behavior (scroll-save + switch-then-load clear +
   // replay + drawer refresh) is identical to a click; resume() handles
   // the synchronous transcript blank-and-spinner internally.
-  resume(targetId).catch((e: any) => {
+  resume(targetId, 'keyboard').catch((e: any) => {
     diag(`sessionDrawer: arrow-nav resume failed: ${e?.message || e}`);
   });
   return true;
@@ -408,7 +408,7 @@ export function drillTo(id: string, targetMessageId?: string): Promise<void> {
   // settle window (chat.holdUnpinnedFor) and re-anchors the target if a
   // late re-sort moves it (sessionResume.ts drillScrollTo settle loop).
   noteViewIntent(id);
-  return resume(id, targetMessageId).catch((e: any) => {
+  return resume(id, 'drill', targetMessageId).catch((e: any) => {
     diag(`sessionDrawer: drillTo resume failed: ${e?.message || e}`);
   });
 }
@@ -1657,7 +1657,7 @@ function renderRow(s: any, activeId: string, pinned = false): HTMLLIElement {
     // spinner synchronously (after it saves the leaving chat's scroll
     // position) so the old chat's content doesn't linger until the new
     // one loads.
-    resume(s.id);
+    resume(s.id, 'tap');
   };
   // macOS Chrome / Safari fire `contextmenu` on ctrl+click instead
   // of `click`, so the onclick handler above never sees that
@@ -2004,7 +2004,12 @@ async function deleteSessionAtomic(id: string): Promise<void> {
       ?? alive(sessionPins.topPinned())
       ?? (cachedSessions[0]?.id ?? null);
     if (candidate) {
-      void resume(candidate);
+      // 'delete-landing', not 'fallback': this is the direct continuation
+      // of the user's delete gesture, not a background race against it.
+      // Classified programmatic it would be REFUSED (the user has always
+      // navigated by the time they can delete) and they'd be left staring
+      // at the deleted chat's transcript.
+      void resume(candidate, 'delete-landing');
     } else {
       document.getElementById('transcript')?.replaceChildren();
     }
@@ -2104,7 +2109,7 @@ function afterNextPaint(): Promise<void> {
   });
 }
 
-async function resume(id: string, targetMessageId?: string) {
+async function resume(id: string, origin: NavOrigin, targetMessageId?: string) {
   // Adopt the trace from the click handler if present.
   const t = pendingTrace;
   pendingTrace = null;
@@ -2120,7 +2125,17 @@ async function resume(id: string, targetMessageId?: string) {
   // highlight synchronously (so a racing refresh() paints THIS row, not
   // the old one). The token authorizes every render below; superseded
   // continuations bail at switchCtl.isCurrent(tok).
-  const tok = switchCtl.begin(id, targetMessageId);
+  const tok = switchCtl.begin(id, origin, targetMessageId);
+  // Refused by the authority rule (a programmatic origin after the user
+  // has navigated). Nothing was claimed, so there is nothing to undo —
+  // just abandon before the transcript blank/spinner below. Every origin
+  // that reaches resume() today is user-class, so this is a guard against
+  // a future caller, not a live path.
+  if (!tok) {
+    t?.trace('resume-refused', `origin=${origin}`);
+    diag(`sessionDrawer: resume ${id} refused — ${origin} cannot supersede a user navigation`);
+    return;
+  }
   // Switch-back fast paint: the in-memory transcriptStore retains this
   // session's durable rows from an earlier visit this app-session (SSE
   // keeps background chats current in place). When present AND tail-
